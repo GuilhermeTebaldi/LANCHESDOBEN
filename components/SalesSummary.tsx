@@ -341,6 +341,10 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
   );
   const totalProfit = useMemo(() => totalRevenue - totalCost, [totalRevenue, totalCost]);
   const appChannelSummary = useMemo(() => buildAppChannelSummary(sales), [sales]);
+  const reportRevenueExcludingApps = useMemo(
+    () => roundMoney(Math.max(0, totalRevenue - appChannelSummary.totalRevenue)),
+    [appChannelSummary.totalRevenue, totalRevenue]
+  );
   const appOriginRows = useMemo(
     () =>
       APP_ORIGINS.map((origin) => {
@@ -1147,8 +1151,8 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
         <>
           <div className="qb-sales-stats flex flex-nowrap gap-4 overflow-x-auto pb-1">
             <div className="qb-sales-stat-card bg-red-600 text-white p-6 rounded-3xl shadow-lg">
-              <p className="text-[10px] font-bold uppercase tracking-widest opacity-80 mb-1">Faturamento</p>
-              <h4 className="text-3xl font-black">{formatCurrency(totalRevenue)}</h4>
+              <p className="text-[10px] font-bold uppercase tracking-widest opacity-80 mb-1">Faturamento (sem Apps)</p>
+              <h4 className="text-3xl font-black">{formatCurrency(reportRevenueExcludingApps)}</h4>
             </div>
             <div className="qb-sales-stat-card bg-slate-800 text-white p-6 rounded-3xl shadow-lg">
               <p className="text-[10px] font-bold uppercase tracking-widest opacity-80 mb-1">Compras (Insumos)</p>
