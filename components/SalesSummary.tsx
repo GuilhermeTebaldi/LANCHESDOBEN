@@ -3,6 +3,7 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { DailySalesHistoryEntry, Ingredient, Sale, SaleOrigin, StockEntry } from '../types';
 import { APP_ORIGINS, AppOrigin, buildAppChannelSummary } from '../utils/appChannelSummary';
+import { getReceiptPaperWidthMm } from '../utils/receiptPaper';
 import { formatStockQuantityByUnit, getRecipeQuantityUnitLabel } from '../utils/recipe';
 
 interface SalesSummaryProps {
@@ -28,6 +29,7 @@ interface SalesSummaryProps {
 
 type SummaryTab = 'REPORT' | 'CASH';
 type CashPurchaseType = 'INGREDIENT' | 'OTHER';
+type ReportPrintMode = 'FULL' | 'SUMMARY';
 
 interface HistoryDrawerEntry {
   entry: DailySalesHistoryEntry;
@@ -148,14 +150,24 @@ const escapeHtml = (value: string): string =>
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
 
-const THERMAL_REPORT_COLUMNS = 48;
-const THERMAL_REPORT_WIDTH_MM = 72;
-const THERMAL_REPORT_SEPARATOR = '-'.repeat(THERMAL_REPORT_COLUMNS);
+const THERMAL_DEFAULT_COLUMNS = 40;
+const THERMAL_MIN_COLUMNS = 30;
+const THERMAL_MAX_COLUMNS = 48;
+const THERMAL_COLUMNS_PER_MM = 0.55;
+const THERMAL_FULL_REPORT_COLUMNS = 48;
+const THERMAL_FULL_BODY_WIDTH_MM = 72;
+const THERMAL_FULL_PAGE_WIDTH_MM = 80;
 
 const normalizeThermalText = (value: string): string => value.replace(/\s+/g, ' ').trim();
 
 const formatThermalCurrency = (value: number): string =>
   `R$ ${(Number.isFinite(value) ? value : 0).toFixed(2).replace('.', ',')}`;
+
+const getThermalColumnsForPaperWidth = (paperWidthMm: number): number => {
+  if (!Number.isFinite(paperWidthMm) || paperWidthMm <= 0) return THERMAL_DEFAULT_COLUMNS;
+  const estimated = Math.round(paperWidthMm * THERMAL_COLUMNS_PER_MM);
+  return Math.min(THERMAL_MAX_COLUMNS, Math.max(THERMAL_MIN_COLUMNS, estimated));
+};
 
 const fitThermalText = (value: string, width: number): string => {
   const normalized = normalizeThermalText(value);
@@ -164,7 +176,7 @@ const fitThermalText = (value: string, width: number): string => {
   return normalized.slice(0, width);
 };
 
-const alignThermalPair = (left: string, right: string, width = THERMAL_REPORT_COLUMNS): string => {
+const alignThermalPair = (left: string, right: string, width = THERMAL_DEFAULT_COLUMNS): string => {
   const leftText = normalizeThermalText(left);
   const rightText = normalizeThermalText(right);
   if (!rightText) return fitThermalText(leftText, width);
@@ -177,7 +189,7 @@ const alignThermalPair = (left: string, right: string, width = THERMAL_REPORT_CO
   return `${fittedLeft}${' '.repeat(spaces)}${rightText}`;
 };
 
-const centerThermalText = (value: string, width = THERMAL_REPORT_COLUMNS): string => {
+const centerThermalText = (value: string, width = THERMAL_DEFAULT_COLUMNS): string => {
   const fitted = fitThermalText(value, width);
   const remaining = width - fitted.length;
   if (remaining <= 0) return fitted;
@@ -186,7 +198,7 @@ const centerThermalText = (value: string, width = THERMAL_REPORT_COLUMNS): strin
   return `${' '.repeat(leftPad)}${fitted}${' '.repeat(rightPad)}`;
 };
 
-const wrapThermalText = (value: string, width = THERMAL_REPORT_COLUMNS): string[] => {
+const wrapThermalText = (value: string, width = THERMAL_DEFAULT_COLUMNS): string[] => {
   const normalized = normalizeThermalText(value);
   if (!normalized) return [''];
 
@@ -502,7 +514,8 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
     (
       report: DailySalesHistoryEntry,
       reportSales: Sale[] = [],
-      existingWindow?: Window | null
+      existingWindow?: Window | null,
+      mode: ReportPrintMode = 'FULL'
     ) => {
       const printWindow =
         existingWindow && !existingWindow.closed
@@ -510,13 +523,39 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
           : window.open('', '_blank', 'width=420,height=980');
       if (!printWindow) return false;
 
+      const isSummaryMode = mode === 'SUMMARY';
+      const paperWidthMm = isSummaryMode ? getReceiptPaperWidthMm() : THERMAL_FULL_BODY_WIDTH_MM;
+      const pageWidthMm = isSummaryMode ? paperWidthMm : THERMAL_FULL_PAGE_WIDTH_MM;
+      const thermalColumns = isSummaryMode
+        ? getThermalColumnsForPaperWidth(paperWidthMm)
+        : THERMAL_FULL_REPORT_COLUMNS;
+      const reportFontSizePx = isSummaryMode ? 10 : 12;
+      const reportLineHeight = isSummaryMode ? 1.25 : 1.35;
+      const reportFontWeight = isSummaryMode ? 700 : 800;
+      const reportPadding = isSummaryMode ? '2.5mm 2mm' : '2mm';
+      const thermalSeparator = '-'.repeat(thermalColumns);
+      const align = (left: string, right = '') => alignThermalPair(left, right, thermalColumns);
+      const center = (value: string) => centerThermalText(value, thermalColumns);
+      const wrap = (value: string) => wrapThermalText(value, thermalColumns);
       const closedAt = toDate(report.closedAt);
       const cashExpenses = roundMoney(Math.max(0, Number(report.cashExpenses) || 0));
-      const estimatedCash = report.openingCash + report.totalRevenue - report.totalPurchases - cashExpenses;
+      const estimatedCash = roundMoney(report.openingCash + report.totalRevenue - report.totalPurchases - cashExpenses);
       const orderedSales = [...reportSales].sort(
         (a, b) => toDate(a.timestamp).getTime() - toDate(b.timestamp).getTime()
       );
       const paymentSummary = summarizePaymentMethods(orderedSales);
+      const paymentSummaryRows = [
+        ...paymentSummary.rows,
+        ...(paymentSummary.unclassifiedValue > 0
+          ? [{ label: 'Nao informado', value: paymentSummary.unclassifiedValue }]
+          : []),
+      ].filter((row) => row.value > 0);
+      const paymentTotal = roundMoney(
+        paymentSummaryRows.reduce((sum, row) => sum + row.value, 0)
+      );
+      const paymentDifference = roundMoney(paymentTotal - report.totalRevenue);
+      const appChannels = buildAppChannelSummary(orderedSales);
+      const localRevenue = roundMoney(Math.max(0, report.totalRevenue - appChannels.totalRevenue));
 
       const productSummary = orderedSales.reduce<Record<string, { qty: number; revenue: number; cost: number }>>(
         (acc, sale) => {
@@ -536,84 +575,126 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
       const closedDate = closedAt.toLocaleDateString('pt-BR');
       const closedTime = closedAt.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 
-      reportLines.push(centerThermalText('RELATORIO DIARIO DE VENDAS'));
-      reportLines.push(alignThermalPair(`Data: ${closedDate}`, `Hora: ${closedTime}`));
-      reportLines.push(THERMAL_REPORT_SEPARATOR);
-      reportLines.push(alignThermalPair('Caixa Inicial:', formatThermalCurrency(report.openingCash)));
-      reportLines.push(alignThermalPair('Faturamento:', formatThermalCurrency(report.totalRevenue)));
-      reportLines.push(alignThermalPair('Compras (Insumos):', formatThermalCurrency(report.totalPurchases)));
-      reportLines.push(alignThermalPair('Lucro:', formatThermalCurrency(report.totalProfit)));
-      reportLines.push(alignThermalPair('Pedidos:', String(report.saleCount)));
-      reportLines.push(alignThermalPair('Saida de Caixa:', formatThermalCurrency(cashExpenses)));
-      reportLines.push(alignThermalPair('Caixa Estimado:', formatThermalCurrency(estimatedCash)));
-      reportLines.push(THERMAL_REPORT_SEPARATOR);
-      reportLines.push(centerThermalText('FORMA PAGAMENTO'));
+      if (mode === 'SUMMARY') {
+        reportLines.push(center('VALORES DE FECHAMENTO'));
+        reportLines.push(center('FECHAMENTO DE CAIXA'));
+        reportLines.push(align(`Data: ${closedDate}`, `Hora: ${closedTime}`));
+        reportLines.push(thermalSeparator);
+        reportLines.push(align('Caixa inicial:', formatThermalCurrency(report.openingCash)));
+        reportLines.push(align('Faturamento bruto:', formatThermalCurrency(report.totalRevenue)));
+        reportLines.push(align('Compras (insumos):', formatThermalCurrency(report.totalPurchases)));
+        reportLines.push(align('Saida de caixa:', formatThermalCurrency(cashExpenses)));
+        reportLines.push(align('Resultado operacional:', formatThermalCurrency(report.totalProfit)));
+        reportLines.push(align('Caixa estimado:', formatThermalCurrency(estimatedCash)));
+        reportLines.push(align('Total de vendas:', String(report.saleCount)));
+        reportLines.push(thermalSeparator);
+        reportLines.push(center('VALORES INFORMADOS'));
+        reportLines.push(thermalSeparator);
 
-      if (orderedSales.length > 0) {
-        paymentSummary.rows.forEach((row) => {
-          reportLines.push(alignThermalPair(row.label, formatThermalCurrency(row.value)));
-        });
-        if (paymentSummary.unclassifiedValue > 0) {
-          reportLines.push(
-            alignThermalPair('Nao informado', formatThermalCurrency(paymentSummary.unclassifiedValue))
-          );
+        if (paymentSummaryRows.length > 0) {
+          paymentSummaryRows.forEach((row) => {
+            reportLines.push(align(row.label, formatThermalCurrency(row.value)));
+          });
+          reportLines.push(thermalSeparator);
+          reportLines.push(align('Total informado:', formatThermalCurrency(paymentTotal)));
+          reportLines.push(align('Diferenca:', formatThermalCurrency(paymentDifference)));
+        } else {
+          reportLines.push('Sem valores por forma de pagamento neste fechamento.');
+        }
+
+        if (orderedSales.length > 0) {
+          reportLines.push(thermalSeparator);
+          reportLines.push(center('CANAIS DE VENDA'));
+          reportLines.push(thermalSeparator);
+          reportLines.push(align('Balcao', formatThermalCurrency(localRevenue)));
+          APP_ORIGINS.forEach((origin) => {
+            const row = appChannels.byOrigin[origin];
+            if (row.revenue <= 0) return;
+            reportLines.push(
+              align(getSaleOriginLabel(origin), formatThermalCurrency(row.revenue))
+            );
+          });
         }
       } else {
-        reportLines.push('Sem detalhamento de vendas para pagamento.');
-      }
+        reportLines.push(center('RELATORIO DIARIO DE VENDAS'));
+        reportLines.push(align(`Data: ${closedDate}`, `Hora: ${closedTime}`));
+        reportLines.push(thermalSeparator);
+        reportLines.push(align('Caixa Inicial:', formatThermalCurrency(report.openingCash)));
+        reportLines.push(align('Faturamento:', formatThermalCurrency(report.totalRevenue)));
+        reportLines.push(align('Compras (Insumos):', formatThermalCurrency(report.totalPurchases)));
+        reportLines.push(align('Lucro:', formatThermalCurrency(report.totalProfit)));
+        reportLines.push(align('Pedidos:', String(report.saleCount)));
+        reportLines.push(align('Saida de Caixa:', formatThermalCurrency(cashExpenses)));
+        reportLines.push(align('Caixa Estimado:', formatThermalCurrency(estimatedCash)));
+        reportLines.push(thermalSeparator);
+        reportLines.push(center('FORMA PAGAMENTO'));
 
-      reportLines.push(THERMAL_REPORT_SEPARATOR);
+        if (orderedSales.length > 0) {
+          paymentSummary.rows.forEach((row) => {
+            reportLines.push(align(row.label, formatThermalCurrency(row.value)));
+          });
+          if (paymentSummary.unclassifiedValue > 0) {
+            reportLines.push(
+              align('Nao informado', formatThermalCurrency(paymentSummary.unclassifiedValue))
+            );
+          }
+        } else {
+          reportLines.push('Sem detalhamento de vendas para pagamento.');
+        }
 
-      if (orderedSales.length > 0) {
-        reportLines.push(centerThermalText('RESUMO POR PRODUTO'));
-        reportLines.push(THERMAL_REPORT_SEPARATOR);
-        Object.entries(productSummary)
-          .sort((a, b) => b[1].qty - a[1].qty || b[1].revenue - a[1].revenue)
-          .forEach(([productName, row]) => {
-            const profit = row.revenue - row.cost;
-            wrapThermalText(productName).forEach((line) => {
+        reportLines.push(thermalSeparator);
+
+        if (orderedSales.length > 0) {
+          reportLines.push(center('RESUMO POR PRODUTO'));
+          reportLines.push(thermalSeparator);
+          Object.entries(productSummary)
+            .sort((a, b) => b[1].qty - a[1].qty || b[1].revenue - a[1].revenue)
+            .forEach(([productName, row]) => {
+              const profit = row.revenue - row.cost;
+              wrap(productName).forEach((line) => {
+                reportLines.push(line);
+              });
+              reportLines.push(align(`Qtd: ${row.qty}`, `Fat: ${formatThermalCurrency(row.revenue)}`));
+              reportLines.push(align(`Cmp: ${formatThermalCurrency(row.cost)}`, `Luc: ${formatThermalCurrency(profit)}`));
+              reportLines.push(thermalSeparator);
+            });
+
+          reportLines.push(center('VENDAS REGISTRADAS'));
+          reportLines.push(thermalSeparator);
+
+          orderedSales.forEach((sale, index) => {
+            const saleDate = toDate(sale.timestamp);
+            const saleHour = saleDate.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+            const saleTotal = Number(sale.total) || 0;
+            const saleCost = Number(sale.totalCost) || 0;
+            const saleProfit = saleTotal - saleCost;
+            const paymentMethod = (sale.payment?.method || 'NAO INFORMADO').toUpperCase();
+            const saleOrigin = getSaleOriginLabel(sale.saleOrigin).toUpperCase();
+            const appOrderValue = Number(sale.appOrderTotal);
+            const appOrderLabel =
+              isAppSaleOrigin(sale.saleOrigin) && Number.isFinite(appOrderValue) && appOrderValue > 0
+                ? formatThermalCurrency(appOrderValue)
+                : '';
+
+            reportLines.push(align(`#${String(index + 1).padStart(3, '0')} ${saleHour}`, paymentMethod));
+            wrap(sale.productName || 'Sem nome').forEach((line) => {
               reportLines.push(line);
             });
-            reportLines.push(alignThermalPair(`Qtd: ${row.qty}`, `Fat: ${formatThermalCurrency(row.revenue)}`));
-            reportLines.push(alignThermalPair(`Cmp: ${formatThermalCurrency(row.cost)}`, `Luc: ${formatThermalCurrency(profit)}`));
-            reportLines.push(THERMAL_REPORT_SEPARATOR);
+            reportLines.push(align(`Canal: ${saleOrigin}`, appOrderLabel ? `App: ${appOrderLabel}` : ''));
+            reportLines.push(align(`Fat: ${formatThermalCurrency(saleTotal)}`, `Cmp: ${formatThermalCurrency(saleCost)}`));
+            reportLines.push(align('Lucro:', formatThermalCurrency(saleProfit)));
+            reportLines.push(thermalSeparator);
           });
-
-        reportLines.push(centerThermalText('VENDAS REGISTRADAS'));
-        reportLines.push(THERMAL_REPORT_SEPARATOR);
-
-        orderedSales.forEach((sale, index) => {
-          const saleDate = toDate(sale.timestamp);
-          const saleHour = saleDate.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
-          const saleTotal = Number(sale.total) || 0;
-          const saleCost = Number(sale.totalCost) || 0;
-          const saleProfit = saleTotal - saleCost;
-          const paymentMethod = (sale.payment?.method || 'NAO INFORMADO').toUpperCase();
-          const saleOrigin = getSaleOriginLabel(sale.saleOrigin).toUpperCase();
-          const appOrderValue = Number(sale.appOrderTotal);
-          const appOrderLabel =
-            isAppSaleOrigin(sale.saleOrigin) && Number.isFinite(appOrderValue) && appOrderValue > 0
-              ? formatThermalCurrency(appOrderValue)
-              : '';
-
-          reportLines.push(alignThermalPair(`#${String(index + 1).padStart(3, '0')} ${saleHour}`, paymentMethod));
-          wrapThermalText(sale.productName || 'Sem nome').forEach((line) => {
-            reportLines.push(line);
-          });
-          reportLines.push(alignThermalPair(`Canal: ${saleOrigin}`, appOrderLabel ? `App: ${appOrderLabel}` : ''));
-          reportLines.push(alignThermalPair(`Fat: ${formatThermalCurrency(saleTotal)}`, `Cmp: ${formatThermalCurrency(saleCost)}`));
-          reportLines.push(alignThermalPair('Lucro:', formatThermalCurrency(saleProfit)));
-          reportLines.push(THERMAL_REPORT_SEPARATOR);
-        });
-      } else {
-        reportLines.push(centerThermalText('DETALHAMENTO DE VENDAS'));
-        reportLines.push(THERMAL_REPORT_SEPARATOR);
-        reportLines.push('Este relatorio nao possui vendas detalhadas.');
-        reportLines.push(THERMAL_REPORT_SEPARATOR);
+        } else {
+          reportLines.push(center('DETALHAMENTO DE VENDAS'));
+          reportLines.push(thermalSeparator);
+          reportLines.push('Este relatorio nao possui vendas detalhadas.');
+          reportLines.push(thermalSeparator);
+        }
       }
 
       reportLines.push('');
-      reportLines.push(centerThermalText('FIM DO RELATORIO'));
+      reportLines.push(center('FIM DO RELATORIO'));
       reportLines.push('');
 
       const html = `<!doctype html>
@@ -630,21 +711,20 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
       background: #fff;
     }
     body {
-      width: ${THERMAL_REPORT_WIDTH_MM}mm;
-      max-width: ${THERMAL_REPORT_WIDTH_MM}mm;
+      width: ${paperWidthMm}mm;
+      max-width: ${paperWidthMm}mm;
       font-family: 'Courier New', Courier, monospace;
-      font-size: 12px;
-      line-height: 1.35;
-      font-weight: 800;
+      font-size: ${reportFontSizePx}px;
+      line-height: ${reportLineHeight};
+      font-weight: ${reportFontWeight};
       color: #000;
-      text-rendering: geometricPrecision;
       -webkit-print-color-adjust: exact;
       print-color-adjust: exact;
     }
     .report {
-      width: ${THERMAL_REPORT_WIDTH_MM}mm;
-      max-width: ${THERMAL_REPORT_WIDTH_MM}mm;
-      padding: 2mm;
+      width: ${paperWidthMm}mm;
+      max-width: ${paperWidthMm}mm;
+      padding: ${reportPadding};
     }
     pre {
       margin: 0;
@@ -656,7 +736,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
       letter-spacing: 0;
     }
     @page {
-      size: 80mm auto;
+      size: ${pageWidthMm}mm auto;
       margin: 0;
     }
     @media screen {
@@ -667,8 +747,8 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
     }
     @media print {
       html, body {
-        width: ${THERMAL_REPORT_WIDTH_MM}mm;
-        max-width: ${THERMAL_REPORT_WIDTH_MM}mm;
+        width: ${paperWidthMm}mm;
+        max-width: ${paperWidthMm}mm;
       }
     }
   </style>
@@ -966,7 +1046,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
                       </div>
                       <button
                         onClick={() => {
-                          printReport(entry, historySales);
+                          printReport(entry, historySales, undefined, 'SUMMARY');
                         }}
                         className="qb-btn-touch bg-slate-900 text-white px-4 py-2 rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-black transition-colors w-full sm:w-auto sm:self-end"
                       >

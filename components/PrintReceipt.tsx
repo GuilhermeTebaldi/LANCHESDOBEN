@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 
 import { DEFAULT_APP_STATE, loadAppState, type AppState } from '../data/appStorage';
 import type { Sale, SaleDraft, SaleOrigin, SalePaymentMethod } from '../types';
+import { getReceiptPaperWidthMm } from '../utils/receiptPaper';
 
 interface PrintReceiptProps {
   receiptId: string;
@@ -35,9 +36,6 @@ interface ReceiptViewModel {
 }
 
 const DEFAULT_RESTAURANT_NAME = 'LANCHESDOBEN';
-const DEFAULT_RECEIPT_PAPER_WIDTH_MM = 58;
-const MIN_RECEIPT_PAPER_WIDTH_MM = 48;
-const MAX_RECEIPT_PAPER_WIDTH_MM = 80;
 
 const moneyFormatter = new Intl.NumberFormat('pt-BR', {
   style: 'currency',
@@ -74,18 +72,6 @@ const getRestaurantName = (): string => {
   if (typeof window === 'undefined') return DEFAULT_RESTAURANT_NAME;
   const local = normalizeText(window.localStorage.getItem('qb_restaurant_name'));
   return local || DEFAULT_RESTAURANT_NAME;
-};
-
-const clampPaperWidthMm = (value: number): number =>
-  Math.min(MAX_RECEIPT_PAPER_WIDTH_MM, Math.max(MIN_RECEIPT_PAPER_WIDTH_MM, Math.round(value)));
-
-const getReceiptPaperWidthMm = (): number => {
-  if (typeof window === 'undefined') return DEFAULT_RECEIPT_PAPER_WIDTH_MM;
-
-  const raw = window.localStorage.getItem('qb_receipt_paper_width_mm');
-  const parsed = raw ? Number(raw) : NaN;
-  if (!Number.isFinite(parsed)) return DEFAULT_RECEIPT_PAPER_WIDTH_MM;
-  return clampPaperWidthMm(parsed);
 };
 
 const toDate = (value: unknown): Date | null => {
