@@ -553,7 +553,6 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
       const paymentTotal = roundMoney(
         paymentSummaryRows.reduce((sum, row) => sum + row.value, 0)
       );
-      const paymentDifference = roundMoney(paymentTotal - report.totalRevenue);
       const appChannels = buildAppChannelSummary(orderedSales);
       const localRevenue = roundMoney(Math.max(0, report.totalRevenue - appChannels.totalRevenue));
 
@@ -597,7 +596,6 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
           });
           reportLines.push(thermalSeparator);
           reportLines.push(align('Total informado:', formatThermalCurrency(paymentTotal)));
-          reportLines.push(align('Diferenca:', formatThermalCurrency(paymentDifference)));
         } else {
           reportLines.push('Sem valores por forma de pagamento neste fechamento.');
         }
