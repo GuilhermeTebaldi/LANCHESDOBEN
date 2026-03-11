@@ -152,9 +152,10 @@ const escapeHtml = (value: string): string =>
     .replace(/'/g, '&#39;');
 
 const THERMAL_DEFAULT_COLUMNS = 40;
-const THERMAL_MIN_COLUMNS = 30;
+const THERMAL_MIN_COLUMNS = 20;
 const THERMAL_MAX_COLUMNS = 48;
 const THERMAL_COLUMNS_PER_MM = 0.55;
+const THERMAL_COLUMN_SAFETY_OFFSET = 1;
 const THERMAL_FULL_REPORT_COLUMNS = 48;
 const THERMAL_FULL_BODY_WIDTH_MM = 72;
 const THERMAL_FULL_PAGE_WIDTH_MM = 80;
@@ -166,7 +167,7 @@ const formatThermalCurrency = (value: number): string =>
 
 const getThermalColumnsForPaperWidth = (paperWidthMm: number): number => {
   if (!Number.isFinite(paperWidthMm) || paperWidthMm <= 0) return THERMAL_DEFAULT_COLUMNS;
-  const estimated = Math.round(paperWidthMm * THERMAL_COLUMNS_PER_MM);
+  const estimated = Math.round(paperWidthMm * THERMAL_COLUMNS_PER_MM) - THERMAL_COLUMN_SAFETY_OFFSET;
   return Math.min(THERMAL_MAX_COLUMNS, Math.max(THERMAL_MIN_COLUMNS, estimated));
 };
 
@@ -528,13 +529,17 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
       const isSummaryMode = mode === 'SUMMARY';
       const paperWidthMm = isSummaryMode ? getReceiptPaperWidthMm() : THERMAL_FULL_BODY_WIDTH_MM;
       const pageWidthMm = isSummaryMode ? paperWidthMm : THERMAL_FULL_PAGE_WIDTH_MM;
+      const reportHorizontalPaddingMm = 2;
+      const reportVerticalPaddingMm = isSummaryMode ? 2.5 : 2;
+      const reportPadding = `${reportVerticalPaddingMm}mm ${reportHorizontalPaddingMm}mm`;
+      // Use only the printable inner area so thermal text columns do not clip on paper edges.
+      const reportContentWidthMm = Math.max(1, paperWidthMm - reportHorizontalPaddingMm * 2);
       const thermalColumns = isSummaryMode
-        ? getThermalColumnsForPaperWidth(paperWidthMm)
+        ? getThermalColumnsForPaperWidth(reportContentWidthMm)
         : THERMAL_FULL_REPORT_COLUMNS;
       const reportFontSizePx = isSummaryMode ? 10 : 12;
       const reportLineHeight = isSummaryMode ? 1.25 : 1.35;
       const reportFontWeight = isSummaryMode ? 700 : 800;
-      const reportPadding = isSummaryMode ? '2.5mm 2mm' : '2mm';
       const thermalSeparator = '-'.repeat(thermalColumns);
       const align = (left: string, right = '') => alignThermalPair(left, right, thermalColumns);
       const center = (value: string) => centerThermalText(value, thermalColumns);
