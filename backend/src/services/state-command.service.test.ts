@@ -320,6 +320,158 @@ test('draft cash payment computes change and blocks insufficient cash on confirm
   assert.equal(paid.saleDrafts?.[0]?.status, 'PAID');
 });
 
+test('draft divided payment by people confirms with independent methods', () => {
+  const base = createBaseState();
+  const withDraft = applyStateCommand(base, { type: 'SALE_DRAFT_CREATE', draftId: 'draft-split-people' });
+  const withItem = applyStateCommand(withDraft, {
+    type: 'SALE_DRAFT_ADD_ITEM',
+    draftId: 'draft-split-people',
+    productId: 'p-burger',
+    quantity: 2,
+  });
+
+  const pending = applyStateCommand(withItem, {
+    type: 'SALE_DRAFT_FINALIZE',
+    draftId: 'draft-split-people',
+    paymentMethod: 'DIVIDIDO',
+    splitMode: 'PEOPLE',
+    splitCount: 2,
+    splitPayments: [
+      { method: 'PIX', amount: 20, sequence: 1 },
+      { method: 'DEBITO', amount: 20, sequence: 2 },
+    ],
+  });
+
+  assert.equal(pending.saleDrafts?.[0]?.payment.method, 'DIVIDIDO');
+  assert.equal(pending.saleDrafts?.[0]?.payment.splitMode, 'PEOPLE');
+  assert.equal(pending.saleDrafts?.[0]?.payment.splitCount, 2);
+  assert.equal(pending.saleDrafts?.[0]?.payment.splitPayments?.length, 2);
+
+  const paid = applyStateCommand(pending, {
+    type: 'SALE_DRAFT_CONFIRM_PAID',
+    draftId: 'draft-split-people',
+  });
+
+  assert.equal(paid.saleDrafts?.[0]?.status, 'PAID');
+  assert.equal(paid.sales.length, 1);
+  assert.equal(paid.sales[0]?.payment?.method, 'DIVIDIDO');
+  assert.equal(paid.sales[0]?.payment?.splitPayments?.length, 2);
+});
+
+test('draft divided mixed payment computes cash totals from partial cash parcel', () => {
+  const base = createBaseState();
+  const withDraft = applyStateCommand(base, { type: 'SALE_DRAFT_CREATE', draftId: 'draft-split-mixed' });
+  const withItem = applyStateCommand(withDraft, {
+    type: 'SALE_DRAFT_ADD_ITEM',
+    draftId: 'draft-split-mixed',
+    productId: 'p-burger',
+  });
+
+  const pending = applyStateCommand(withItem, {
+    type: 'SALE_DRAFT_FINALIZE',
+    draftId: 'draft-split-mixed',
+    paymentMethod: 'DIVIDIDO',
+    splitMode: 'MIXED',
+    splitCount: 1,
+    splitPayments: [
+      { method: 'PIX', amount: 10, sequence: 1 },
+      { method: 'DINHEIRO', amount: 10, cashReceived: 12, sequence: 2 },
+    ],
+  });
+
+  const paid = applyStateCommand(pending, {
+    type: 'SALE_DRAFT_CONFIRM_PAID',
+    draftId: 'draft-split-mixed',
+  });
+
+  const draftPayment = paid.saleDrafts?.[0]?.payment;
+  assert.equal(draftPayment?.method, 'DIVIDIDO');
+  assert.equal(draftPayment?.cashReceived, 12);
+  assert.equal(draftPayment?.change, 2);
+  assert.equal(draftPayment?.splitPayments?.[1]?.change, 2);
+});
+
+test('draft divided payment rejects mismatched split totals', () => {
+  const base = createBaseState();
+  const withDraft = applyStateCommand(base, { type: 'SALE_DRAFT_CREATE', draftId: 'draft-split-invalid-total' });
+  const withItem = applyStateCommand(withDraft, {
+    type: 'SALE_DRAFT_ADD_ITEM',
+    draftId: 'draft-split-invalid-total',
+    productId: 'p-burger',
+  });
+
+  assert.throws(
+    () =>
+      applyStateCommand(withItem, {
+        type: 'SALE_DRAFT_FINALIZE',
+        draftId: 'draft-split-invalid-total',
+        paymentMethod: 'DIVIDIDO',
+        splitMode: 'MIXED',
+        splitCount: 1,
+        splitPayments: [
+          { method: 'PIX', amount: 6, sequence: 1 },
+          { method: 'DEBITO', amount: 6, sequence: 2 },
+        ],
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof HttpError);
+      assert.equal(error.statusCode, 422);
+      return true;
+    }
+  );
+});
+
+test('draft divided payment confirm revalidates tampered cash parcel', () => {
+  const base = createBaseState();
+  const withDraft = applyStateCommand(base, { type: 'SALE_DRAFT_CREATE', draftId: 'draft-split-tamper' });
+  const withItem = applyStateCommand(withDraft, {
+    type: 'SALE_DRAFT_ADD_ITEM',
+    draftId: 'draft-split-tamper',
+    productId: 'p-burger',
+  });
+  const pending = applyStateCommand(withItem, {
+    type: 'SALE_DRAFT_FINALIZE',
+    draftId: 'draft-split-tamper',
+    paymentMethod: 'DIVIDIDO',
+    splitMode: 'MIXED',
+    splitCount: 1,
+    splitPayments: [
+      { method: 'DINHEIRO', amount: 10, cashReceived: 10, sequence: 1 },
+      { method: 'PIX', amount: 10, sequence: 2 },
+    ],
+  });
+
+  const tampered = {
+    ...pending,
+    saleDrafts: pending.saleDrafts?.map((draft) =>
+      draft.id === 'draft-split-tamper'
+        ? {
+            ...draft,
+            payment: {
+              ...draft.payment,
+              splitPayments: (draft.payment.splitPayments || []).map((split, index) =>
+                index === 0 ? { ...split, cashReceived: 5 } : split
+              ),
+            },
+          }
+        : draft
+    ),
+  } as FrontAppState;
+
+  assert.throws(
+    () =>
+      applyStateCommand(tampered, {
+        type: 'SALE_DRAFT_CONFIRM_PAID',
+        draftId: 'draft-split-tamper',
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof HttpError);
+      assert.equal(error.statusCode, 409);
+      return true;
+    }
+  );
+});
+
 test('draft app sale keeps channel metadata and applies real app amount to revenue', () => {
   const base = createBaseState();
   const withSecondProduct: FrontAppState = {

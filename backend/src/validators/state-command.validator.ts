@@ -53,9 +53,19 @@ const baseCommandSchema = z.object({
   commandId: idSchema.optional(),
 });
 
-const salePaymentMethodSchema = z.enum(['PIX', 'DEBITO', 'CREDITO', 'DINHEIRO']);
+const saleBasePaymentMethodSchema = z.enum(['PIX', 'DEBITO', 'CREDITO', 'DINHEIRO']);
+const salePaymentMethodSchema = z.enum(['PIX', 'DEBITO', 'CREDITO', 'DINHEIRO', 'DIVIDIDO']);
+const salePaymentSplitModeSchema = z.enum(['PEOPLE', 'MIXED']);
 const saleCustomerTypeSchema = z.enum(['BALCAO', 'ENTREGA']);
 const saleOriginSchema = z.enum(['LOCAL', 'IFOOD', 'APP99', 'KEETA']);
+
+const salePaymentSplitItemSchema = z.object({
+  sequence: z.coerce.number().int().positive().optional(),
+  label: z.string().trim().min(1).max(80).optional(),
+  method: saleBasePaymentMethodSchema,
+  amount: z.coerce.number().finite().positive(),
+  cashReceived: z.coerce.number().finite().min(0).optional(),
+});
 
 const saleRegisterCommandSchema = baseCommandSchema.extend({
   type: z.literal('SALE_REGISTER'),
@@ -101,14 +111,18 @@ const saleDraftRemoveItemCommandSchema = baseCommandSchema.extend({
   itemId: idSchema,
 });
 
-const saleDraftFinalizeCommandSchema = baseCommandSchema.extend({
-  type: z.literal('SALE_DRAFT_FINALIZE'),
-  draftId: idSchema,
-  paymentMethod: salePaymentMethodSchema,
-  cashReceived: z.coerce.number().finite().min(0).optional(),
-  saleOrigin: saleOriginSchema.optional(),
-  appOrderTotal: z.coerce.number().finite().positive().optional(),
-});
+const saleDraftFinalizeCommandSchema = baseCommandSchema
+  .extend({
+    type: z.literal('SALE_DRAFT_FINALIZE'),
+    draftId: idSchema,
+    paymentMethod: salePaymentMethodSchema,
+    cashReceived: z.coerce.number().finite().min(0).optional(),
+    saleOrigin: saleOriginSchema.optional(),
+    appOrderTotal: z.coerce.number().finite().positive().optional(),
+    splitMode: salePaymentSplitModeSchema.optional(),
+    splitCount: z.coerce.number().int().min(1).max(99).optional(),
+    splitPayments: z.array(salePaymentSplitItemSchema).min(1).max(99).optional(),
+  });
 
 const saleDraftConfirmPaidCommandSchema = baseCommandSchema.extend({
   type: z.literal('SALE_DRAFT_CONFIRM_PAID'),
