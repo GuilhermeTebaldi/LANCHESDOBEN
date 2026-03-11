@@ -22,7 +22,10 @@ import {
   Sale,
   SaleCustomerType,
   SaleDraft,
+  SalePaymentSplitEntry,
+  SalePaymentSplitMode,
   SaleOrigin,
+  SaleBasePaymentMethod,
   SalePaymentMethod,
   ViewMode,
   StockEntry,
@@ -335,6 +338,26 @@ const parseMoneyInput = (raw: string): number | null => {
   return parsed;
 };
 
+const BASE_PAYMENT_METHODS: SaleBasePaymentMethod[] = ['PIX', 'DEBITO', 'CREDITO', 'DINHEIRO'];
+
+const formatPaymentMethodLabel = (method: SalePaymentMethod): string => {
+  if (method === 'DEBITO') return 'Débito';
+  if (method === 'CREDITO') return 'Crédito';
+  if (method === 'DIVIDIDO') return 'Dividido';
+  return method;
+};
+
+const allocateSplitAmounts = (total: number, count: number): number[] => {
+  const safeCount = Number.isInteger(count) && count > 0 ? count : 1;
+  const totalCents = Math.max(0, Math.round(roundMoney(total) * 100));
+  const base = Math.floor(totalCents / safeCount);
+  const remainder = totalCents % safeCount;
+  return Array.from({ length: safeCount }, (_, index) => roundMoney((base + (index < remainder ? 1 : 0)) / 100));
+};
+
+const sumSplitAmounts = (entries: SalePaymentSplitEntry[]): number =>
+  roundMoney(entries.reduce((sum, entry) => sum + (Number.isFinite(entry.amount) ? entry.amount : 0), 0));
+
 const isAppSaleOrigin = (origin: SaleOrigin): boolean =>
   origin === 'IFOOD' || origin === 'APP99' || origin === 'KEETA';
 
@@ -345,6 +368,16 @@ const getSaleOriginLabel = (origin: SaleOrigin): string => {
   if (origin === 'APP99') return '99';
   if (origin === 'KEETA') return 'Keeta';
   return 'Balcão';
+};
+
+const resolveDraftExpectedPaymentTotal = (draft: SaleDraft, origin: SaleOrigin): number => {
+  if (isAppSaleOrigin(origin)) {
+    const appAmount = Number(draft.appOrderTotal);
+    if (Number.isFinite(appAmount) && appAmount > 0) {
+      return roundMoney(appAmount);
+    }
+  }
+  return roundMoney(draft.total);
 };
 
 const getStateSyncErrorMessage = (error: unknown): string => {
@@ -559,10 +592,23 @@ const App: React.FC = () => {
   const [cartEntryFx, setCartEntryFx] = useState<{ id: number; label: string } | null>(null);
   const [activeDraftId, setActiveDraftId] = useState<string | null>(null);
   const [paymentMethod, setPaymentMethod] = useState<SalePaymentMethod>('PIX');
+  const [paymentMethodBeforeSplitSetup, setPaymentMethodBeforeSplitSetup] =
+    useState<SaleBasePaymentMethod>('PIX');
   const [saleOrigin, setSaleOrigin] = useState<SaleOrigin>('LOCAL');
   const [paymentOriginFxTick, setPaymentOriginFxTick] = useState(-1);
   const [appOrderTotalInput, setAppOrderTotalInput] = useState('');
   const [cashReceivedInput, setCashReceivedInput] = useState('');
+  const [isSaleOriginSetupOpen, setIsSaleOriginSetupOpen] = useState(false);
+  const [isSplitSetupOpen, setIsSplitSetupOpen] = useState(false);
+  const [splitPeopleInput, setSplitPeopleInput] = useState('2');
+  const [splitMode, setSplitMode] = useState<SalePaymentSplitMode | null>(null);
+  const [splitCount, setSplitCount] = useState<number | null>(null);
+  const [splitAutoAllocations, setSplitAutoAllocations] = useState<number[]>([]);
+  const [splitCommitted, setSplitCommitted] = useState<SalePaymentSplitEntry[]>([]);
+  const [splitCurrentIndex, setSplitCurrentIndex] = useState(0);
+  const [splitCurrentMethod, setSplitCurrentMethod] = useState<SaleBasePaymentMethod>('PIX');
+  const [splitCurrentAmountInput, setSplitCurrentAmountInput] = useState('');
+  const [splitCurrentCashReceivedInput, setSplitCurrentCashReceivedInput] = useState('');
   const cartEntryFxTimeoutRef = useRef<number | null>(null);
   const appOrderTotalInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -1055,9 +1101,11 @@ const App: React.FC = () => {
       setIsCartOpen(true);
       setIsPaymentOpen(false);
       setPaymentMethod('PIX');
+      setPaymentMethodBeforeSplitSetup('PIX');
       setSaleOrigin('LOCAL');
       setAppOrderTotalInput('');
       setCashReceivedInput('');
+      resetSplitPaymentState();
       showNotification(`Nova venda ${customerType === 'ENTREGA' ? 'de entrega' : 'de balcão'} aberta.`);
     })();
   };
@@ -1200,12 +1248,102 @@ const App: React.FC = () => {
           activeDraftIdRef.current = null;
         }
         setActiveDraftId(null);
+        setIsSaleOriginSetupOpen(false);
         setIsPaymentOpen(false);
         setIsCartOpen(false);
       } finally {
         setIsCancellingDraft(false);
       }
     })();
+  };
+
+  const resetSplitPaymentState = () => {
+    setIsSplitSetupOpen(false);
+    setSplitPeopleInput('2');
+    setSplitMode(null);
+    setSplitCount(null);
+    setSplitAutoAllocations([]);
+    setSplitCommitted([]);
+    setSplitCurrentIndex(0);
+    setSplitCurrentMethod('PIX');
+    setSplitCurrentAmountInput('');
+    setSplitCurrentCashReceivedInput('');
+  };
+
+  const hydrateSplitPaymentFromDraft = (draft: SaleDraft, amountDue: number) => {
+    const payment = draft.payment;
+    if (payment.method !== 'DIVIDIDO') {
+      resetSplitPaymentState();
+      return;
+    }
+
+    const mode: SalePaymentSplitMode =
+      payment.splitMode === 'PEOPLE' || payment.splitMode === 'MIXED'
+        ? payment.splitMode
+        : Number(payment.splitCount) > 1
+          ? 'PEOPLE'
+          : 'MIXED';
+    const parsedCount = Number(payment.splitCount);
+    const fallbackCount = mode === 'PEOPLE' ? Math.max(1, (payment.splitPayments || []).length) : 1;
+    const count =
+      Number.isFinite(parsedCount) && Number.isInteger(parsedCount) && parsedCount > 0
+        ? parsedCount
+        : fallbackCount;
+
+    const normalizedSplits = (payment.splitPayments || [])
+      .filter((entry): entry is SalePaymentSplitEntry => BASE_PAYMENT_METHODS.includes(entry.method))
+      .map((entry, index) => {
+        const amount = Number(entry.amount);
+        const safeAmount = Number.isFinite(amount) && amount > 0 ? roundMoney(amount) : 0;
+        const cashReceived =
+          entry.method === 'DINHEIRO' && Number.isFinite(Number(entry.cashReceived))
+            ? roundMoney(Number(entry.cashReceived))
+            : null;
+        const change =
+          entry.method === 'DINHEIRO' && Number.isFinite(Number(entry.change))
+            ? roundMoney(Number(entry.change))
+            : cashReceived !== null
+              ? roundMoney(cashReceived - safeAmount)
+              : null;
+        return {
+          sequence: index + 1,
+          label: entry.label?.trim() || (mode === 'PEOPLE' ? `Pessoa ${index + 1}` : `Parcela ${index + 1}`),
+          method: entry.method,
+          amount: safeAmount,
+          cashReceived,
+          change,
+        };
+      });
+
+    const allocations = mode === 'PEOPLE' ? allocateSplitAmounts(amountDue, count) : [];
+    const nextIndex = normalizedSplits.length;
+    setSplitMode(mode);
+    setSplitCount(count);
+    setSplitPeopleInput(String(count));
+    setSplitAutoAllocations(allocations);
+    setSplitCommitted(normalizedSplits);
+    setSplitCurrentIndex(nextIndex);
+    setSplitCurrentMethod('PIX');
+    setSplitCurrentCashReceivedInput('');
+    if (mode === 'PEOPLE' && nextIndex < allocations.length) {
+      setSplitCurrentAmountInput(String(allocations[nextIndex]));
+    } else if (mode === 'MIXED') {
+      const remaining = roundMoney(Math.max(0, amountDue - sumSplitAmounts(normalizedSplits)));
+      setSplitCurrentAmountInput(remaining > 0 ? String(remaining) : '');
+    } else {
+      setSplitCurrentAmountInput('');
+    }
+  };
+
+  const openSplitSetupModal = () => {
+    if (paymentMethod !== 'DIVIDIDO') {
+      setPaymentMethodBeforeSplitSetup(paymentMethod);
+    }
+    setPaymentMethod('DIVIDIDO');
+    if (splitCount && splitCount > 0) {
+      setSplitPeopleInput(String(splitCount));
+    }
+    setIsSplitSetupOpen(true);
   };
 
   const handleOpenPayment = () => {
@@ -1222,9 +1360,14 @@ const App: React.FC = () => {
       return;
     }
 
-    setPaymentMethod(activeDraft.payment.method || 'PIX');
-    setPaymentOriginFxTick(-1);
+    const nextMethod = activeDraft.payment.method || 'PIX';
     const nextOrigin = activeDraft.saleOrigin || 'LOCAL';
+    const amountDue = resolveDraftExpectedPaymentTotal(activeDraft, nextOrigin);
+    setPaymentMethod(nextMethod);
+    if (nextMethod !== 'DIVIDIDO') {
+      setPaymentMethodBeforeSplitSetup(nextMethod);
+    }
+    setPaymentOriginFxTick(-1);
     setSaleOrigin(nextOrigin);
     setAppOrderTotalInput(
       isAppSaleOrigin(nextOrigin)
@@ -1236,6 +1379,12 @@ const App: React.FC = () => {
         ? String(activeDraft.payment.cashReceived)
         : ''
     );
+    if (nextMethod === 'DIVIDIDO') {
+      hydrateSplitPaymentFromDraft(activeDraft, amountDue);
+    } else {
+      resetSplitPaymentState();
+    }
+    setIsSaleOriginSetupOpen(false);
     setIsPaymentOpen(true);
   };
 
@@ -1267,6 +1416,133 @@ const App: React.FC = () => {
     [activeDraft, appOrderTotalInput, closeAppSaleOriginPanel, saleOrigin]
   );
 
+  const handleSelectAppSaleOrigin = useCallback(
+    (origin: Extract<SaleOrigin, 'IFOOD' | 'APP99' | 'KEETA'>) => {
+      if (!isSameSaleOrigin(saleOrigin, origin)) {
+        handleToggleAppSaleOrigin(origin);
+      }
+      setIsSaleOriginSetupOpen(false);
+    },
+    [handleToggleAppSaleOrigin, saleOrigin]
+  );
+
+  const handleConfirmSplitSetup = () => {
+    const parsedPeople = Number(splitPeopleInput);
+    if (!Number.isFinite(parsedPeople) || !Number.isInteger(parsedPeople) || parsedPeople < 1 || parsedPeople > 30) {
+      showNotification('Informe um número de pessoas entre 1 e 30.');
+      return;
+    }
+
+    const nextMode: SalePaymentSplitMode = parsedPeople > 1 ? 'PEOPLE' : 'MIXED';
+    const nextAllocations = nextMode === 'PEOPLE' ? allocateSplitAmounts(effectivePaymentTotal, parsedPeople) : [];
+
+    setSplitMode(nextMode);
+    setSplitCount(parsedPeople);
+    setSplitAutoAllocations(nextAllocations);
+    setSplitCommitted([]);
+    setSplitCurrentIndex(0);
+    setSplitCurrentMethod('PIX');
+    setSplitCurrentCashReceivedInput('');
+    setSplitCurrentAmountInput(nextMode === 'PEOPLE' ? String(nextAllocations[0] || 0) : '');
+    setIsSplitSetupOpen(false);
+  };
+
+  const handleResetSplitPlan = () => {
+    if (!splitMode || !splitCount) return;
+    setSplitCommitted([]);
+    setSplitCurrentIndex(0);
+    setSplitCurrentMethod('PIX');
+    setSplitCurrentCashReceivedInput('');
+    if (splitMode === 'PEOPLE') {
+      const allocations = splitAutoAllocations.length > 0 ? splitAutoAllocations : allocateSplitAmounts(effectivePaymentTotal, splitCount);
+      setSplitAutoAllocations(allocations);
+      setSplitCurrentAmountInput(String(allocations[0] || 0));
+      return;
+    }
+    setSplitCurrentAmountInput('');
+  };
+
+  const handleRemoveLastSplit = () => {
+    if (splitCommitted.length === 0) return;
+    const nextCommitted = splitCommitted.slice(0, -1);
+    setSplitCommitted(nextCommitted);
+    setSplitCurrentMethod('PIX');
+    setSplitCurrentCashReceivedInput('');
+
+    if (splitMode === 'PEOPLE') {
+      const nextIndex = nextCommitted.length;
+      setSplitCurrentIndex(nextIndex);
+      if (nextIndex < splitAutoAllocations.length) {
+        setSplitCurrentAmountInput(String(splitAutoAllocations[nextIndex] || 0));
+      } else {
+        setSplitCurrentAmountInput('');
+      }
+      return;
+    }
+
+    const remaining = roundMoney(Math.max(0, effectivePaymentTotal - sumSplitAmounts(nextCommitted)));
+    setSplitCurrentAmountInput(remaining > 0 ? String(remaining) : '');
+  };
+
+  const handleCommitSplitStep = () => {
+    if (!splitMode || !splitCount) {
+      showNotification('Configure o pagamento dividido antes de avançar.');
+      return;
+    }
+
+    const sequence = splitCommitted.length + 1;
+    const amount =
+      splitMode === 'PEOPLE'
+        ? roundMoney(splitAutoAllocations[splitCurrentIndex] || 0)
+        : roundMoney(parseMoneyInput(splitCurrentAmountInput) || 0);
+
+    if (!Number.isFinite(amount) || amount <= 0) {
+      showNotification('Informe um valor válido para a parcela.');
+      return;
+    }
+
+    const remainingBefore = roundMoney(Math.max(0, effectivePaymentTotal - sumSplitAmounts(splitCommitted)));
+    if (amount > remainingBefore + 0.009) {
+      showNotification('O valor da parcela não pode ser maior que o restante da venda.');
+      return;
+    }
+
+    const cashReceived =
+      splitCurrentMethod === 'DINHEIRO' ? parseMoneyInput(splitCurrentCashReceivedInput) : null;
+    if (splitCurrentMethod === 'DINHEIRO' && (cashReceived === null || cashReceived < amount)) {
+      showNotification('No dinheiro, o valor recebido deve ser maior ou igual ao valor da parcela.');
+      return;
+    }
+
+    const nextEntry: SalePaymentSplitEntry = {
+      sequence,
+      label: splitMode === 'PEOPLE' ? `Pessoa ${sequence}` : `Parcela ${sequence}`,
+      method: splitCurrentMethod,
+      amount,
+      cashReceived: splitCurrentMethod === 'DINHEIRO' ? roundMoney(cashReceived || 0) : null,
+      change: splitCurrentMethod === 'DINHEIRO' ? roundMoney((cashReceived || 0) - amount) : null,
+    };
+
+    const nextCommitted = [...splitCommitted, nextEntry];
+    setSplitCommitted(nextCommitted);
+    setSplitCurrentMethod('PIX');
+    setSplitCurrentCashReceivedInput('');
+
+    if (splitMode === 'PEOPLE') {
+      const nextIndex = splitCurrentIndex + 1;
+      setSplitCurrentIndex(nextIndex);
+      if (nextIndex < splitAutoAllocations.length) {
+        setSplitCurrentAmountInput(String(splitAutoAllocations[nextIndex] || 0));
+      } else {
+        setSplitCurrentAmountInput('');
+      }
+      return;
+    }
+
+    const remainingAfter = roundMoney(Math.max(0, effectivePaymentTotal - sumSplitAmounts(nextCommitted)));
+    setSplitCurrentAmountInput(remainingAfter > 0 ? String(remainingAfter) : '');
+  };
+
   const handleSavePaymentMethod = async (): Promise<boolean> => {
     if (!activeDraft) return false;
     if (activeDraft.items.length === 0) {
@@ -1286,14 +1562,60 @@ const App: React.FC = () => {
       return false;
     }
 
-    const finalizeCommand: StateCommand = {
-      type: 'SALE_DRAFT_FINALIZE',
-      draftId: activeDraft.id,
-      paymentMethod,
-      cashReceived: paymentMethod === 'DINHEIRO' ? (cashReceivedParsed ?? undefined) : undefined,
-      saleOrigin,
-      appOrderTotal: isAppSaleOrigin(saleOrigin) ? (appOrderTotalParsed ?? undefined) : undefined,
-    };
+    let finalizeCommand: StateCommand;
+    if (paymentMethod === 'DIVIDIDO') {
+      if (!splitMode || !splitCount) {
+        showNotification('Configure para quantas pessoas/parcela será o pagamento dividido.');
+        return false;
+      }
+
+      if (splitMode === 'PEOPLE' && splitCommitted.length !== splitCount) {
+        showNotification('Finalize o pagamento de todas as pessoas antes de confirmar.');
+        return false;
+      }
+
+      if (splitMode === 'MIXED' && splitCommitted.length < 2) {
+        showNotification('No modo 1 pessoa, informe ao menos duas parcelas (ex: PIX + dinheiro).');
+        return false;
+      }
+
+      const totalDividido = sumSplitAmounts(splitCommitted);
+      if (Math.abs(totalDividido - effectivePaymentTotal) > 0.009) {
+        showNotification(`A divisão ainda está incompleta. Restante: R$ ${formatMoney(Math.abs(effectivePaymentTotal - totalDividido))}`);
+        return false;
+      }
+
+      const splitPayload = splitCommitted.map((entry, index) => ({
+        sequence: index + 1,
+        label: entry.label,
+        method: entry.method,
+        amount: roundMoney(entry.amount),
+        cashReceived:
+          entry.method === 'DINHEIRO' && entry.cashReceived !== null
+            ? roundMoney(entry.cashReceived)
+            : undefined,
+      }));
+
+      finalizeCommand = {
+        type: 'SALE_DRAFT_FINALIZE',
+        draftId: activeDraft.id,
+        paymentMethod: 'DIVIDIDO',
+        splitMode,
+        splitCount,
+        splitPayments: splitPayload,
+        saleOrigin,
+        appOrderTotal: isAppSaleOrigin(saleOrigin) ? (appOrderTotalParsed ?? undefined) : undefined,
+      };
+    } else {
+      finalizeCommand = {
+        type: 'SALE_DRAFT_FINALIZE',
+        draftId: activeDraft.id,
+        paymentMethod,
+        cashReceived: paymentMethod === 'DINHEIRO' ? (cashReceivedParsed ?? undefined) : undefined,
+        saleOrigin,
+        appOrderTotal: isAppSaleOrigin(saleOrigin) ? (appOrderTotalParsed ?? undefined) : undefined,
+      };
+    }
 
     // Defensive: backend must persist app-origin and app amount before allowing confirm.
     for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -1370,6 +1692,7 @@ const App: React.FC = () => {
         );
       }
 
+      setIsSaleOriginSetupOpen(false);
       setIsPaymentOpen(false);
       setIsCartOpen(false);
     })().finally(() => {
@@ -1890,6 +2213,56 @@ const App: React.FC = () => {
     if (paymentCashReceived === null) return null;
     return paymentCashReceived - effectivePaymentTotal;
   }, [activeDraft, effectivePaymentTotal, paymentCashReceived, paymentMethod]);
+  const splitPaidAmount = useMemo(() => sumSplitAmounts(splitCommitted), [splitCommitted]);
+  const splitRemainingAmount = useMemo(
+    () => roundMoney(Math.max(0, effectivePaymentTotal - splitPaidAmount)),
+    [effectivePaymentTotal, splitPaidAmount]
+  );
+  const splitCurrentFixedAmount =
+    splitMode === 'PEOPLE' ? roundMoney(splitAutoAllocations[splitCurrentIndex] || 0) : null;
+  const splitCurrentAmount =
+    splitMode === 'PEOPLE' ? splitCurrentFixedAmount : parseMoneyInput(splitCurrentAmountInput);
+  const splitCurrentCashReceived =
+    splitCurrentMethod === 'DINHEIRO' ? parseMoneyInput(splitCurrentCashReceivedInput) : null;
+  const splitCurrentCashDelta = useMemo(() => {
+    if (splitCurrentMethod !== 'DINHEIRO') return null;
+    if (splitCurrentAmount === null) return null;
+    if (splitCurrentCashReceived === null) return null;
+    return splitCurrentCashReceived - splitCurrentAmount;
+  }, [splitCurrentAmount, splitCurrentCashReceived, splitCurrentMethod]);
+  const isSplitPlanComplete = useMemo(() => {
+    if (paymentMethod !== 'DIVIDIDO') return true;
+    if (!splitMode || !splitCount) return false;
+    if (splitMode === 'PEOPLE') {
+      return splitCommitted.length === splitCount && splitRemainingAmount <= 0.009;
+    }
+    return splitCommitted.length >= 2 && splitRemainingAmount <= 0.009;
+  }, [paymentMethod, splitMode, splitCount, splitCommitted.length, splitRemainingAmount]);
+  const isSplitCurrentStepReady = useMemo(() => {
+    if (!splitMode || !splitCount) return false;
+    if (splitMode === 'PEOPLE') {
+      if (splitCurrentIndex >= splitCount) return false;
+      const stepAmount = roundMoney(splitAutoAllocations[splitCurrentIndex] || 0);
+      if (stepAmount <= 0) return false;
+      if (splitCurrentMethod !== 'DINHEIRO') return true;
+      return splitCurrentCashReceived !== null && splitCurrentCashReceived >= stepAmount;
+    }
+
+    if (splitRemainingAmount <= 0.009) return false;
+    if (splitCurrentAmount === null || splitCurrentAmount <= 0) return false;
+    if (splitCurrentAmount > splitRemainingAmount + 0.009) return false;
+    if (splitCurrentMethod !== 'DINHEIRO') return true;
+    return splitCurrentCashReceived !== null && splitCurrentCashReceived >= splitCurrentAmount;
+  }, [
+    splitMode,
+    splitCount,
+    splitCurrentIndex,
+    splitAutoAllocations,
+    splitCurrentMethod,
+    splitCurrentCashReceived,
+    splitRemainingAmount,
+    splitCurrentAmount,
+  ]);
   const isAppSaleOriginActive = isAppSaleOrigin(saleOrigin);
   const paymentOriginMorphClass =
     paymentOriginFxTick >= 0
@@ -1930,6 +2303,7 @@ const App: React.FC = () => {
   const isCashPaymentInsufficient =
     paymentMethod === 'DINHEIRO' &&
     (paymentCashReceived === null || (paymentCashDelta !== null && paymentCashDelta < 0));
+  const isSplitPaymentIncomplete = paymentMethod === 'DIVIDIDO' && !isSplitPlanComplete;
   const isAppOrderTotalInvalid =
     isAppSaleOriginActive &&
     (parsedAppOrderTotalInput === null || parsedAppOrderTotalInput <= 0);
@@ -1937,6 +2311,7 @@ const App: React.FC = () => {
     isConfirmingPaid || isStateHydrating || pendingStateOps > 0;
   const isConfirmPaidDisabled =
     isCashPaymentInsufficient ||
+    isSplitPaymentIncomplete ||
     (isAppSaleOriginActive && isAppOrderTotalInvalid) ||
     isPaymentActionBlocked;
 
@@ -2393,7 +2768,11 @@ const App: React.FC = () => {
                 </p>
               </div>
               <button
-                onClick={() => setIsPaymentOpen(false)}
+                onClick={() => {
+                  setIsSplitSetupOpen(false);
+                  setIsSaleOriginSetupOpen(false);
+                  setIsPaymentOpen(false);
+                }}
                 className="qb-btn-touch bg-slate-800 hover:bg-slate-700 p-2 rounded-full transition-colors"
               >
                 <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
@@ -2481,68 +2860,66 @@ const App: React.FC = () => {
 
               <div className="qb-payment-card qb-payment-section-methods bg-white border border-slate-200 rounded-2xl p-2">
                 <div className="qb-payment-method-grid grid grid-cols-2 gap-1.5">
-                {(['PIX', 'DEBITO', 'CREDITO', 'DINHEIRO'] as SalePaymentMethod[]).map((method) => (
+                {(BASE_PAYMENT_METHODS as SaleBasePaymentMethod[]).map((method) => (
                   <button
                     key={method}
-                    onClick={() => setPaymentMethod(method)}
+                    onClick={() => {
+                      if (paymentMethod === 'DIVIDIDO') {
+                        setSplitCurrentMethod(method);
+                        return;
+                      }
+                      setPaymentMethod(method);
+                      setPaymentMethodBeforeSplitSetup(method);
+                      resetSplitPaymentState();
+                    }}
                     className={`qb-btn-touch qb-payment-method-btn px-2 py-1.5 rounded-xl font-black text-[10px] uppercase tracking-wide border transition-all ${
-                      paymentMethod === method
+                      (paymentMethod === 'DIVIDIDO' ? splitCurrentMethod === method : paymentMethod === method)
                         ? 'bg-red-600 border-red-700 text-white'
                         : 'bg-white border-slate-200 text-slate-700 hover:border-red-300'
                     }`}
                   >
-                    {method === 'DEBITO'
-                      ? 'Débito'
-                      : method === 'CREDITO'
-                        ? 'Crédito'
-                        : method}
+                    {formatPaymentMethodLabel(method)}
                   </button>
                 ))}
                 </div>
-              </div>
-
-              <div className="qb-payment-card qb-payment-section-origin bg-white border border-slate-200 rounded-2xl p-3 space-y-2">
-                <label className="text-[10px] font-black uppercase tracking-widest text-slate-500">
-                  Canal da venda
-                </label>
-                <div className="flex items-center gap-2 flex-wrap">
+                <div className="mt-2 grid grid-cols-2 gap-1.5">
                   <button
                     type="button"
-                    onClick={() => handleToggleAppSaleOrigin('IFOOD')}
-                    className={`qb-btn-touch qb-payment-origin-btn qb-payment-origin-circle w-12 h-12 rounded-full border font-black text-[9px] uppercase tracking-tight transition-all ${
-                      saleOrigin === 'IFOOD'
-                        ? 'bg-red-600 text-white border-red-700 shadow-lg shadow-red-200'
-                        : 'bg-white text-red-600 border-red-200 hover:border-red-400'
+                    onClick={() => {
+                    if (paymentMethod === 'DIVIDIDO') {
+                      setPaymentMethod(paymentMethodBeforeSplitSetup);
+                      resetSplitPaymentState();
+                      return;
+                    }
+                    openSplitSetupModal();
+                    }}
+                    className={`qb-btn-touch w-full rounded-xl border px-3 py-2 text-[10px] font-black uppercase tracking-widest transition-all ${
+                      paymentMethod === 'DIVIDIDO'
+                        ? 'border-amber-700 bg-amber-600 text-white'
+                        : 'border-slate-200 bg-white text-slate-700 hover:border-emerald-300'
                     }`}
-                    title="Venda pelo iFood"
                   >
-                    iFood
+                    {paymentMethod === 'DIVIDIDO' ? 'Cancelar Dividido' : 'Dividido'}
                   </button>
                   <button
                     type="button"
-                    onClick={() => handleToggleAppSaleOrigin('APP99')}
-                    className={`qb-btn-touch qb-payment-origin-btn qb-payment-origin-circle w-12 h-12 rounded-full border font-black text-lg leading-none transition-all ${
-                      saleOrigin === 'APP99'
-                        ? 'bg-yellow-400 text-slate-900 border-yellow-500 shadow-lg shadow-yellow-200'
-                        : 'bg-white text-yellow-600 border-yellow-300 hover:border-yellow-500'
+                    onClick={() => setIsSaleOriginSetupOpen(true)}
+                    className={`qb-btn-touch w-full rounded-xl border px-3 py-2 text-[10px] font-black uppercase tracking-widest transition-all ${
+                      isAppSaleOriginActive
+                        ? 'border-emerald-600 bg-emerald-500 text-white'
+                        : 'border-slate-200 bg-white text-slate-700 hover:border-emerald-300'
                     }`}
-                    title="Venda pelo 99"
                   >
-                    99
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleToggleAppSaleOrigin('KEETA')}
-                    className={`qb-btn-touch qb-payment-origin-btn qb-payment-origin-pill h-12 rounded-full border px-3 font-black text-[9px] uppercase tracking-tight transition-all ${
-                      saleOrigin === 'KEETA'
-                        ? 'bg-emerald-500 text-white border-emerald-600 shadow-lg shadow-emerald-200'
-                        : 'bg-white text-emerald-700 border-emerald-300 hover:border-emerald-500'
-                    }`}
-                    title="Venda pelo Keeta"
-                  >
-                    Keeta
+                    {isAppSaleOriginActive ? `Apps (${paymentOriginNameLabel})` : 'Apps'}
                   </button>
                 </div>
+                {paymentMethod === 'DIVIDIDO' && splitMode && splitCount && (
+                  <p className="mt-1 text-[10px] font-black uppercase tracking-widest text-emerald-700">
+                    {splitMode === 'PEOPLE'
+                      ? `Pessoa ${Math.min(splitCurrentIndex + 1, splitCount)} de ${splitCount} • restante R$ ${formatMoney(splitRemainingAmount)}`
+                      : `Parcela ${splitCommitted.length + 1} • restante R$ ${formatMoney(splitRemainingAmount)}`}
+                  </p>
+                )}
               </div>
 
               {paymentMethod === 'DINHEIRO' ? (
@@ -2575,6 +2952,97 @@ const App: React.FC = () => {
                     </p>
                   )}
                 </div>
+              ) : paymentMethod === 'DIVIDIDO' ? (
+                <div className="qb-payment-card qb-payment-section-detail qb-payment-method-detail bg-white border border-slate-200 rounded-2xl p-3 flex flex-col gap-2">
+                  {!splitMode || !splitCount ? (
+                    <p className="text-[11px] font-black uppercase tracking-widest text-slate-600">
+                      Clique em Dividido e informe para quantas pessoas vai dividir.
+                    </p>
+                  ) : (
+                    <>
+                      {splitMode === 'PEOPLE' ? (
+                        <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+                          <p className="text-sm font-black text-slate-700">
+                            {`Pessoa ${Math.min(splitCurrentIndex + 1, splitCount)} de ${splitCount}`}
+                          </p>
+                          <p className="mt-1 text-base font-black text-slate-900">
+                            Valor desta pessoa:{' '}
+                            <span className="text-red-600">R$ {formatMoney(splitCurrentFixedAmount || 0)}</span>
+                          </p>
+                        </div>
+                      ) : (
+                        <>
+                          <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">
+                            {`Parcela ${splitCommitted.length + 1} • restante R$ ${formatMoney(splitRemainingAmount)}`}
+                          </p>
+                        <input
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value={splitCurrentAmountInput}
+                          onChange={(e) => setSplitCurrentAmountInput(e.target.value)}
+                          className="w-full rounded-xl border border-slate-200 bg-slate-100 px-3 py-1.5 font-black text-sm leading-tight text-slate-800"
+                          placeholder={formatMoney(splitRemainingAmount)}
+                        />
+                        </>
+                      )}
+                      {splitCurrentMethod === 'DINHEIRO' && (
+                        <>
+                          <label className="text-[10px] font-black uppercase tracking-widest text-slate-500">
+                            Valor recebido
+                          </label>
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={splitCurrentCashReceivedInput}
+                            onChange={(e) => setSplitCurrentCashReceivedInput(e.target.value)}
+                            className="qb-payment-cash-input w-full bg-slate-100 border border-slate-200 rounded-xl px-3 py-1.5 font-black text-sm leading-tight text-slate-800"
+                            placeholder="0,00"
+                          />
+                          {splitCurrentCashDelta !== null && (
+                            <p className={`qb-payment-cash-status text-[11px] font-black ${splitCurrentCashDelta >= 0 ? 'text-green-700' : 'text-red-700'}`}>
+                              {splitCurrentCashDelta >= 0
+                                ? `Troco: R$ ${formatMoney(splitCurrentCashDelta)}`
+                                : `Faltam: R$ ${formatMoney(Math.abs(splitCurrentCashDelta))}`}
+                            </p>
+                          )}
+                        </>
+                      )}
+                      <div className="flex flex-wrap gap-2">
+                        <button
+                          type="button"
+                          onClick={handleRemoveLastSplit}
+                          disabled={splitCommitted.length === 0}
+                          className="qb-btn-touch bg-slate-100 text-slate-700 px-3 py-1.5 rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-slate-200 transition-colors disabled:opacity-40"
+                        >
+                          Voltar
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleResetSplitPlan}
+                          disabled={splitCommitted.length === 0}
+                          className="qb-btn-touch bg-amber-100 text-amber-800 px-3 py-1.5 rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-amber-200 transition-colors disabled:opacity-40"
+                        >
+                          Reiniciar
+                        </button>
+                        <button
+                          type="button"
+                          onClick={handleCommitSplitStep}
+                          disabled={!isSplitCurrentStepReady}
+                          className="qb-btn-touch bg-emerald-600 text-white px-3 py-1.5 rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-emerald-700 transition-colors disabled:opacity-40"
+                        >
+                          {splitMode === 'PEOPLE' && splitCurrentIndex + 1 >= splitCount ? 'Concluir' : 'Próximo'}
+                        </button>
+                      </div>
+                      {isSplitPlanComplete && (
+                        <p className="text-[10px] font-black uppercase tracking-widest text-green-700">
+                          Divisão concluída.
+                        </p>
+                      )}
+                    </>
+                  )}
+                </div>
               ) : (
                 <div className="qb-payment-card qb-payment-section-detail qb-payment-method-detail bg-white border border-slate-200 rounded-2xl p-3">
                   <p className="text-[11px] font-black uppercase tracking-widest text-slate-600">
@@ -2587,6 +3055,8 @@ const App: React.FC = () => {
             <div className="qb-payment-footer p-3 bg-white border-t border-slate-100 flex flex-wrap items-center justify-end gap-2 shrink-0">
               <button
                 onClick={() => {
+                  setIsSplitSetupOpen(false);
+                  setIsSaleOriginSetupOpen(false);
                   setIsPaymentOpen(false);
                   setIsCartOpen(true);
                 }}
@@ -2602,14 +3072,6 @@ const App: React.FC = () => {
                 Cancelar Venda
               </button>
               <button
-                onClick={() => {
-                  void handleSavePaymentMethod();
-                }}
-                className="qb-btn-touch bg-slate-900 text-white px-3 py-2 rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-black transition-colors"
-              >
-                Alterar Forma
-              </button>
-              <button
                 onClick={handleConfirmPaid}
                 disabled={isConfirmPaidDisabled}
                 className="qb-btn-touch bg-green-600 text-white px-4 py-2 rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-green-700 transition-colors disabled:opacity-40"
@@ -2618,6 +3080,115 @@ const App: React.FC = () => {
               </button>
             </div>
           </div>
+
+          {isSaleOriginSetupOpen && (
+            <div
+              className="fixed inset-0 z-[231] bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4"
+              onClick={() => setIsSaleOriginSetupOpen(false)}
+            >
+              <div
+                className="w-full max-w-sm rounded-3xl border-2 border-slate-100 bg-white p-4 shadow-2xl space-y-3"
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className="flex items-center justify-between">
+                  <h4 className="text-sm font-black uppercase tracking-widest text-slate-800">
+                    Canal da venda
+                  </h4>
+                  <button
+                    type="button"
+                    onClick={() => setIsSaleOriginSetupOpen(false)}
+                    className="qb-btn-touch inline-flex h-8 w-8 items-center justify-center rounded-full bg-slate-100 text-slate-700 hover:bg-slate-200"
+                    aria-label="Fechar canais de venda"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M18 6 6 18" />
+                      <path d="m6 6 12 12" />
+                    </svg>
+                  </button>
+                </div>
+                <div className="flex items-center justify-center gap-2 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={() => handleSelectAppSaleOrigin('IFOOD')}
+                    className={`qb-btn-touch qb-payment-origin-btn qb-payment-origin-circle w-14 h-14 rounded-full border font-black text-[10px] uppercase tracking-tight transition-all ${
+                      saleOrigin === 'IFOOD'
+                        ? 'bg-red-600 text-white border-red-700 shadow-lg shadow-red-200'
+                        : 'bg-white text-red-600 border-red-200 hover:border-red-400'
+                    }`}
+                    title="Venda pelo iFood"
+                  >
+                    iFood
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleSelectAppSaleOrigin('APP99')}
+                    className={`qb-btn-touch qb-payment-origin-btn qb-payment-origin-circle w-14 h-14 rounded-full border font-black text-xl leading-none transition-all ${
+                      saleOrigin === 'APP99'
+                        ? 'bg-yellow-400 text-slate-900 border-yellow-500 shadow-lg shadow-yellow-200'
+                        : 'bg-white text-yellow-600 border-yellow-300 hover:border-yellow-500'
+                    }`}
+                    title="Venda pelo 99"
+                  >
+                    99
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleSelectAppSaleOrigin('KEETA')}
+                    className={`qb-btn-touch qb-payment-origin-btn qb-payment-origin-pill h-14 rounded-full border px-4 font-black text-[10px] uppercase tracking-tight transition-all ${
+                      saleOrigin === 'KEETA'
+                        ? 'bg-emerald-500 text-white border-emerald-600 shadow-lg shadow-emerald-200'
+                        : 'bg-white text-emerald-700 border-emerald-300 hover:border-emerald-500'
+                    }`}
+                    title="Venda pelo Keeta"
+                  >
+                    Keeta
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {isSplitSetupOpen && (
+            <div className="fixed inset-0 z-[230] bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+              <div className="w-full max-w-sm rounded-3xl border-2 border-slate-100 bg-white p-4 shadow-2xl space-y-3">
+                <h4 className="text-sm font-black uppercase tracking-widest text-slate-800">
+                  Dividir pagamento
+                </h4>
+                <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">
+                  Informe para quantas pessoas vai dividir. Se for 1, o sistema entende parcelas por forma de pagamento.
+                </p>
+                <input
+                  type="number"
+                  min="1"
+                  max="30"
+                  step="1"
+                  value={splitPeopleInput}
+                  onChange={(e) => setSplitPeopleInput(e.target.value)}
+                  className="w-full rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-sm font-black text-slate-800"
+                  placeholder="2"
+                />
+                <div className="flex justify-end gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPaymentMethod(paymentMethodBeforeSplitSetup);
+                      resetSplitPaymentState();
+                    }}
+                    className="qb-btn-touch rounded-xl bg-slate-100 px-3 py-2 text-[10px] font-black uppercase tracking-widest text-slate-700 hover:bg-slate-200"
+                  >
+                    Cancelar
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleConfirmSplitSetup}
+                    className="qb-btn-touch rounded-xl bg-emerald-600 px-3 py-2 text-[10px] font-black uppercase tracking-widest text-white hover:bg-emerald-700"
+                  >
+                    Confirmar
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

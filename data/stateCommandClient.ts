@@ -4,10 +4,12 @@ import type {
   Ingredient,
   Product,
   RecipeItem,
+  SaleBasePaymentMethod,
   SaleCustomerType,
   SaleDraft,
   SaleOrigin,
   SalePaymentMethod,
+  SalePaymentSplitMode,
   StockEntry,
 } from '../types';
 import { DEFAULT_APP_STATE, type AppState } from './appStorage';
@@ -83,6 +85,15 @@ export type StateCommand =
       cashReceived?: number;
       saleOrigin?: SaleOrigin;
       appOrderTotal?: number;
+      splitMode?: SalePaymentSplitMode;
+      splitCount?: number;
+      splitPayments?: Array<{
+        sequence?: number;
+        label?: string;
+        method: SaleBasePaymentMethod;
+        amount: number;
+        cashReceived?: number;
+      }>;
     })
   | (BaseCommand & {
       type: 'SALE_DRAFT_CONFIRM_PAID';

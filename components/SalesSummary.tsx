@@ -38,15 +38,16 @@ interface HistoryDrawerEntry {
   inferred: boolean;
 }
 
-type PaymentMethodSummaryKey = 'PIX' | 'DEBITO' | 'CREDITO' | 'DINHEIRO';
+type PaymentMethodSummaryKey = 'PIX' | 'DEBITO' | 'CREDITO' | 'DINHEIRO' | 'DIVIDIDO';
 
 const COLORS = ['#ef4444', '#f59e0b', '#3b82f6', '#10b981', '#6366f1', '#ec4899'];
-const PAYMENT_METHOD_ORDER: PaymentMethodSummaryKey[] = ['DEBITO', 'PIX', 'DINHEIRO', 'CREDITO'];
+const PAYMENT_METHOD_ORDER: PaymentMethodSummaryKey[] = ['DEBITO', 'PIX', 'DINHEIRO', 'CREDITO', 'DIVIDIDO'];
 const PAYMENT_METHOD_LABELS: Record<PaymentMethodSummaryKey, string> = {
   PIX: 'Pix',
   DEBITO: 'Débito',
   CREDITO: 'Crédito',
   DINHEIRO: 'Dinheiro',
+  DIVIDIDO: 'Dividido',
 };
 const APP_ORIGIN_STYLE: Record<AppOrigin, { card: string }> = {
   IFOOD: {
@@ -243,6 +244,7 @@ const summarizePaymentMethods = (
     DEBITO: 0,
     CREDITO: 0,
     DINHEIRO: 0,
+    DIVIDIDO: 0,
   };
   let unclassifiedValue = 0;
 

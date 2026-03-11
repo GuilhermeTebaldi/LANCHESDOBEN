@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 
 import { DEFAULT_APP_STATE, loadAppState, type AppState } from '../data/appStorage';
-import type { Sale, SaleDraft, SaleOrigin, SalePaymentMethod } from '../types';
+import type { Sale, SaleBasePaymentMethod, SaleDraft, SaleOrigin, SalePaymentMethod, SalePaymentSplitEntry } from '../types';
 import { getReceiptPaperWidthMm } from '../utils/receiptPaper';
 
 interface PrintReceiptProps {
@@ -28,6 +28,13 @@ interface ReceiptViewModel {
   paymentMethodLabel: string;
   paymentCashReceived: number | null;
   paymentChange: number | null;
+  paymentSplits: Array<{
+    label: string;
+    methodLabel: string;
+    amount: number;
+    cashReceived: number | null;
+    change: number | null;
+  }>;
   saleOriginLabel: string | null;
   saleOriginShortLabel: string | null;
   appOrderTotal: number | null;
@@ -88,13 +95,37 @@ const isSameCalendarDay = (a: Date, b: Date): boolean =>
   a.getMonth() === b.getMonth() &&
   a.getDate() === b.getDate();
 
-const formatPaymentMethod = (method: SalePaymentMethod | null | undefined): string => {
-  if (!method) return 'NAO INFORMADO';
+const formatBasePaymentMethod = (method: SaleBasePaymentMethod): string => {
   if (method === 'DEBITO') return 'DEBITO';
   if (method === 'CREDITO') return 'CREDITO';
   if (method === 'DINHEIRO') return 'DINHEIRO';
   return method;
 };
+
+const formatPaymentMethod = (method: SalePaymentMethod | null | undefined): string => {
+  if (!method) return 'NAO INFORMADO';
+  if (method === 'DIVIDIDO') return 'DIVIDIDO';
+  if (method === 'DEBITO') return 'DEBITO';
+  if (method === 'CREDITO') return 'CREDITO';
+  if (method === 'DINHEIRO') return 'DINHEIRO';
+  return method;
+};
+
+const normalizeSplitPayments = (entries: SalePaymentSplitEntry[] | undefined) =>
+  (entries || [])
+    .filter((entry): entry is SalePaymentSplitEntry => Boolean(entry && entry.method && Number.isFinite(entry.amount)))
+    .map((entry, index) => {
+      const amount = normalizeMoneyValue(entry.amount) ?? 0;
+      const cashReceived = normalizeMoneyValue(entry.cashReceived);
+      const change = normalizeMoneyValue(entry.change);
+      return {
+        label: normalizeText(entry.label) || `Parcela ${index + 1}`,
+        methodLabel: formatBasePaymentMethod(entry.method),
+        amount,
+        cashReceived,
+        change,
+      };
+    });
 
 const isAppSaleOrigin = (origin: SaleOrigin): boolean =>
   origin === 'IFOOD' || origin === 'APP99' || origin === 'KEETA';
@@ -287,6 +318,7 @@ const buildReceiptViewModel = (state: AppState, receiptId: string): ReceiptViewM
   const paymentMethod = payment?.method ?? null;
   const paymentCashReceived = normalizeMoneyValue(payment?.cashReceived);
   const paymentChange = normalizeMoneyValue(payment?.change);
+  const paymentSplits = paymentMethod === 'DIVIDIDO' ? normalizeSplitPayments(payment?.splitPayments) : [];
 
   return {
     restaurantName: getRestaurantName(),
@@ -299,6 +331,7 @@ const buildReceiptViewModel = (state: AppState, receiptId: string): ReceiptViewM
     paymentMethodLabel: formatPaymentMethod(paymentMethod),
     paymentCashReceived,
     paymentChange,
+    paymentSplits,
     saleOriginLabel: isAppSale ? formatSaleOrigin(saleOrigin) : null,
     saleOriginShortLabel: formatSaleOriginShort(saleOrigin),
     appOrderTotal,
@@ -554,6 +587,34 @@ const PrintReceipt: React.FC<PrintReceiptProps> = ({ receiptId }) => {
                 <span className="receipt-label">{receipt.paymentChange >= 0 ? 'Troco' : 'Faltam'}</span>
                 <span className="receipt-value">{formatMoney(Math.abs(receipt.paymentChange))}</span>
               </div>
+            )}
+            {receipt.paymentSplits.length > 0 && (
+              <>
+                <div className="receipt-row">
+                  <span className="receipt-label">Divisão</span>
+                  <span className="receipt-value">{receipt.paymentSplits.length} partes</span>
+                </div>
+                {receipt.paymentSplits.map((split, index) => (
+                  <React.Fragment key={`${split.label}-${index}`}>
+                    <div className="receipt-row">
+                      <span className="receipt-label">{split.label} ({split.methodLabel})</span>
+                      <span className="receipt-value">{formatMoney(split.amount)}</span>
+                    </div>
+                    {split.methodLabel === 'DINHEIRO' && split.cashReceived !== null && (
+                      <div className="receipt-row">
+                        <span className="receipt-label">Recebido {split.label}</span>
+                        <span className="receipt-value">{formatMoney(split.cashReceived)}</span>
+                      </div>
+                    )}
+                    {split.methodLabel === 'DINHEIRO' && split.change !== null && (
+                      <div className="receipt-row">
+                        <span className="receipt-label">{split.change >= 0 ? 'Troco' : 'Faltam'}</span>
+                        <span className="receipt-value">{formatMoney(Math.abs(split.change))}</span>
+                      </div>
+                    )}
+                  </React.Fragment>
+                ))}
+              </>
             )}
 
             <div className="receipt-divider" />
