@@ -456,24 +456,67 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
   }, [dailySalesHistory]);
 
   const orderedHistory = useMemo<HistoryDrawerEntry[]>(() => {
+    const historySalesByEntryId = new Map<string, Sale[]>();
+
+    if (mergedDailySalesHistory.length > 0 && archivedSales.length > 0) {
+      const sortedHistoryByClosedAt = [...mergedDailySalesHistory].sort(
+        (a, b) => toDate(a.closedAt).getTime() - toDate(b.closedAt).getTime()
+      );
+      const sortedArchivedSales = [...archivedSales].sort(
+        (a, b) => toDate(a.timestamp).getTime() - toDate(b.timestamp).getTime()
+      );
+
+      let saleIndex = 0;
+      let lowerBoundMs = Number.NEGATIVE_INFINITY;
+
+      sortedHistoryByClosedAt.forEach((entry) => {
+        const upperBoundMs = toDate(entry.closedAt).getTime();
+        const bucket: Sale[] = [];
+
+        while (saleIndex < sortedArchivedSales.length) {
+          const sale = sortedArchivedSales[saleIndex];
+          const saleTimestampMs = toDate(sale.timestamp).getTime();
+
+          if (saleTimestampMs <= lowerBoundMs) {
+            saleIndex += 1;
+            continue;
+          }
+
+          if (saleTimestampMs > upperBoundMs) break;
+
+          bucket.push(sale);
+          saleIndex += 1;
+        }
+
+        historySalesByEntryId.set(entry.id, bucket);
+        lowerBoundMs = upperBoundMs;
+      });
+    }
+
     const explicitEntries: HistoryDrawerEntry[] = mergedDailySalesHistory.map((entry) => {
       const dayKey = getDayKey(entry.closedAt);
+      const dayMappedSales = archiveSalesByDay.get(dayKey) || [];
+      const timeMappedSales = historySalesByEntryId.get(entry.id) || [];
       return {
         entry,
         dayKey,
-        sales: archiveSalesByDay.get(dayKey) || [],
+        sales: timeMappedSales.length > 0 ? timeMappedSales : dayMappedSales,
         inferred: false,
       };
     });
 
-    const explicitDayKeys = new Set(explicitEntries.map((item) => item.dayKey));
+    const consumedSaleIds = new Set(
+      explicitEntries.flatMap((item) => item.sales.map((sale) => sale.id))
+    );
     const todayKey = getDayKey(new Date());
     const inferredEntries: HistoryDrawerEntry[] = [];
 
     archiveSalesByDay.forEach((daySales, dayKey) => {
-      if (explicitDayKeys.has(dayKey) || dayKey === todayKey) return;
+      if (dayKey === todayKey) return;
+      const unassignedDaySales = daySales.filter((sale) => !consumedSaleIds.has(sale.id));
+      if (unassignedDaySales.length === 0) return;
 
-      const totals = daySales.reduce(
+      const totals = unassignedDaySales.reduce(
         (acc, sale) => ({
           totalRevenue: acc.totalRevenue + (Number.isFinite(sale.total) ? sale.total : 0),
           totalPurchases:
@@ -481,19 +524,19 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
         }),
         { totalRevenue: 0, totalPurchases: 0 }
       );
-      const latestTimestamp = daySales.reduce(
+      const latestTimestamp = unassignedDaySales.reduce(
         (latest: Date, sale) => {
           const saleDate = toDate(sale.timestamp);
           return saleDate.getTime() > latest.getTime() ? saleDate : latest;
         },
-        toDate(daySales[0]?.timestamp ?? new Date())
+        toDate(unassignedDaySales[0]?.timestamp ?? new Date())
       );
       const totalRevenue = roundMoney(totals.totalRevenue);
       const totalPurchases = roundMoney(totals.totalPurchases);
 
       inferredEntries.push({
         dayKey,
-        sales: daySales,
+        sales: unassignedDaySales,
         inferred: true,
         entry: {
           id: `legacy-history-${dayKey.replace(/[^0-9]/g, '')}`,
@@ -502,7 +545,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
           totalRevenue,
           totalPurchases,
           totalProfit: roundMoney(totalRevenue - totalPurchases),
-          saleCount: daySales.length,
+          saleCount: unassignedDaySales.length,
           cashExpenses: 0,
         },
       });
@@ -511,7 +554,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
     return [...explicitEntries, ...inferredEntries].sort(
       (a, b) => toDate(b.entry.closedAt).getTime() - toDate(a.entry.closedAt).getTime()
     );
-  }, [archiveSalesByDay, mergedDailySalesHistory]);
+  }, [archiveSalesByDay, archivedSales, mergedDailySalesHistory]);
 
   const printReport = useCallback(
     (
@@ -578,6 +621,11 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
       );
 
       const reportLines: string[] = [];
+      const pushWrappedLine = (value: string) => {
+        wrap(value).forEach((line) => {
+          reportLines.push(line);
+        });
+      };
       const closedDate = closedAt.toLocaleDateString('pt-BR');
       const closedTime = closedAt.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 
@@ -604,7 +652,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
           reportLines.push(thermalSeparator);
           reportLines.push(align('Total informado:', formatThermalCurrency(paymentTotal)));
         } else {
-          reportLines.push('Sem valores por forma de pagamento neste fechamento.');
+          pushWrappedLine('Sem valores por forma de pagamento neste fechamento.');
         }
 
         if (orderedSales.length > 0) {
@@ -644,7 +692,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
             );
           }
         } else {
-          reportLines.push('Sem detalhamento de vendas para pagamento.');
+          pushWrappedLine('Sem detalhamento de vendas para pagamento.');
         }
 
         reportLines.push(thermalSeparator);
@@ -693,7 +741,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
         } else {
           reportLines.push(center('DETALHAMENTO DE VENDAS'));
           reportLines.push(thermalSeparator);
-          reportLines.push('Este relatorio nao possui vendas detalhadas.');
+          pushWrappedLine('Este relatorio nao possui vendas detalhadas.');
           reportLines.push(thermalSeparator);
         }
       }
