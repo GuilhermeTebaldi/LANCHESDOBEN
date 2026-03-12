@@ -45,6 +45,13 @@ interface HistoryPrintPreset {
   paperWidthMm: number;
   pageHeightMm: number;
 }
+interface CashPrintPreset {
+  id: string;
+  label: string;
+  bodyWidthMm: number;
+  pageWidthMm: number;
+  pageHeightMm: number | null;
+}
 
 const COLORS = ['#ef4444', '#f59e0b', '#3b82f6', '#10b981', '#6366f1', '#ec4899'];
 const PAYMENT_METHOD_ORDER: PaymentMethodSummaryKey[] = ['DEBITO', 'PIX', 'DINHEIRO', 'CREDITO', 'DIVIDIDO'];
@@ -67,6 +74,9 @@ const APP_ORIGIN_STYLE: Record<AppOrigin, { card: string }> = {
   },
 };
 const HISTORY_PRINT_PRESET_STORAGE_KEY = 'qb_history_print_preset_v1';
+const CASH_PRINT_PRESET_STORAGE_KEY = 'qb_cash_print_preset_v1';
+const CASH_PRINT_DEFAULT_BODY_WIDTH_MM = 72;
+const CASH_PRINT_DEFAULT_PAGE_WIDTH_MM = 80;
 const HISTORY_PRINT_PRESETS: HistoryPrintPreset[] = [
   { id: '48x297', label: '48 x 297 mm', paperWidthMm: 48, pageHeightMm: 297 },
   { id: '58x297', label: '58 x 297 mm', paperWidthMm: 58, pageHeightMm: 297 },
@@ -75,11 +85,31 @@ const HISTORY_PRINT_PRESETS: HistoryPrintPreset[] = [
   { id: 'A4_210x297', label: 'A4 210 x 297 mm', paperWidthMm: 210, pageHeightMm: 297 },
 ];
 const DEFAULT_HISTORY_PRINT_PRESET_ID = '80x297';
+const CASH_PRINT_PRESETS: CashPrintPreset[] = [
+  {
+    id: 'DEFAULT',
+    label: 'Padrão',
+    bodyWidthMm: CASH_PRINT_DEFAULT_BODY_WIDTH_MM,
+    pageWidthMm: CASH_PRINT_DEFAULT_PAGE_WIDTH_MM,
+    pageHeightMm: null,
+  },
+  { id: '48x297', label: '48 x 297 mm', bodyWidthMm: 48, pageWidthMm: 48, pageHeightMm: 297 },
+  { id: '58x297', label: '58 x 297 mm', bodyWidthMm: 58, pageWidthMm: 58, pageHeightMm: 297 },
+  { id: '72x297', label: '72 x 297 mm', bodyWidthMm: 72, pageWidthMm: 72, pageHeightMm: 297 },
+  { id: '80x297', label: '80 x 297 mm', bodyWidthMm: 80, pageWidthMm: 80, pageHeightMm: 297 },
+  { id: 'A4_210x297', label: 'A4 210 x 297 mm', bodyWidthMm: 210, pageWidthMm: 210, pageHeightMm: 297 },
+];
+const DEFAULT_CASH_PRINT_PRESET_ID = 'DEFAULT';
 
 const getHistoryPrintPresetById = (presetId: string): HistoryPrintPreset =>
   HISTORY_PRINT_PRESETS.find((preset) => preset.id === presetId) ||
   HISTORY_PRINT_PRESETS.find((preset) => preset.id === DEFAULT_HISTORY_PRINT_PRESET_ID) ||
   HISTORY_PRINT_PRESETS[0];
+
+const getCashPrintPresetById = (presetId: string): CashPrintPreset =>
+  CASH_PRINT_PRESETS.find((preset) => preset.id === presetId) ||
+  CASH_PRINT_PRESETS.find((preset) => preset.id === DEFAULT_CASH_PRINT_PRESET_ID) ||
+  CASH_PRINT_PRESETS[0];
 
 const readHistoryPrintPresetId = (): string => {
   if (typeof window === 'undefined') return DEFAULT_HISTORY_PRINT_PRESET_ID;
@@ -96,6 +126,26 @@ const writeHistoryPrintPresetId = (presetId: string): void => {
   if (typeof window === 'undefined') return;
   try {
     window.localStorage.setItem(HISTORY_PRINT_PRESET_STORAGE_KEY, presetId);
+  } catch {
+    // ignore storage write failures
+  }
+};
+
+const readCashPrintPresetId = (): string => {
+  if (typeof window === 'undefined') return DEFAULT_CASH_PRINT_PRESET_ID;
+  try {
+    const raw = window.localStorage.getItem(CASH_PRINT_PRESET_STORAGE_KEY);
+    if (!raw) return DEFAULT_CASH_PRINT_PRESET_ID;
+    return getCashPrintPresetById(raw).id;
+  } catch {
+    return DEFAULT_CASH_PRINT_PRESET_ID;
+  }
+};
+
+const writeCashPrintPresetId = (presetId: string): void => {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(CASH_PRINT_PRESET_STORAGE_KEY, presetId);
   } catch {
     // ignore storage write failures
   }
@@ -197,8 +247,8 @@ const THERMAL_MAX_COLUMNS = 120;
 const THERMAL_COLUMNS_PER_MM = 0.55;
 const THERMAL_COLUMN_SAFETY_OFFSET = 1;
 const THERMAL_FULL_REPORT_COLUMNS = 48;
-const THERMAL_FULL_BODY_WIDTH_MM = 72;
-const THERMAL_FULL_PAGE_WIDTH_MM = 80;
+const THERMAL_FULL_BODY_WIDTH_MM = CASH_PRINT_DEFAULT_BODY_WIDTH_MM;
+const THERMAL_FULL_PAGE_WIDTH_MM = CASH_PRINT_DEFAULT_PAGE_WIDTH_MM;
 
 const normalizeThermalText = (value: string): string => value.replace(/\s+/g, ' ').trim();
 
@@ -330,6 +380,8 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
   const [historyVisible, setHistoryVisible] = useState(false);
   const [historyPrintSettingsOpen, setHistoryPrintSettingsOpen] = useState(false);
   const [historyPrintPresetId, setHistoryPrintPresetId] = useState<string>(() => readHistoryPrintPresetId());
+  const [cashPrintSettingsOpen, setCashPrintSettingsOpen] = useState(false);
+  const [cashPrintPresetId, setCashPrintPresetId] = useState<string>(() => readCashPrintPresetId());
   const [activeTab, setActiveTab] = useState<SummaryTab>('REPORT');
   const [cashInput, setCashInput] = useState(cashRegisterAmount.toFixed(2));
   const [cashPurchaseType, setCashPurchaseType] = useState<CashPurchaseType>('INGREDIENT');
@@ -357,13 +409,26 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
   }, [historyPrintPresetId]);
 
   useEffect(() => {
+    writeCashPrintPresetId(cashPrintPresetId);
+  }, [cashPrintPresetId]);
+
+  useEffect(() => {
     if (historyVisible) return;
     setHistoryPrintSettingsOpen(false);
   }, [historyVisible]);
 
+  useEffect(() => {
+    if (activeTab === 'CASH') return;
+    setCashPrintSettingsOpen(false);
+  }, [activeTab]);
+
   const selectedHistoryPrintPreset = useMemo(
     () => getHistoryPrintPresetById(historyPrintPresetId),
     [historyPrintPresetId]
+  );
+  const selectedCashPrintPreset = useMemo(
+    () => getCashPrintPresetById(cashPrintPresetId),
+    [cashPrintPresetId]
   );
 
   const productSalesMap = useMemo(
@@ -628,9 +693,12 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
       const isSummaryMode = mode === 'SUMMARY';
       const summaryPaperWidthMm = selectedHistoryPrintPreset.paperWidthMm || getReceiptPaperWidthMm();
       const summaryPageHeightMm = selectedHistoryPrintPreset.pageHeightMm;
-      const paperWidthMm = isSummaryMode ? summaryPaperWidthMm : THERMAL_FULL_BODY_WIDTH_MM;
-      const pageWidthMm = isSummaryMode ? summaryPaperWidthMm : THERMAL_FULL_PAGE_WIDTH_MM;
-      const pageHeightMm = isSummaryMode ? summaryPageHeightMm : null;
+      const fullPaperWidthMm = selectedCashPrintPreset.bodyWidthMm;
+      const fullPageWidthMm = selectedCashPrintPreset.pageWidthMm;
+      const fullPageHeightMm = selectedCashPrintPreset.pageHeightMm;
+      const paperWidthMm = isSummaryMode ? summaryPaperWidthMm : fullPaperWidthMm;
+      const pageWidthMm = isSummaryMode ? summaryPaperWidthMm : fullPageWidthMm;
+      const pageHeightMm = isSummaryMode ? summaryPageHeightMm : fullPageHeightMm;
       const reportHorizontalPaddingMm = 2;
       const reportVerticalPaddingMm = isSummaryMode ? 2.5 : 2;
       const reportPadding = `${reportVerticalPaddingMm}mm ${reportHorizontalPaddingMm}mm`;
@@ -638,7 +706,9 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
       const reportContentWidthMm = Math.max(1, paperWidthMm - reportHorizontalPaddingMm * 2);
       const thermalColumns = isSummaryMode
         ? getThermalColumnsForPaperWidth(reportContentWidthMm)
-        : THERMAL_FULL_REPORT_COLUMNS;
+        : selectedCashPrintPreset.id === DEFAULT_CASH_PRINT_PRESET_ID
+          ? THERMAL_FULL_REPORT_COLUMNS
+          : getThermalColumnsForPaperWidth(reportContentWidthMm);
       const reportFontSizePx = isSummaryMode ? 10 : 12;
       const reportLineHeight = isSummaryMode ? 1.25 : 1.35;
       const reportFontWeight = isSummaryMode ? 700 : 800;
@@ -882,7 +952,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
       }, 120);
       return true;
     },
-    [selectedHistoryPrintPreset]
+    [selectedCashPrintPreset, selectedHistoryPrintPreset]
   );
 
   const handleSaleClick = (e: React.MouseEvent<HTMLButtonElement>, saleId: string) => {
@@ -1258,6 +1328,50 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
               <p className="text-sm font-black text-yellow-300">
                 Caixa estimado: {formatCurrency(estimatedClosingCash)}
               </p>
+              <div className="mt-2 flex items-center justify-between gap-2">
+                <p className="text-[10px] font-black uppercase tracking-widest text-slate-300">
+                  Modelo: {selectedCashPrintPreset.label}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setCashPrintSettingsOpen((current) => !current)}
+                  className="qb-btn-touch bg-slate-800 text-slate-100 p-2 rounded-xl hover:bg-slate-700 transition-colors"
+                  title="Modelos de impressão"
+                  aria-label="Abrir modelos de impressão do caixa"
+                  aria-expanded={cashPrintSettingsOpen}
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="3" />
+                    <path d="M19.4 15a1.6 1.6 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.6 1.6 0 0 0-1.82-.33 1.6 1.6 0 0 0-1 1.46V21a2 2 0 0 1-4 0v-.09a1.6 1.6 0 0 0-1-1.46 1.6 1.6 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.6 1.6 0 0 0 .33-1.82 1.6 1.6 0 0 0-1.46-1H3a2 2 0 0 1 0-4h.09a1.6 1.6 0 0 0 1.46-1 1.6 1.6 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.6 1.6 0 0 0 1.82.33h.01a1.6 1.6 0 0 0 1-1.46V3a2 2 0 0 1 4 0v.09a1.6 1.6 0 0 0 1 1.46h.01a1.6 1.6 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.6 1.6 0 0 0-.33 1.82v.01a1.6 1.6 0 0 0 1.46 1H21a2 2 0 0 1 0 4h-.09a1.6 1.6 0 0 0-1.46 1z" />
+                  </svg>
+                </button>
+              </div>
+              {cashPrintSettingsOpen && (
+                <div className="mt-2 bg-slate-800 border border-slate-700 rounded-2xl p-3 space-y-2">
+                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-300">
+                    Modelos de impressão
+                  </p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    {CASH_PRINT_PRESETS.map((preset) => (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        onClick={() => {
+                          setCashPrintPresetId(preset.id);
+                          setCashPrintSettingsOpen(false);
+                        }}
+                        className={`qb-btn-touch border rounded-xl px-3 py-2 text-[10px] font-black uppercase tracking-widest transition-colors ${
+                          cashPrintPresetId === preset.id
+                            ? 'bg-white text-slate-900 border-white'
+                            : 'bg-slate-900 text-slate-100 border-slate-600 hover:border-slate-300'
+                        }`}
+                      >
+                        {preset.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
               <button
                 onClick={() => {
                   printReport(currentDayReport, sales);
