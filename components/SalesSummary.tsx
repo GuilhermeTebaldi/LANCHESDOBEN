@@ -39,6 +39,12 @@ interface HistoryDrawerEntry {
 }
 
 type PaymentMethodSummaryKey = 'PIX' | 'DEBITO' | 'CREDITO' | 'DINHEIRO' | 'DIVIDIDO';
+interface HistoryPrintPreset {
+  id: string;
+  label: string;
+  paperWidthMm: number;
+  pageHeightMm: number;
+}
 
 const COLORS = ['#ef4444', '#f59e0b', '#3b82f6', '#10b981', '#6366f1', '#ec4899'];
 const PAYMENT_METHOD_ORDER: PaymentMethodSummaryKey[] = ['DEBITO', 'PIX', 'DINHEIRO', 'CREDITO', 'DIVIDIDO'];
@@ -59,6 +65,40 @@ const APP_ORIGIN_STYLE: Record<AppOrigin, { card: string }> = {
   KEETA: {
     card: 'bg-emerald-600 text-white',
   },
+};
+const HISTORY_PRINT_PRESET_STORAGE_KEY = 'qb_history_print_preset_v1';
+const HISTORY_PRINT_PRESETS: HistoryPrintPreset[] = [
+  { id: '48x297', label: '48 x 297 mm', paperWidthMm: 48, pageHeightMm: 297 },
+  { id: '58x297', label: '58 x 297 mm', paperWidthMm: 58, pageHeightMm: 297 },
+  { id: '72x297', label: '72 x 297 mm', paperWidthMm: 72, pageHeightMm: 297 },
+  { id: '80x297', label: '80 x 297 mm', paperWidthMm: 80, pageHeightMm: 297 },
+  { id: 'A4_210x297', label: 'A4 210 x 297 mm', paperWidthMm: 210, pageHeightMm: 297 },
+];
+const DEFAULT_HISTORY_PRINT_PRESET_ID = '80x297';
+
+const getHistoryPrintPresetById = (presetId: string): HistoryPrintPreset =>
+  HISTORY_PRINT_PRESETS.find((preset) => preset.id === presetId) ||
+  HISTORY_PRINT_PRESETS.find((preset) => preset.id === DEFAULT_HISTORY_PRINT_PRESET_ID) ||
+  HISTORY_PRINT_PRESETS[0];
+
+const readHistoryPrintPresetId = (): string => {
+  if (typeof window === 'undefined') return DEFAULT_HISTORY_PRINT_PRESET_ID;
+  try {
+    const raw = window.localStorage.getItem(HISTORY_PRINT_PRESET_STORAGE_KEY);
+    if (!raw) return DEFAULT_HISTORY_PRINT_PRESET_ID;
+    return getHistoryPrintPresetById(raw).id;
+  } catch {
+    return DEFAULT_HISTORY_PRINT_PRESET_ID;
+  }
+};
+
+const writeHistoryPrintPresetId = (presetId: string): void => {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(HISTORY_PRINT_PRESET_STORAGE_KEY, presetId);
+  } catch {
+    // ignore storage write failures
+  }
 };
 
 const getSaleOriginLabel = (origin: SaleOrigin | null | undefined): string => {
@@ -153,7 +193,7 @@ const escapeHtml = (value: string): string =>
 
 const THERMAL_DEFAULT_COLUMNS = 40;
 const THERMAL_MIN_COLUMNS = 20;
-const THERMAL_MAX_COLUMNS = 48;
+const THERMAL_MAX_COLUMNS = 120;
 const THERMAL_COLUMNS_PER_MM = 0.55;
 const THERMAL_COLUMN_SAFETY_OFFSET = 1;
 const THERMAL_FULL_REPORT_COLUMNS = 48;
@@ -288,6 +328,8 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
   const [popoverStyle, setPopoverStyle] = useState<React.CSSProperties>({});
   const [isClosing, setIsClosing] = useState(false);
   const [historyVisible, setHistoryVisible] = useState(false);
+  const [historyPrintSettingsOpen, setHistoryPrintSettingsOpen] = useState(false);
+  const [historyPrintPresetId, setHistoryPrintPresetId] = useState<string>(() => readHistoryPrintPresetId());
   const [activeTab, setActiveTab] = useState<SummaryTab>('REPORT');
   const [cashInput, setCashInput] = useState(cashRegisterAmount.toFixed(2));
   const [cashPurchaseType, setCashPurchaseType] = useState<CashPurchaseType>('INGREDIENT');
@@ -309,6 +351,20 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
       setCashPurchaseIngredientId(firstIngredientId);
     }
   }, [allIngredients, cashPurchaseIngredientId, cashPurchaseType]);
+
+  useEffect(() => {
+    writeHistoryPrintPresetId(historyPrintPresetId);
+  }, [historyPrintPresetId]);
+
+  useEffect(() => {
+    if (historyVisible) return;
+    setHistoryPrintSettingsOpen(false);
+  }, [historyVisible]);
+
+  const selectedHistoryPrintPreset = useMemo(
+    () => getHistoryPrintPresetById(historyPrintPresetId),
+    [historyPrintPresetId]
+  );
 
   const productSalesMap = useMemo(
     () =>
@@ -570,8 +626,11 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
       if (!printWindow) return false;
 
       const isSummaryMode = mode === 'SUMMARY';
-      const paperWidthMm = isSummaryMode ? getReceiptPaperWidthMm() : THERMAL_FULL_BODY_WIDTH_MM;
-      const pageWidthMm = isSummaryMode ? paperWidthMm : THERMAL_FULL_PAGE_WIDTH_MM;
+      const summaryPaperWidthMm = selectedHistoryPrintPreset.paperWidthMm || getReceiptPaperWidthMm();
+      const summaryPageHeightMm = selectedHistoryPrintPreset.pageHeightMm;
+      const paperWidthMm = isSummaryMode ? summaryPaperWidthMm : THERMAL_FULL_BODY_WIDTH_MM;
+      const pageWidthMm = isSummaryMode ? summaryPaperWidthMm : THERMAL_FULL_PAGE_WIDTH_MM;
+      const pageHeightMm = isSummaryMode ? summaryPageHeightMm : null;
       const reportHorizontalPaddingMm = 2;
       const reportVerticalPaddingMm = isSummaryMode ? 2.5 : 2;
       const reportPadding = `${reportVerticalPaddingMm}mm ${reportHorizontalPaddingMm}mm`;
@@ -789,7 +848,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
       letter-spacing: 0;
     }
     @page {
-      size: ${pageWidthMm}mm auto;
+      size: ${pageWidthMm}mm ${pageHeightMm ? `${pageHeightMm}mm` : 'auto'};
       margin: 0;
     }
     @media screen {
@@ -823,7 +882,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
       }, 120);
       return true;
     },
-    []
+    [selectedHistoryPrintPreset]
   );
 
   const handleSaleClick = (e: React.MouseEvent<HTMLButtonElement>, saleId: string) => {
@@ -1051,15 +1110,58 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
                 <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">
                   {orderedHistory.length} registro(s)
                 </p>
+                <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">
+                  Modelo: {selectedHistoryPrintPreset.label}
+                </p>
               </div>
-              <button
-                onClick={() => setHistoryVisible(false)}
-                className="qb-btn-touch bg-slate-100 text-slate-700 p-2 rounded-xl hover:bg-slate-200 transition-colors"
-                title="Fechar histórico"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg>
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setHistoryPrintSettingsOpen((current) => !current)}
+                  className="qb-btn-touch bg-slate-100 text-slate-700 p-2 rounded-xl hover:bg-slate-200 transition-colors"
+                  title="Modelos de impressão"
+                  aria-label="Abrir modelos de impressão"
+                  aria-expanded={historyPrintSettingsOpen}
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="3" />
+                    <path d="M19.4 15a1.6 1.6 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.6 1.6 0 0 0-1.82-.33 1.6 1.6 0 0 0-1 1.46V21a2 2 0 0 1-4 0v-.09a1.6 1.6 0 0 0-1-1.46 1.6 1.6 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.6 1.6 0 0 0 .33-1.82 1.6 1.6 0 0 0-1.46-1H3a2 2 0 0 1 0-4h.09a1.6 1.6 0 0 0 1.46-1 1.6 1.6 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.6 1.6 0 0 0 1.82.33h.01a1.6 1.6 0 0 0 1-1.46V3a2 2 0 0 1 4 0v.09a1.6 1.6 0 0 0 1 1.46h.01a1.6 1.6 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.6 1.6 0 0 0-.33 1.82v.01a1.6 1.6 0 0 0 1.46 1H21a2 2 0 0 1 0 4h-.09a1.6 1.6 0 0 0-1.46 1z" />
+                  </svg>
+                </button>
+                <button
+                  onClick={() => setHistoryVisible(false)}
+                  className="qb-btn-touch bg-slate-100 text-slate-700 p-2 rounded-xl hover:bg-slate-200 transition-colors"
+                  title="Fechar histórico"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18" /><path d="m6 6 12 12" /></svg>
+                </button>
+              </div>
             </div>
+            {historyPrintSettingsOpen && (
+              <div className="mt-4 bg-slate-50 border border-slate-200 rounded-2xl p-3 space-y-2">
+                <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">
+                  Modelos de impressão
+                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {HISTORY_PRINT_PRESETS.map((preset) => (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      onClick={() => {
+                        setHistoryPrintPresetId(preset.id);
+                        setHistoryPrintSettingsOpen(false);
+                      }}
+                      className={`qb-btn-touch border rounded-xl px-3 py-2 text-[10px] font-black uppercase tracking-widest transition-colors ${
+                        historyPrintPresetId === preset.id
+                          ? 'bg-slate-900 text-white border-slate-900'
+                          : 'bg-white text-slate-700 border-slate-200 hover:border-slate-400'
+                      }`}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             <div className="mt-5 flex-1 min-h-0 overflow-y-auto overscroll-contain pr-1 scrollbar-hide space-y-3">
               {orderedHistory.length === 0 ? (
                 <p className="text-xs font-bold uppercase tracking-widest text-slate-400">
