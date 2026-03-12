@@ -1,270 +1,187 @@
-# ME AJUDE - PORTAR AS MUDANCAS DO POS (cliente unico) PARA O POS SAAS
+# Guia de Portabilidade: Impressao (Replica Local -> SaaS)
 
-Data desta consolidacao: 2026-03-11
+## Resumo do que foi implementado neste sistema
 
-## 1) Resumo executivo (estado final)
-Neste chat consolidamos um novo fluxo de pagamento para suportar:
-- Pagamento dividido por pessoas (ex.: 2 pessoas, valor dividido automatico)
-- Pagamento misto para 1 pessoa (ex.: parte PIX + parte dinheiro)
-- Canal de venda por app (iFood / 99 / Keeta) via modal flutuante
+Foi implementado um pacote completo de ajustes de impressao, sem remover funcionalidades existentes:
 
-No estado final, a tela de pagamento ficou assim:
-- Metodos base continuam: PIX, Debito, Credito, Dinheiro
-- Botao `Dividido` ativo/desativo (vira `Cancelar Dividido` quando em modo dividido)
-- Botao `Apps` junto do `Dividido` (lado a lado)
-- Sem card fixo `Canal da venda` no meio da tela
-- `Apps` abre modal flutuante com iFood / 99 / Keeta
-- Modal de apps fecha ao selecionar canal e tambem tem `X` no canto para fechar
-- Botao `Alterar Forma` foi removido do footer
-- Footer ficou: `Voltar`, `Cancelar Venda`, `Confirmar Pago`
+1. Correcao de corte lateral na impressao.
+2. Correcao do Historico de Fechamentos para trazer valores de pagamento corretamente (PIX, Debito, Credito, Dinheiro, Dividido, canais de app).
+3. Engrenagem com modelos de impressao no Historico de Fechamentos.
+4. Engrenagem com modelos de impressao na Aba Caixa (Relatorio do Dia), mantendo o modo `Padrao` sem alterar o comportamento anterior.
+5. Engrenagem com modelos de impressao no Historico de Vendas (segunda via de cupom), com `Padrao` intacto.
+6. Salvamento permanente das escolhas de modelo no navegador (localStorage).
 
-## 2) O que foi alterado no backend (obrigatorio para funcionar sem erro 400)
-Commit backend ja feito e publicado no repo deste projeto:
-- `2b86788` - `feat(backend): suportar pagamento dividido no state command`
+## Correcoes tecnicas feitas
 
-Arquivos backend impactados:
-- `backend/src/services/state-command.service.ts`
-- `backend/src/services/state-command.service.test.ts`
-- `backend/src/types/frontend.ts`
-- `backend/src/validators/state-command.validator.ts`
+### 1) Historico de Fechamentos sem perder valores de pagamento
 
-### 2.1) Tipos aceitos no backend
-- Metodo de pagamento agora aceita: `PIX | DEBITO | CREDITO | DINHEIRO | DIVIDIDO`
-- Modos de divisao: `PEOPLE | MIXED`
-- Origem da venda: `LOCAL | IFOOD | APP99 | KEETA`
+Antes, alguns fechamentos podiam cair em "Sem valores por forma de pagamento" mesmo com vendas no periodo.
 
-Referencias:
-- `backend/src/types/frontend.ts:58-82`
-- `backend/src/validators/state-command.validator.ts:56-68`
-- `backend/src/validators/state-command.validator.ts:114-125`
+Causa principal:
+- Associacao de vendas ao fechamento por `dia` (data local), que falha em cenarios de virada de dia.
 
-### 2.2) Validacoes server-side de pagamento dividido
-No `SALE_DRAFT_FINALIZE` com `paymentMethod = DIVIDIDO`:
-- `splitMode` obrigatorio e valido
-- `splitCount` obrigatorio e valido
-- `splitPayments` obrigatorio (>= 1)
-- Se `PEOPLE`, quantidade de parcelas precisa ser igual a `splitCount`
-- Se `MIXED`, `splitCount` precisa ser 1 e precisa de >= 2 parcelas
-- Cada parcela precisa de valor > 0
-- Em parcela de dinheiro, `cashReceived` obrigatorio e >= valor da parcela
-- Soma das parcelas precisa bater exatamente com total da venda
+Correcao aplicada:
+- Associacao de vendas por janela temporal entre fechamentos (ordenado por `closedAt`), com fallback por dia quando necessario.
+- Evita duplicidade no historico inferido usando controle de IDs de venda ja consumidos.
 
-Referencias:
-- `backend/src/services/state-command.service.ts:556-653`
-- `backend/src/services/state-command.service.ts:669-705`
-- `backend/src/services/state-command.service.ts:843-881`
-- `backend/src/services/state-command.service.ts:921-954`
+Impacto:
+- O fechamento impresso passa a usar o conjunto correto de vendas do periodo.
 
-### 2.3) Validacoes de app sale no backend
-Se origem for app (`IFOOD`, `APP99`, `KEETA`):
-- `appOrderTotal` valido e > 0 e obrigatorio antes de finalizar/confirmar
+### 2) Corte de texto nas laterais
 
-Referencias:
-- `backend/src/services/state-command.service.ts:854-864`
-- `backend/src/services/state-command.service.ts:906-913`
+Causas tratadas:
+- Colunas calculadas sem considerar bem a area util interna.
+- Linhas longas enviadas inteiras para `pre`.
 
-## 3) O que foi alterado no frontend
-Arquivos frontend impactados:
-- `App.tsx`
-- `types.ts`
-- `data/stateCommandClient.ts`
-- `components/PrintReceipt.tsx`
-- `components/AdminDashboard.tsx`
-- `components/SalesSummary.tsx`
+Correcao aplicada:
+- Calculo de colunas baseado na largura interna (descontando padding horizontal).
+- Margem de seguranca no calculo de colunas para reduzir risco de clipping fisico.
+- Quebra de mensagens longas com `wrap()` antes de imprimir.
 
-## 3.1) Tipos e contrato de comando no frontend
-### `types.ts`
-- Criado `SaleBasePaymentMethod`
-- `SalePaymentMethod` agora inclui `DIVIDIDO`
-- Criado `SalePaymentSplitMode` (`PEOPLE | MIXED`)
-- Criado `SalePaymentSplitEntry`
-- `SalePayment` agora suporta `splitMode`, `splitCount`, `splitPayments`
+Impacto:
+- Reducao de cortes de letras nas bordas e de frases truncadas no papel.
 
-Referencia:
-- `types.ts:59-83`
+## Modelos de impressao adicionados
 
-### `data/stateCommandClient.ts`
-`SALE_DRAFT_FINALIZE` agora envia opcionalmente:
-- `splitMode`
-- `splitCount`
-- `splitPayments[]` (sequence, label, method, amount, cashReceived)
+Os mesmos modelos foram expostos em pontos diferentes da interface:
 
-Referencia:
-- `data/stateCommandClient.ts:82-97`
+- `48 x 297 mm`
+- `58 x 297 mm`
+- `72 x 297 mm`
+- `80 x 297 mm`
+- `A4 210 x 297 mm`
 
-## 3.2) UI final de pagamento (`App.tsx`)
-### A) Divisao de pagamento
-- Botao `Dividido` abre modal para informar quantidade de pessoas
-- Se quantidade > 1 => modo `PEOPLE` (valor auto dividido)
-- Se quantidade = 1 => modo `MIXED` (operador informa parcelas por metodo)
-- Em dinheiro, exige valor recebido por parcela
-- Mostra troco/faltante por parcela em dinheiro
-- Permite `Voltar`, `Reiniciar`, `Proximo/Concluir` dentro da area de detalhe
-- So confirma venda quando plano dividido esta completo
+No cupom/segunda via existe tambem:
+- `Padrao` (nao altera o comportamento antigo)
 
-Referencias:
-- `App.tsx:1430-1544`
-- `App.tsx:1553-1618`
-- `App.tsx:2234-2265`
-- `App.tsx:2955-3045`
-- `App.tsx:3151-3190`
+## Onde cada engrenagem aparece
 
-### B) Legibilidade do modo por pessoas
-Texto melhorado no bloco da pessoa atual:
-- `Pessoa X de Y`
-- `Valor desta pessoa: R$ ...` com destaque visual
+### A) Historico de Fechamentos (SalesSummary)
+- Local: painel lateral "Historico de Fechamentos".
+- Exibe modelo atual e permite troca por preset.
+- Persistencia local por chave:
+  - `qb_history_print_preset_v1`
 
-Referencia:
-- `App.tsx:2963-2972`
+### B) Aba Caixa - Relatorio do Dia (SalesSummary)
+- Local: card escuro "Previa do dia".
+- Engrenagem com modelos de impressao para o relatorio.
+- `Padrao` preserva o layout anterior (larguras e colunas antigas).
+- Persistencia local por chave:
+  - `qb_cash_print_preset_v1`
 
-### C) Apps no lugar correto (sem card fixo no meio)
-Fluxo final:
-- Card fixo `Canal da venda` foi removido da tela principal
-- Botao `Apps` foi adicionado junto com `Dividido`
-- `Dividido` e `Apps` estao lado a lado
-- `Apps` abre modal flutuante
-- Modal tem botoes iFood / 99 / Keeta
-- Selecionou canal -> aplica e fecha modal
-- Modal tambem fecha no `X` (canto superior) e ao clicar fora
+### C) Historico de Vendas (App - modal de segunda via)
+- Local: cabecalho do modal "Historico de Vendas".
+- Engrenagem ao lado do botao de fechar.
+- Modelos aplicados ao cupom via largura de bobina salva em localStorage.
+- `Padrao` remove override e volta ao comportamento original.
+- Persistencia local por chave:
+  - `qb_receipt_print_preset_v1`
+- Chave de largura usada pelo cupom:
+  - `qb_receipt_paper_width_mm`
 
-Referencias:
-- `App.tsx:2885-2915`
-- `App.tsx:3084-3148`
+## Ajuste de limite de largura para suportar A4
 
-### D) Correcao de estado no cancelar dividido
-Bug corrigido:
-- Ao abrir `Dividido` e cancelar, nao fica mais preso em `Cancelar Dividido`
-- Agora volta para o metodo anterior (PIX, Debito, Credito, Dinheiro)
+Arquivo utilitario:
+- `utils/receiptPaper.ts`
 
-Referencias:
-- `App.tsx:595-596`
-- `App.tsx:1338-1346`
-- `App.tsx:2889-2892`
-- `App.tsx:3173-3176`
+Mudanca:
+- `MAX_RECEIPT_PAPER_WIDTH_MM` passou de `80` para `210`.
 
-### E) Footer final
-- Botao `Alterar Forma` removido
-- Footer final: `Voltar`, `Cancelar Venda`, `Confirmar Pago`
+Motivo:
+- Permitir preset `A4 210 x 297 mm` no fluxo de cupom/segunda via.
 
-Referencia:
-- `App.tsx:3055-3080`
+## Garantia de nao regressao executada aqui
 
-## 3.3) Impressao e relatorios
-### `PrintReceipt.tsx`
-- Agora imprime detalhes de parcelas quando pagamento e `DIVIDIDO`
-- Exibe metodo por parcela, valor, recebido e troco/faltante quando for dinheiro
+Foi executado apos as alteracoes:
 
-Referencias:
-- `components/PrintReceipt.tsx` (blocos de `paymentSplits` e renderizacao de divisao)
+1. `npm run build:sistema` (frontend): OK
+2. `npm --prefix backend test` (backend): OK (60/60)
 
-### `AdminDashboard.tsx`
-- Incluido label e badge para `DIVIDIDO`
+## Commits relevantes (ordem cronologica)
 
-Referencia:
-- `components/AdminDashboard.tsx:38-47`
+- `3d46545` - fix(history-print): vincular vendas por janela de fechamento e quebrar linhas longas
+- `5ab151e` - feat(history-print): adicionar engrenagem com presets de tamanho de papel
+- `6ac521c` - feat(print-settings): presets permanentes no historico e cupom da aba caixa
+- `d817220` - feat(receipt-history): engrenagem de modelos no historico de vendas
 
-### `SalesSummary.tsx`
-- Incluido `DIVIDIDO` no resumo e ordem de metodos
+---
 
-Referencia:
-- `components/SalesSummary.tsx` (PaymentMethodSummaryKey, labels e acumulacao)
+## Como portar para o SaaS com padrao por usuario
 
-## 4) Autenticacoes e protecoes (estado final)
-Voce pediu "todas as autenticacoes". Aqui esta o mapa completo.
+No SaaS, a persistencia nao deve ficar so em localStorage. Cada usuario precisa ter sua propria configuracao salva no backend.
 
-## 4.1) Frontend - gate de acesso ao sistema
-No `App.tsx`, antes de liberar o sistema:
-- Verifica `ADMIN_GATE_KEY` em `sessionStorage` e `localStorage`
-- Se nao existir em ambos, redireciona para raiz do site
-- Mantem `AdminSessionBarrier` com token local + backup em session
-- Heartbeat de reforco a cada 15s e em focus/pageshow/visibility
+### Objetivo
 
-Referencias:
-- `App.tsx:42-44`
-- `App.tsx:204-269`
-- `App.tsx:619-697`
+Cada usuario autenticado deve ter:
 
-## 4.2) Backend state API - autenticacao de escrita
-Rotas de estado:
-- `HEAD /api/v1/state`
-- `GET /api/v1/state`
-- `POST /api/v1/state/commands`
+- preset de impressao do Historico de Fechamentos
+- preset de impressao da Aba Caixa
+- preset de impressao do Historico de Vendas (segunda via)
 
-Leitura (`HEAD/GET`) usa `stateReadAuth` (Bearer opcional).
-Escrita (`PUT/DELETE/POST commands`) usa `stateWriteAuth`:
-- Aceita `Authorization: Bearer <jwt>` OU
-- Aceita `X-State-Token` (jwt de escrita de estado)
-- Exige `If-Match` com versao atual
+### Modelo de dados recomendado
 
-Referencias:
-- `backend/src/routes/state.routes.ts:9-13`
-- `backend/src/middlewares/state-auth.middleware.ts:14-46`
-- `backend/src/controllers/state.controller.ts:13-23`
-- `backend/src/controllers/state.controller.ts:78-90`
+Criar tabela (exemplo): `user_print_preferences`
 
-## 4.3) Frontend state client - handshake de token/versao
-O frontend usa fluxo seguro de concorrencia otimista:
-- Faz HEAD/GET para obter `X-State-Version` + `X-State-Token`
-- Envia comandos com `If-Match` e `X-State-Token`
-- Se receber 401/412/428, invalida contexto e tenta 1 vez de novo
+Campos sugeridos:
 
-Referencias:
-- `data/stateCommandClient.ts:418-445`
-- `data/stateCommandClient.ts:469-503`
+- `user_id` (FK unico)
+- `history_closing_preset` (string)
+- `cash_report_preset` (string)
+- `receipt_history_preset` (string)
+- `updated_at` (timestamp)
 
-## 5) Testes executados durante este chat
-Executados varias vezes, sempre com sucesso:
-- `npm run build:sistema` -> OK
-- `npm --prefix backend test` -> 60/60 OK
-- `npm --prefix backend run lint` -> OK
+Opcional:
+- `overrides_json` para extensoes futuras (ex: fonte, margem, densidade)
 
-Teste de producao investigado anteriormente:
-- `POST /api/v1/state/commands` com `paymentMethod: DIVIDIDO` dava 400 quando backend antigo ainda nao estava atualizado.
-- Causa raiz: enum antigo sem `DIVIDIDO`.
-- Solucao: deploy backend com commit `2b86788`.
+### API recomendada
 
-## 6) Checklist de portabilidade para a pasta SaaS
-Ordem recomendada para evitar quebra:
+1. `GET /api/print-preferences`
+- retorna preferencias do usuario logado
 
-1. Backend primeiro (obrigatorio)
-- Portar:
-  - `backend/src/types/frontend.ts`
-  - `backend/src/validators/state-command.validator.ts`
-  - `backend/src/services/state-command.service.ts`
-  - `backend/src/services/state-command.service.test.ts`
-- Rodar:
-  - `npm --prefix backend test`
-  - `npm --prefix backend run lint`
+2. `PUT /api/print-preferences`
+- atualiza parcial/total
+- valida presets permitidos em whitelist
 
-2. Frontend contrato/tipos
-- Portar:
-  - `types.ts`
-  - `data/stateCommandClient.ts`
+Payload exemplo:
 
-3. Frontend UI e fluxo
-- Portar:
-  - `App.tsx`
-  - `components/PrintReceipt.tsx`
-  - `components/AdminDashboard.tsx`
-  - `components/SalesSummary.tsx`
+```json
+{
+  "historyClosingPreset": "80x297",
+  "cashReportPreset": "PADRAO",
+  "receiptHistoryPreset": "58x297"
+}
+```
 
-4. Build e smoke tests
-- `npm run build:sistema`
-- Fluxos manuais minimos:
-  - PIX simples
-  - Dinheiro com troco
-  - Dividido PEOPLE (2 pessoas)
-  - Dividido MIXED (1 pessoa, 2 parcelas)
-  - Apps (iFood/99/Keeta) com fechamento do modal
-  - Confirmar pagamento e imprimir comprovante
+### Regra de precedencia no frontend SaaS
 
-## 7) Riscos e observacoes para o SaaS
-- Se backend SaaS nao receber as mudancas de enum/validacao, vai repetir erro 400 em `SALE_DRAFT_FINALIZE` com `DIVIDIDO`.
-- Em infraestrutura SaaS com multiplos tenants, garantir que auth/contexto de estado nao misture versoes entre tenants.
-- O fluxo atual ainda usa `Proximo/Concluir` dentro do card de detalhe da divisao (nao no botao verde do footer).
+1. Preferencia vinda da API do usuario
+2. Fallback para localStorage (migracao suave)
+3. Fallback para default do sistema (`Padrao` ou `80x297`, conforme contexto)
 
-## 8) Estado atual de commit neste workspace
-- Backend dividido: commitado em `2b86788`.
-- Frontend: ha alteracoes locais ainda nao commitadas (incluindo `App.tsx` e componentes).
+### Estrategia de migracao segura
 
-Se quiser, no proximo passo eu gero um plano de cherry-pick/patch exatamente na ordem para aplicar no seu repositorio SaaS sem regressao.
+1. Deploy backend com tabela + endpoints (sem quebrar clientes antigos)
+2. Frontend passa a ler API primeiro
+3. Se usuario tiver apenas valor local antigo, enviar `PUT` 1 vez para migrar e marcar migrou
+4. Depois da migracao, manter sincronizado (salvou no UI -> salva no backend)
+
+### Regras importantes no SaaS
+
+- Validar preset no backend para impedir valores invalidos.
+- Nunca confiar apenas no valor vindo do cliente.
+- Garantir isolamento por `user_id`.
+- Em ambiente multi-tenant, incluir escopo de tenant quando necessario.
+
+## Checklist rapido para replicar no SaaS
+
+1. Portar constantes de presets e IDs.
+2. Portar os 3 pontos de UI com engrenagem.
+3. Portar o comportamento de `Padrao` sem alteracao de medidas legadas.
+4. Portar a associacao por janela temporal no Historico de Fechamentos.
+5. Portar `wrap` de mensagens longas no layout de impressao.
+6. Substituir persistencia local por API por usuario.
+7. Rodar build + testes de regressao apos merge.
+
+## Observacao final
+
+A implementacao atual ficou preparada para operacao local (persistencia no browser) e ja separa claramente os contextos de impressao. Isso facilita a migracao para SaaS por usuario sem alterar regra de negocio de vendas, caixa e historico.
