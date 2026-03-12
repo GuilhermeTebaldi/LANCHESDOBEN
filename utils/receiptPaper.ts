@@ -1,6 +1,6 @@
 const DEFAULT_RECEIPT_PAPER_WIDTH_MM = 58;
 const MIN_RECEIPT_PAPER_WIDTH_MM = 48;
-const MAX_RECEIPT_PAPER_WIDTH_MM = 80;
+const MAX_RECEIPT_PAPER_WIDTH_MM = 210;
 
 export const clampReceiptPaperWidthMm = (value: number): number =>
   Math.min(MAX_RECEIPT_PAPER_WIDTH_MM, Math.max(MIN_RECEIPT_PAPER_WIDTH_MM, Math.round(value)));

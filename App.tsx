@@ -38,6 +38,7 @@ import {
   warmupStateWriteContext,
   type StateCommand,
 } from './data/stateCommandClient';
+import { clampReceiptPaperWidthMm } from './utils/receiptPaper';
 
 const ADMIN_GATE_KEY = 'lanchesdoben_admin_gate';
 const ADMIN_SESSION_KEY = 'lanchesdoben_admin_session';
@@ -46,6 +47,8 @@ const OFFLINE_SALE_QUEUE_KEY = 'qb_offline_sale_queue_v1';
 const CASH_HISTORY_LEGACY_MODE_KEY = 'qb_cash_history_legacy_mode_v1';
 const LOCAL_CASH_REGISTER_KEY = 'qb_cash_register_local_v1';
 const LOCAL_DAILY_HISTORY_KEY = 'qb_daily_sales_history_local_v1';
+const RECEIPT_PAPER_WIDTH_KEY = 'qb_receipt_paper_width_mm';
+const RECEIPT_PRINT_PRESET_STORAGE_KEY = 'qb_receipt_print_preset_v1';
 
 type SaleRegisterCommand = Extract<StateCommand, { type: 'SALE_REGISTER' }>;
 
@@ -54,6 +57,11 @@ interface OfflineQueuedSale {
   queuedAt: string;
   attempts: number;
   lastError?: string;
+}
+interface ReceiptPrintPreset {
+  id: string;
+  label: string;
+  paperWidthMm: number | null;
 }
 
 interface RunCommandOptions {
@@ -80,6 +88,65 @@ interface StockUpdateOptions {
   useCashRegister?: boolean;
   purchaseDescription?: string;
 }
+
+const RECEIPT_PRINT_PRESETS: ReceiptPrintPreset[] = [
+  { id: 'PADRAO', label: 'Padrão', paperWidthMm: null },
+  { id: '48x297', label: '48 x 297 mm', paperWidthMm: 48 },
+  { id: '58x297', label: '58 x 297 mm', paperWidthMm: 58 },
+  { id: '72x297', label: '72 x 297 mm', paperWidthMm: 72 },
+  { id: '80x297', label: '80 x 297 mm', paperWidthMm: 80 },
+  { id: 'A4_210x297', label: 'A4 210 x 297 mm', paperWidthMm: 210 },
+];
+const DEFAULT_RECEIPT_PRINT_PRESET_ID = 'PADRAO';
+
+const getReceiptPrintPresetById = (presetId: string): ReceiptPrintPreset =>
+  RECEIPT_PRINT_PRESETS.find((preset) => preset.id === presetId) ||
+  RECEIPT_PRINT_PRESETS.find((preset) => preset.id === DEFAULT_RECEIPT_PRINT_PRESET_ID) ||
+  RECEIPT_PRINT_PRESETS[0];
+
+const readReceiptPrintPresetId = (): string => {
+  if (typeof window === 'undefined') return DEFAULT_RECEIPT_PRINT_PRESET_ID;
+  try {
+    const rawPreset = window.localStorage.getItem(RECEIPT_PRINT_PRESET_STORAGE_KEY);
+    if (rawPreset) return getReceiptPrintPresetById(rawPreset).id;
+
+    const rawWidth = Number(window.localStorage.getItem(RECEIPT_PAPER_WIDTH_KEY));
+    if (Number.isFinite(rawWidth) && rawWidth > 0) {
+      const normalizedWidth = clampReceiptPaperWidthMm(rawWidth);
+      const matchedPreset = RECEIPT_PRINT_PRESETS.find((preset) => preset.paperWidthMm === normalizedWidth);
+      if (matchedPreset) return matchedPreset.id;
+    }
+  } catch {
+    // ignore storage read failures
+  }
+  return DEFAULT_RECEIPT_PRINT_PRESET_ID;
+};
+
+const writeReceiptPrintPresetId = (presetId: string): void => {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(RECEIPT_PRINT_PRESET_STORAGE_KEY, presetId);
+  } catch {
+    // ignore storage write failures
+  }
+};
+
+const applyReceiptPrintPreset = (presetId: string): void => {
+  if (typeof window === 'undefined') return;
+  const preset = getReceiptPrintPresetById(presetId);
+  try {
+    if (preset.paperWidthMm === null) {
+      window.localStorage.removeItem(RECEIPT_PAPER_WIDTH_KEY);
+      return;
+    }
+    window.localStorage.setItem(
+      RECEIPT_PAPER_WIDTH_KEY,
+      String(clampReceiptPaperWidthMm(preset.paperWidthMm))
+    );
+  } catch {
+    // ignore storage write failures
+  }
+};
 
 const roundMoney = (value: number): number => Number(value.toFixed(2));
 
@@ -582,6 +649,8 @@ const App: React.FC = () => {
     message: '',
   });
   const [isUndoHistoryOpen, setIsUndoHistoryOpen] = useState(false);
+  const [receiptPrintSettingsOpen, setReceiptPrintSettingsOpen] = useState(false);
+  const [receiptPrintPresetId, setReceiptPrintPresetId] = useState<string>(() => readReceiptPrintPresetId());
   const [expandedUndoGroupId, setExpandedUndoGroupId] = useState<string | null>(null);
   const [isUndoProcessing, setIsUndoProcessing] = useState(false);
   const [isCartOpen, setIsCartOpen] = useState(false);
@@ -611,10 +680,23 @@ const App: React.FC = () => {
   const [splitCurrentCashReceivedInput, setSplitCurrentCashReceivedInput] = useState('');
   const cartEntryFxTimeoutRef = useRef<number | null>(null);
   const appOrderTotalInputRef = useRef<HTMLInputElement | null>(null);
+  const selectedReceiptPrintPreset = useMemo(
+    () => getReceiptPrintPresetById(receiptPrintPresetId),
+    [receiptPrintPresetId]
+  );
 
   useEffect(() => {
     isCashHistoryLegacyModeRef.current = isCashHistoryLegacyMode;
   }, [isCashHistoryLegacyMode]);
+
+  useEffect(() => {
+    writeReceiptPrintPresetId(receiptPrintPresetId);
+  }, [receiptPrintPresetId]);
+
+  useEffect(() => {
+    if (isUndoHistoryOpen) return;
+    setReceiptPrintSettingsOpen(false);
+  }, [isUndoHistoryOpen]);
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -3203,15 +3285,60 @@ const App: React.FC = () => {
                 <p className="text-[10px] uppercase tracking-widest text-slate-300">
                   Apenas vendas do dia atual (até Fechar Dia / Reiniciar)
                 </p>
+                <p className="text-[10px] uppercase tracking-widest text-slate-300">
+                  Modelo do cupom: {selectedReceiptPrintPreset.label}
+                </p>
               </div>
-              <button
-                onClick={() => setIsUndoHistoryOpen(false)}
-                className="qb-btn-touch bg-slate-800 hover:bg-slate-700 p-2 rounded-full transition-colors"
-                title="Fechar"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setReceiptPrintSettingsOpen((current) => !current)}
+                  className="qb-btn-touch bg-slate-800 hover:bg-slate-700 p-2 rounded-full transition-colors"
+                  title="Modelos de impressão"
+                  aria-label="Abrir modelos de impressão do cupom"
+                  aria-expanded={receiptPrintSettingsOpen}
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="3" />
+                    <path d="M19.4 15a1.6 1.6 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.6 1.6 0 0 0-1.82-.33 1.6 1.6 0 0 0-1 1.46V21a2 2 0 0 1-4 0v-.09a1.6 1.6 0 0 0-1-1.46 1.6 1.6 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.6 1.6 0 0 0 .33-1.82 1.6 1.6 0 0 0-1.46-1H3a2 2 0 0 1 0-4h.09a1.6 1.6 0 0 0 1.46-1 1.6 1.6 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.6 1.6 0 0 0 1.82.33h.01a1.6 1.6 0 0 0 1-1.46V3a2 2 0 0 1 4 0v.09a1.6 1.6 0 0 0 1 1.46h.01a1.6 1.6 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.6 1.6 0 0 0-.33 1.82v.01a1.6 1.6 0 0 0 1.46 1H21a2 2 0 0 1 0 4h-.09a1.6 1.6 0 0 0-1.46 1z" />
+                  </svg>
+                </button>
+                <button
+                  onClick={() => setIsUndoHistoryOpen(false)}
+                  className="qb-btn-touch bg-slate-800 hover:bg-slate-700 p-2 rounded-full transition-colors"
+                  title="Fechar"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+                </button>
+              </div>
             </div>
+            {receiptPrintSettingsOpen && (
+              <div className="px-4 py-3 bg-slate-800 border-b border-slate-700">
+                <p className="text-[10px] font-black uppercase tracking-widest text-slate-300 mb-2">
+                  Modelos de impressão
+                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  {RECEIPT_PRINT_PRESETS.map((preset) => (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      onClick={() => {
+                        setReceiptPrintPresetId(preset.id);
+                        applyReceiptPrintPreset(preset.id);
+                        setReceiptPrintSettingsOpen(false);
+                      }}
+                      className={`qb-btn-touch border rounded-xl px-3 py-2 text-[10px] font-black uppercase tracking-widest transition-colors ${
+                        receiptPrintPresetId === preset.id
+                          ? 'bg-white text-slate-900 border-white'
+                          : 'bg-slate-900 text-slate-100 border-slate-600 hover:border-slate-300'
+                      }`}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             <div className="p-4 max-h-[65vh] overflow-y-auto space-y-2 bg-slate-50">
               {recentUndoGroups.length === 0 && (
                 <div className="py-12 text-center text-xs uppercase tracking-widest font-black text-slate-400">
