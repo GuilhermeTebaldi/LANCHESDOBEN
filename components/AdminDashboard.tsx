@@ -1082,7 +1082,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
               </div>
               <div className="bg-slate-50 rounded-2xl border border-slate-200 p-4">
                 <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-1">
-                  Referência Balcão
+                  Valor no Balcão
                 </p>
                 <p className="text-2xl font-black text-slate-900">
                   R$ {appChannelSummary.totalReference.toFixed(2)}
@@ -1090,14 +1090,24 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
               </div>
               <div className="bg-blue-50 rounded-2xl border border-blue-100 p-4">
                 <p className="text-[10px] font-black text-blue-600 uppercase tracking-widest mb-1">
-                  Diferença Apps
+                  Diferença de Preço
                 </p>
                 <p
                   className={`text-2xl font-black ${
-                    appChannelSummary.totalDelta >= 0 ? 'text-emerald-700' : 'text-red-700'
+                    appChannelSummary.totalDelta >= 0 ? 'text-emerald-700' : 'text-amber-700'
                   }`}
                 >
                   R$ {appChannelSummary.totalDelta.toFixed(2)}
+                </p>
+                <p className="text-[10px] font-black text-blue-700 uppercase tracking-widest mt-2">
+                  Valor apps - valor no balcão
+                </p>
+                <p className="text-[10px] font-black text-blue-700 uppercase tracking-widest mt-1">
+                  {appChannelSummary.totalDelta > 0
+                    ? 'Acima do balcão'
+                    : appChannelSummary.totalDelta < 0
+                      ? 'Abaixo do balcão'
+                      : 'Mesmo valor do balcão'}
                 </p>
               </div>
             </div>
@@ -1123,10 +1133,10 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     </p>
                     <p
                       className={`mt-1 text-xs font-black uppercase ${
-                        originSummary.delta >= 0 ? 'text-emerald-700' : 'text-red-700'
+                        originSummary.delta >= 0 ? 'text-emerald-700' : 'text-amber-700'
                       }`}
                     >
-                      Diferença: R$ {originSummary.delta.toFixed(2)}
+                      Diferença de preço: R$ {originSummary.delta.toFixed(2)}
                     </p>
                   </div>
                 );
@@ -1596,13 +1606,16 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     </p>
                   </div>
                   <div className="bg-blue-50 rounded-2xl border border-blue-100 p-4">
-                    <p className="text-[10px] font-black text-blue-700 uppercase tracking-widest">Diferença Apps</p>
+                    <p className="text-[10px] font-black text-blue-700 uppercase tracking-widest">Diferença de Preço</p>
                     <p
                       className={`text-2xl font-black mt-1 ${
-                        selectedYearAppSummary.totalDelta >= 0 ? 'text-emerald-700' : 'text-red-700'
+                        selectedYearAppSummary.totalDelta >= 0 ? 'text-emerald-700' : 'text-amber-700'
                       }`}
                     >
                       R$ {selectedYearAppSummary.totalDelta.toFixed(2)}
+                    </p>
+                    <p className="text-[10px] font-black text-blue-700 uppercase tracking-widest mt-2">
+                      Valor apps - valor no balcão
                     </p>
                   </div>
                 </div>
