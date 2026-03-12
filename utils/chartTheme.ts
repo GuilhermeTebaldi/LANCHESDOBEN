@@ -1,0 +1,30 @@
+export const DASHBOARD_CHART_COLORS = {
+  grid: '#e2e8f0',
+  axis: '#475569',
+  mutedAxis: '#64748b',
+  text: '#0f172a',
+  revenue: '#0284c7',
+  cost: '#dc2626',
+  profit: '#16a34a',
+  sales: '#2563eb',
+  ticket: '#7c3aed',
+  estimatedCash: '#0ea5e9',
+  informedCash: '#f59e0b',
+  difference: '#334155',
+  local: '#334155',
+  ifood: '#ef4444',
+  app99: '#f59e0b',
+  keeta: '#22c55e',
+  heatLow: '#e2e8f0',
+  heatSoft: '#bfdbfe',
+  heatMid: '#60a5fa',
+  heatHigh: '#1d4ed8',
+} as const;
+
+export const DASHBOARD_TOOLTIP_STYLE = {
+  backgroundColor: '#0f172a',
+  border: '1px solid #1e293b',
+  borderRadius: '12px',
+  color: '#f8fafc',
+  boxShadow: '0 10px 30px rgba(2, 6, 23, 0.35)',
+} as const;

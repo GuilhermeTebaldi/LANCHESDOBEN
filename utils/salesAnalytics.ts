@@ -1,4 +1,4 @@
-import { Sale } from '../types';
+import { Sale, SaleOrigin } from '../types';
 
 const WEEKDAY_META = [
   { index: 0, shortLabel: 'Dom', label: 'Domingo' },
@@ -21,10 +21,23 @@ const MOMENT_META = [
 
 type MomentKey = (typeof MOMENT_META)[number]['key'];
 
+export type ChannelKey = 'LOCAL' | 'IFOOD' | 'APP99' | 'KEETA';
+
+const CHANNEL_LABELS: Record<ChannelKey, string> = {
+  LOCAL: 'Balcao',
+  IFOOD: 'iFood',
+  APP99: '99',
+  KEETA: 'Keeta',
+};
+
+const CHANNEL_ORDER: ChannelKey[] = ['LOCAL', 'IFOOD', 'APP99', 'KEETA'];
+
 const safeNumber = (value: unknown): number => {
   const parsed = typeof value === 'number' ? value : Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
 };
+
+const roundMoney = (value: number): number => Number((Number.isFinite(value) ? value : 0).toFixed(2));
 
 const toDate = (value: Date | string): Date | null => {
   if (value instanceof Date) {
@@ -49,6 +62,14 @@ const toDayLabel = (date: Date): string =>
     year: 'numeric',
   });
 
+const toMonthKey = (date: Date): string => `${date.getFullYear()}-${pad2(date.getMonth() + 1)}`;
+
+const toMonthLabel = (date: Date): string =>
+  date.toLocaleDateString('pt-BR', {
+    month: 'short',
+    year: 'numeric',
+  });
+
 const toHourLabel = (hour: number): string => `${pad2(hour)}h`;
 
 const toMomentOfDay = (hour: number): MomentKey => {
@@ -56,6 +77,46 @@ const toMomentOfDay = (hour: number): MomentKey => {
   if (hour < 12) return 'manha';
   if (hour < 18) return 'tarde';
   return 'noite';
+};
+
+const getSaleGroupKey = (sale: Sale): string =>
+  sale.saleDraftId ? `draft:${sale.saleDraftId}` : `sale:${sale.id}`;
+
+const normalizeOrigin = (origin: SaleOrigin | undefined): ChannelKey => {
+  if (origin === 'IFOOD' || origin === 'APP99' || origin === 'KEETA') {
+    return origin;
+  }
+  return 'LOCAL';
+};
+
+const startOfDay = (date: Date): Date => {
+  const normalized = new Date(date);
+  normalized.setHours(0, 0, 0, 0);
+  return normalized;
+};
+
+const getWeekStart = (date: Date): Date => {
+  const normalized = startOfDay(date);
+  const weekday = normalized.getDay();
+  const offsetFromMonday = (weekday + 6) % 7;
+  normalized.setDate(normalized.getDate() - offsetFromMonday);
+  return normalized;
+};
+
+const addDays = (date: Date, days: number): Date => {
+  const copy = new Date(date);
+  copy.setDate(copy.getDate() + days);
+  return copy;
+};
+
+const toWeekKey = (date: Date): string => toDayKey(getWeekStart(date));
+
+const toWeekLabel = (date: Date): string => {
+  const start = getWeekStart(date);
+  const end = addDays(start, 6);
+  const startLabel = start.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+  const endLabel = end.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+  return `${startLabel} a ${endLabel}`;
 };
 
 interface MutableProductStats {
@@ -71,7 +132,24 @@ interface MutableProductStats {
 interface MutableDayStats {
   dayKey: string;
   dayLabel: string;
+  date: Date;
   sales: number;
+  revenue: number;
+}
+
+interface MutableOrderStats {
+  key: string;
+  origin: ChannelKey;
+  date: Date;
+  fallbackRevenue: number;
+  appRevenue: number | null;
+}
+
+interface TimeBucket {
+  key: string;
+  label: string;
+  sortDate: Date;
+  orders: number;
   revenue: number;
 }
 
@@ -117,9 +195,96 @@ export interface SalesAnalyticsDaySummary {
   revenue: number;
 }
 
+export interface SalesAnalyticsHeatmapCell {
+  hour: number;
+  label: string;
+  sales: number;
+  revenue: number;
+}
+
+export interface SalesAnalyticsHeatmapRow {
+  weekdayIndex: number;
+  weekdayLabel: string;
+  weekdayShortLabel: string;
+  cells: SalesAnalyticsHeatmapCell[];
+}
+
+export interface SalesAnalyticsCumulativePoint {
+  hour: number;
+  label: string;
+  sales: number;
+  revenue: number;
+  cumulativeSales: number;
+  cumulativeRevenue: number;
+}
+
+export interface SalesAnalyticsTicketPoint {
+  key: string;
+  label: string;
+  orders: number;
+  revenue: number;
+  ticket: number;
+}
+
+export interface SalesAnalyticsChannelEfficiencyPoint {
+  channel: ChannelKey;
+  label: string;
+  orders: number;
+  revenue: number;
+  ticket: number;
+}
+
+export interface SalesAnalyticsDayTimelinePoint {
+  dayKey: string;
+  dayLabel: string;
+  weekdayLabel: string;
+  sales: number;
+  orders: number;
+  revenue: number;
+  ticket: number;
+}
+
+export interface SalesAnalyticsDeadHour {
+  hour: number;
+  label: string;
+  sales: number;
+  suggestion: string;
+}
+
+export interface SalesAnalyticsProductDependency {
+  productName: string;
+  revenue: number;
+  share: number;
+  isHighRisk: boolean;
+}
+
+export interface SalesAnalyticsStability {
+  averageDailyRevenue: number;
+  stddevDailyRevenue: number;
+  variation: number;
+  status: 'estavel' | 'moderada' | 'instavel';
+  trend: 'crescimento' | 'queda' | 'estavel';
+}
+
+export interface SalesAnalyticsWeeklyTrend {
+  currentWeekRevenue: number;
+  previousWeekRevenue: number;
+  change: number;
+  changePercent: number;
+  status: 'crescimento' | 'queda' | 'estavel';
+}
+
+export interface SalesAnalyticsIntelligence {
+  deadHours: SalesAnalyticsDeadHour[];
+  productDependency: SalesAnalyticsProductDependency;
+  salesStability: SalesAnalyticsStability;
+  weeklyTrend: SalesAnalyticsWeeklyTrend;
+}
+
 export interface SalesAnalyticsSnapshot {
   totals: {
     sales: number;
+    orders: number;
     revenue: number;
     distinctProducts: number;
     activeDays: number;
@@ -149,10 +314,20 @@ export interface SalesAnalyticsSnapshot {
     weekday: SalesAnalyticsChartPoint[];
     hourly: SalesAnalyticsChartPoint[];
     topProducts: SalesAnalyticsChartPoint[];
+    heatmap: SalesAnalyticsHeatmapRow[];
+    cumulativeDaily: SalesAnalyticsCumulativePoint[];
+    ticketByPeriod: {
+      day: SalesAnalyticsTicketPoint[];
+      week: SalesAnalyticsTicketPoint[];
+      month: SalesAnalyticsTicketPoint[];
+    };
+    channelEfficiency: SalesAnalyticsChannelEfficiencyPoint[];
   };
   topProducts: SalesAnalyticsProductSummary[];
   weekdayLeaders: SalesAnalyticsWeekdayLeader[];
   dayRanking: SalesAnalyticsDaySummary[];
+  dayTimeline: SalesAnalyticsDayTimelinePoint[];
+  intelligence: SalesAnalyticsIntelligence;
 }
 
 const findPeakIndex = (values: number[]): number => {
@@ -214,13 +389,79 @@ const getMomentTotals = (hourSeries: number[]) =>
     };
   });
 
+const resolveOrderRevenue = (order: MutableOrderStats): number =>
+  roundMoney(order.appRevenue ?? order.fallbackRevenue);
+
+const buildTicketBuckets = (
+  orders: MutableOrderStats[],
+  period: 'day' | 'week' | 'month'
+): SalesAnalyticsTicketPoint[] => {
+  const grouped = new Map<string, TimeBucket>();
+
+  orders.forEach((order) => {
+    const revenue = resolveOrderRevenue(order);
+    let key = '';
+    let label = '';
+    let sortDate = order.date;
+
+    if (period === 'day') {
+      key = toDayKey(order.date);
+      label = order.date.toLocaleDateString('pt-BR', { day: '2-digit', month: '2-digit' });
+      sortDate = startOfDay(order.date);
+    } else if (period === 'week') {
+      key = toWeekKey(order.date);
+      label = toWeekLabel(order.date);
+      sortDate = getWeekStart(order.date);
+    } else {
+      key = toMonthKey(order.date);
+      label = toMonthLabel(order.date);
+      sortDate = new Date(order.date.getFullYear(), order.date.getMonth(), 1);
+    }
+
+    if (!grouped.has(key)) {
+      grouped.set(key, {
+        key,
+        label,
+        sortDate,
+        orders: 0,
+        revenue: 0,
+      });
+    }
+
+    const bucket = grouped.get(key)!;
+    bucket.orders += 1;
+    bucket.revenue = roundMoney(bucket.revenue + revenue);
+  });
+
+  return [...grouped.values()]
+    .sort((a, b) => a.sortDate.getTime() - b.sortDate.getTime())
+    .map((bucket) => ({
+      key: bucket.key,
+      label: bucket.label,
+      orders: bucket.orders,
+      revenue: roundMoney(bucket.revenue),
+      ticket: bucket.orders > 0 ? roundMoney(bucket.revenue / bucket.orders) : 0,
+    }));
+};
+
+const classifyTrendByDelta = (deltaPercent: number): 'crescimento' | 'queda' | 'estavel' => {
+  if (deltaPercent > 0.08) return 'crescimento';
+  if (deltaPercent < -0.08) return 'queda';
+  return 'estavel';
+};
+
 export const buildSalesAnalytics = (sales: Sale[]): SalesAnalyticsSnapshot => {
   const productMap = new Map<string, MutableProductStats>();
   const dayMap = new Map<string, MutableDayStats>();
+  const orderMap = new Map<string, MutableOrderStats>();
+
   const weekdaySales = Array<number>(7).fill(0);
   const weekdayRevenue = Array<number>(7).fill(0);
   const hourSales = Array<number>(24).fill(0);
   const hourRevenue = Array<number>(24).fill(0);
+  const heatmapSales = Array.from({ length: 7 }, () => Array<number>(24).fill(0));
+  const heatmapRevenue = Array.from({ length: 7 }, () => Array<number>(24).fill(0));
+
   const moments = {
     madrugada: 0,
     manha: 0,
@@ -233,9 +474,7 @@ export const buildSalesAnalytics = (sales: Sale[]): SalesAnalyticsSnapshot => {
 
   sales.forEach((sale) => {
     const date = toDate(sale.timestamp);
-    if (!date) {
-      return;
-    }
+    if (!date) return;
 
     const productName = sale.productName?.trim() || 'Produto sem nome';
     const productKey = normalizeProductKey(productName);
@@ -246,7 +485,7 @@ export const buildSalesAnalytics = (sales: Sale[]): SalesAnalyticsSnapshot => {
     const dayKey = toDayKey(date);
 
     validSalesCount += 1;
-    totalRevenue += saleTotal;
+    totalRevenue = roundMoney(totalRevenue + saleTotal);
 
     if (!productMap.has(productKey)) {
       productMap.set(productKey, {
@@ -262,7 +501,7 @@ export const buildSalesAnalytics = (sales: Sale[]): SalesAnalyticsSnapshot => {
 
     const product = productMap.get(productKey)!;
     product.sales += 1;
-    product.revenue += saleTotal;
+    product.revenue = roundMoney(product.revenue + saleTotal);
     product.byWeekday[weekdayIndex] += 1;
     product.byHour[hour] += 1;
     if (!product.productId && productId) {
@@ -270,9 +509,12 @@ export const buildSalesAnalytics = (sales: Sale[]): SalesAnalyticsSnapshot => {
     }
 
     weekdaySales[weekdayIndex] += 1;
-    weekdayRevenue[weekdayIndex] += saleTotal;
+    weekdayRevenue[weekdayIndex] = roundMoney(weekdayRevenue[weekdayIndex] + saleTotal);
     hourSales[hour] += 1;
-    hourRevenue[hour] += saleTotal;
+    hourRevenue[hour] = roundMoney(hourRevenue[hour] + saleTotal);
+
+    heatmapSales[weekdayIndex][hour] += 1;
+    heatmapRevenue[weekdayIndex][hour] = roundMoney(heatmapRevenue[weekdayIndex][hour] + saleTotal);
 
     const momentKey = toMomentOfDay(hour);
     moments[momentKey] += 1;
@@ -281,13 +523,43 @@ export const buildSalesAnalytics = (sales: Sale[]): SalesAnalyticsSnapshot => {
       dayMap.set(dayKey, {
         dayKey,
         dayLabel: toDayLabel(date),
+        date: startOfDay(date),
         sales: 0,
         revenue: 0,
       });
     }
+
     const dayStats = dayMap.get(dayKey)!;
     dayStats.sales += 1;
-    dayStats.revenue += saleTotal;
+    dayStats.revenue = roundMoney(dayStats.revenue + saleTotal);
+
+    const orderKey = getSaleGroupKey(sale);
+    const existingOrder = orderMap.get(orderKey);
+
+    if (!existingOrder) {
+      orderMap.set(orderKey, {
+        key: orderKey,
+        origin: normalizeOrigin(sale.saleOrigin),
+        date,
+        fallbackRevenue: saleTotal,
+        appRevenue:
+          Number.isFinite(Number(sale.appOrderTotal)) && Number(sale.appOrderTotal) > 0
+            ? Number(sale.appOrderTotal)
+            : null,
+      });
+    } else {
+      existingOrder.origin = normalizeOrigin(sale.saleOrigin);
+      existingOrder.fallbackRevenue = roundMoney(existingOrder.fallbackRevenue + saleTotal);
+      if (
+        Number.isFinite(Number(sale.appOrderTotal)) &&
+        Number(sale.appOrderTotal) > 0
+      ) {
+        existingOrder.appRevenue = Number(sale.appOrderTotal);
+      }
+      if (date.getTime() > existingOrder.date.getTime()) {
+        existingOrder.date = date;
+      }
+    }
   });
 
   const topProducts = [...productMap.values()]
@@ -310,7 +582,7 @@ export const buildSalesAnalytics = (sales: Sale[]): SalesAnalyticsSnapshot => {
         productId: product.productId,
         name: product.name,
         sales: product.sales,
-        revenue: product.revenue,
+        revenue: roundMoney(product.revenue),
         bestWeekdayLabel: weekdayMeta.label,
         bestWeekdayShortLabel: weekdayMeta.shortLabel,
         bestWeekdaySales: product.byWeekday[bestWeekdayIndex],
@@ -322,11 +594,18 @@ export const buildSalesAnalytics = (sales: Sale[]): SalesAnalyticsSnapshot => {
       };
     });
 
-  const dayRanking = [...dayMap.values()].sort((a, b) => {
-    if (b.sales !== a.sales) return b.sales - a.sales;
-    if (b.revenue !== a.revenue) return b.revenue - a.revenue;
-    return a.dayKey.localeCompare(b.dayKey);
-  });
+  const dayRanking = [...dayMap.values()]
+    .sort((a, b) => {
+      if (b.sales !== a.sales) return b.sales - a.sales;
+      if (b.revenue !== a.revenue) return b.revenue - a.revenue;
+      return a.dayKey.localeCompare(b.dayKey);
+    })
+    .map<SalesAnalyticsDaySummary>((entry) => ({
+      dayKey: entry.dayKey,
+      dayLabel: entry.dayLabel,
+      sales: entry.sales,
+      revenue: roundMoney(entry.revenue),
+    }));
 
   const bestDay = dayRanking[0] || {
     dayLabel: '-',
@@ -360,10 +639,230 @@ export const buildSalesAnalytics = (sales: Sale[]): SalesAnalyticsSnapshot => {
     };
   });
 
+  const heatmap = WEEKDAY_META.map((weekdayMeta): SalesAnalyticsHeatmapRow => ({
+    weekdayIndex: weekdayMeta.index,
+    weekdayLabel: weekdayMeta.label,
+    weekdayShortLabel: weekdayMeta.shortLabel,
+    cells: HOUR_INDICES.map((hour) => ({
+      hour,
+      label: toHourLabel(hour),
+      sales: heatmapSales[weekdayMeta.index][hour],
+      revenue: roundMoney(heatmapRevenue[weekdayMeta.index][hour]),
+    })),
+  }));
+
+  let cumulativeSales = 0;
+  let cumulativeRevenue = 0;
+  const cumulativeDaily = HOUR_INDICES.map((hour): SalesAnalyticsCumulativePoint => {
+    const hourSalesCount = hourSales[hour];
+    const hourRevenueValue = hourRevenue[hour];
+    cumulativeSales += hourSalesCount;
+    cumulativeRevenue = roundMoney(cumulativeRevenue + hourRevenueValue);
+
+    return {
+      hour,
+      label: toHourLabel(hour),
+      sales: hourSalesCount,
+      revenue: roundMoney(hourRevenueValue),
+      cumulativeSales,
+      cumulativeRevenue,
+    };
+  });
+
+  const orderList = [...orderMap.values()].sort((a, b) => a.date.getTime() - b.date.getTime());
+
+  const ticketByPeriod = {
+    day: buildTicketBuckets(orderList, 'day'),
+    week: buildTicketBuckets(orderList, 'week'),
+    month: buildTicketBuckets(orderList, 'month'),
+  };
+
+  const channelAccumulator = new Map<ChannelKey, SalesAnalyticsChannelEfficiencyPoint>();
+  CHANNEL_ORDER.forEach((channel) => {
+    channelAccumulator.set(channel, {
+      channel,
+      label: CHANNEL_LABELS[channel],
+      orders: 0,
+      revenue: 0,
+      ticket: 0,
+    });
+  });
+
+  const dayOrderStats = new Map<string, { orders: number; revenue: number }>();
+
+  orderList.forEach((order) => {
+    const revenue = resolveOrderRevenue(order);
+    const channel = channelAccumulator.get(order.origin)!;
+    channel.orders += 1;
+    channel.revenue = roundMoney(channel.revenue + revenue);
+
+    const dayKey = toDayKey(order.date);
+    if (!dayOrderStats.has(dayKey)) {
+      dayOrderStats.set(dayKey, { orders: 0, revenue: 0 });
+    }
+    const stats = dayOrderStats.get(dayKey)!;
+    stats.orders += 1;
+    stats.revenue = roundMoney(stats.revenue + revenue);
+  });
+
+  const channelEfficiency = CHANNEL_ORDER.map((channelKey) => {
+    const entry = channelAccumulator.get(channelKey)!;
+    return {
+      ...entry,
+      ticket: entry.orders > 0 ? roundMoney(entry.revenue / entry.orders) : 0,
+    };
+  });
+
+  const dayTimeline = [...dayMap.values()]
+    .sort((a, b) => a.date.getTime() - b.date.getTime())
+    .map<SalesAnalyticsDayTimelinePoint>((day) => {
+      const weekdayLabel = WEEKDAY_META[day.date.getDay()].label;
+      const orderStats = dayOrderStats.get(day.dayKey);
+      const orders = orderStats?.orders ?? 0;
+      const ticket = orders > 0 ? roundMoney((orderStats?.revenue ?? day.revenue) / orders) : 0;
+
+      return {
+        dayKey: day.dayKey,
+        dayLabel: day.dayLabel,
+        weekdayLabel,
+        sales: day.sales,
+        orders,
+        revenue: roundMoney(day.revenue),
+        ticket,
+      };
+    });
+
+  const deadHourSource = HOUR_INDICES.map((hour) => ({
+    hour,
+    sales: hourSales[hour],
+  }));
+
+  const deadHours = deadHourSource
+    .filter((entry) => entry.sales > 0)
+    .sort((a, b) => {
+      if (a.sales !== b.sales) return a.sales - b.sales;
+      return a.hour - b.hour;
+    })
+    .slice(0, 3)
+    .map<SalesAnalyticsDeadHour>((entry) => {
+      const nextHour = (entry.hour + 1) % 24;
+      return {
+        hour: entry.hour,
+        label: toHourLabel(entry.hour),
+        sales: entry.sales,
+        suggestion: `Promocao sugerida entre ${toHourLabel(entry.hour)} e ${toHourLabel(nextHour)}.`,
+      };
+    });
+
+  const revenueLeader = [...topProducts]
+    .sort((a, b) => {
+      if (b.revenue !== a.revenue) return b.revenue - a.revenue;
+      return b.sales - a.sales;
+    })[0];
+
+  const productDependency: SalesAnalyticsProductDependency = {
+    productName: revenueLeader?.name || 'Sem produto dominante',
+    revenue: revenueLeader ? roundMoney(revenueLeader.revenue) : 0,
+    share: revenueLeader && totalRevenue > 0 ? revenueLeader.revenue / totalRevenue : 0,
+    isHighRisk: revenueLeader ? revenueLeader.revenue / Math.max(totalRevenue, 1) >= 0.5 : false,
+  };
+
+  const dailyRevenues = dayTimeline.map((entry) => entry.revenue);
+  const averageDailyRevenue =
+    dailyRevenues.length > 0
+      ? dailyRevenues.reduce((sum, value) => sum + value, 0) / dailyRevenues.length
+      : 0;
+
+  const variance =
+    dailyRevenues.length > 0
+      ? dailyRevenues.reduce((sum, value) => sum + (value - averageDailyRevenue) ** 2, 0) /
+        dailyRevenues.length
+      : 0;
+
+  const stddevDailyRevenue = Math.sqrt(Math.max(variance, 0));
+  const variation = averageDailyRevenue > 0 ? stddevDailyRevenue / averageDailyRevenue : 0;
+
+  let stabilityStatus: SalesAnalyticsStability['status'] = 'estavel';
+  if (variation > 0.35) {
+    stabilityStatus = 'instavel';
+  } else if (variation > 0.18) {
+    stabilityStatus = 'moderada';
+  }
+
+  const recentWindow = dayTimeline.slice(-3);
+  const previousWindow = dayTimeline.slice(-6, -3);
+  const recentAvg =
+    recentWindow.length > 0
+      ? recentWindow.reduce((sum, entry) => sum + entry.revenue, 0) / recentWindow.length
+      : 0;
+  const previousAvg =
+    previousWindow.length > 0
+      ? previousWindow.reduce((sum, entry) => sum + entry.revenue, 0) / previousWindow.length
+      : 0;
+
+  const shortTrendDelta = previousAvg > 0 ? (recentAvg - previousAvg) / previousAvg : 0;
+  const stabilityTrend =
+    previousWindow.length === 0 && recentWindow.length > 0 && recentAvg > 0
+      ? 'crescimento'
+      : classifyTrendByDelta(shortTrendDelta);
+
+  const latestOrderDate = orderList.length > 0 ? orderList[orderList.length - 1].date : null;
+  const currentWeekStart = latestOrderDate ? getWeekStart(latestOrderDate) : null;
+
+  let currentWeekRevenue = 0;
+  let previousWeekRevenue = 0;
+
+  if (currentWeekStart) {
+    const currentWeekEnd = addDays(currentWeekStart, 7);
+    const previousWeekStart = addDays(currentWeekStart, -7);
+
+    orderList.forEach((order) => {
+      const revenue = resolveOrderRevenue(order);
+      if (order.date >= currentWeekStart && order.date < currentWeekEnd) {
+        currentWeekRevenue = roundMoney(currentWeekRevenue + revenue);
+      } else if (order.date >= previousWeekStart && order.date < currentWeekStart) {
+        previousWeekRevenue = roundMoney(previousWeekRevenue + revenue);
+      }
+    });
+  }
+
+  const weeklyChange = roundMoney(currentWeekRevenue - previousWeekRevenue);
+  const weeklyChangePercent =
+    previousWeekRevenue > 0
+      ? (currentWeekRevenue - previousWeekRevenue) / previousWeekRevenue
+      : currentWeekRevenue > 0
+        ? 1
+        : 0;
+
+  const weeklyTrendStatus: SalesAnalyticsWeeklyTrend['status'] =
+    previousWeekRevenue === 0 && currentWeekRevenue === 0
+      ? 'estavel'
+      : classifyTrendByDelta(weeklyChangePercent);
+
+  const intelligence: SalesAnalyticsIntelligence = {
+    deadHours,
+    productDependency,
+    salesStability: {
+      averageDailyRevenue: roundMoney(averageDailyRevenue),
+      stddevDailyRevenue: roundMoney(stddevDailyRevenue),
+      variation,
+      status: stabilityStatus,
+      trend: stabilityTrend,
+    },
+    weeklyTrend: {
+      currentWeekRevenue,
+      previousWeekRevenue,
+      change: weeklyChange,
+      changePercent: weeklyChangePercent,
+      status: weeklyTrendStatus,
+    },
+  };
+
   const snapshot: SalesAnalyticsSnapshot = {
     totals: {
       sales: validSalesCount,
-      revenue: totalRevenue,
+      orders: orderList.length,
+      revenue: roundMoney(totalRevenue),
       distinctProducts: productMap.size,
       activeDays: dayMap.size,
     },
@@ -393,23 +892,29 @@ export const buildSalesAnalytics = (sales: Sale[]): SalesAnalyticsSnapshot => {
       weekday: WEEKDAY_META.map((weekdayMeta) => ({
         label: weekdayMeta.shortLabel,
         sales: weekdaySales[weekdayMeta.index],
-        revenue: weekdayRevenue[weekdayMeta.index],
+        revenue: roundMoney(weekdayRevenue[weekdayMeta.index]),
       })),
       hourly: HOUR_INDICES.map((hour) => ({
         label: toHourLabel(hour),
         sales: hourSales[hour],
-        revenue: hourRevenue[hour],
+        revenue: roundMoney(hourRevenue[hour]),
       })),
       topProducts: topProducts.slice(0, 10).map((product) => ({
         key: product.key,
         label: product.name,
         sales: product.sales,
-        revenue: product.revenue,
+        revenue: roundMoney(product.revenue),
       })),
+      heatmap,
+      cumulativeDaily,
+      ticketByPeriod,
+      channelEfficiency,
     },
     topProducts,
     weekdayLeaders,
     dayRanking,
+    dayTimeline,
+    intelligence,
   };
 
   return snapshot;

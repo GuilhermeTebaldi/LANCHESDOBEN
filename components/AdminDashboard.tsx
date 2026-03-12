@@ -1,6 +1,20 @@
 
 import React, { useState, useMemo } from 'react';
 import {
+  Bar,
+  BarChart,
+  CartesianGrid,
+  Cell,
+  Line,
+  LineChart,
+  Pie,
+  PieChart,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
+import {
   CleaningMaterial,
   CleaningStockEntry,
   DailySalesHistoryEntry,
@@ -12,6 +26,7 @@ import {
   StockEntry,
 } from '../types';
 import { APP_ORIGINS, buildAppChannelSummary } from '../utils/appChannelSummary';
+import { DASHBOARD_CHART_COLORS, DASHBOARD_TOOLTIP_STYLE } from '../utils/chartTheme';
 import { formatIngredientStockQuantity, formatStockQuantityByUnit } from '../utils/recipe';
 import AdminSalesAnalyticsTab from './AdminSalesAnalyticsTab';
 
@@ -100,6 +115,26 @@ const toDate = (value: Date | string): Date => {
 };
 
 const roundMoney = (value: number): number => Number(value.toFixed(2));
+
+const CHANNEL_ORDER: SaleOrigin[] = ['LOCAL', 'IFOOD', 'APP99', 'KEETA'];
+
+const CHANNEL_COLORS: Record<SaleOrigin, string> = {
+  LOCAL: DASHBOARD_CHART_COLORS.local,
+  IFOOD: DASHBOARD_CHART_COLORS.ifood,
+  APP99: DASHBOARD_CHART_COLORS.app99,
+  KEETA: DASHBOARD_CHART_COLORS.keeta,
+};
+
+const pad2 = (value: number): string => value.toString().padStart(2, '0');
+
+const toDayKey = (date: Date): string =>
+  `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+
+const toShortDayLabel = (date: Date): string =>
+  date.toLocaleDateString('pt-BR', {
+    day: '2-digit',
+    month: '2-digit',
+  });
 
 const normalizeUnit = (value: string): string => value.trim().toLowerCase();
 
@@ -195,8 +230,9 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const totalRevenue = sales.reduce((sum, s) => sum + s.total, 0);
   const salesCost = sales.reduce((sum, s) => sum + (s.totalCost || 0), 0);
   const cancelledRevenue = cancelledSales.reduce((sum, s) => sum + s.total, 0);
-  const stockOutCost = useMemo(() => {
+  const stockOutCostBreakdown = useMemo(() => {
     const saleOutByIngredient = new Map<string, number>();
+    const byDay = new Map<string, number>();
 
     stockEntries.forEach((entry) => {
       const quantity = Number(entry.quantity);
@@ -248,22 +284,159 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
         return sum;
       }
 
+      const date = toDate(entry.timestamp);
+      const dayKey = toDayKey(date);
+      byDay.set(dayKey, roundMoney((byDay.get(dayKey) || 0) + normalizedImpact));
+
       return sum + normalizedImpact;
     }, 0);
 
-    return roundMoney(total);
+    return {
+      total: roundMoney(total),
+      byDay,
+    };
   }, [stockEntries, allIngredients]);
-  const cleaningStockOutCost = useMemo(() => {
-    return cleaningStockEntries.reduce((sum, entry) => {
+  const cleaningStockCostBreakdown = useMemo(() => {
+    const byDay = new Map<string, number>();
+    const total = cleaningStockEntries.reduce((sum, entry) => {
       if (entry.quantity >= 0) return sum;
       const unitCost =
         entry.unitCost ?? cleaningMaterials.find(material => material.id === entry.materialId)?.cost ?? 0;
-      return sum + Math.abs(entry.quantity) * unitCost;
+      const impact = Math.abs(entry.quantity) * unitCost;
+      const date = toDate(entry.timestamp);
+      const dayKey = toDayKey(date);
+      byDay.set(dayKey, roundMoney((byDay.get(dayKey) || 0) + impact));
+      return sum + impact;
     }, 0);
+    return {
+      total: roundMoney(total),
+      byDay,
+    };
   }, [cleaningStockEntries, cleaningMaterials]);
+  const stockOutCost = stockOutCostBreakdown.total;
+  const cleaningStockOutCost = cleaningStockCostBreakdown.total;
   const appChannelSummary = useMemo(() => buildAppChannelSummary(sales), [sales]);
   const totalCost = salesCost + stockOutCost + cleaningStockOutCost;
   const totalProfit = totalRevenue - totalCost;
+  const generalFinanceSeries = useMemo(() => {
+    const dailyMap = new Map<
+      string,
+      {
+        dayKey: string;
+        label: string;
+        date: Date;
+        revenue: number;
+        salesCost: number;
+        stockCost: number;
+        cleaningCost: number;
+      }
+    >();
+
+    const ensureDay = (dayKey: string, date: Date) => {
+      if (!dailyMap.has(dayKey)) {
+        dailyMap.set(dayKey, {
+          dayKey,
+          label: toShortDayLabel(date),
+          date,
+          revenue: 0,
+          salesCost: 0,
+          stockCost: 0,
+          cleaningCost: 0,
+        });
+      }
+      return dailyMap.get(dayKey)!;
+    };
+
+    sales.forEach((sale) => {
+      const date = toDate(sale.timestamp);
+      const dayKey = toDayKey(date);
+      const day = ensureDay(dayKey, new Date(date.getFullYear(), date.getMonth(), date.getDate()));
+      day.revenue = roundMoney(day.revenue + (Number(sale.total) || 0));
+      day.salesCost = roundMoney(day.salesCost + (Number(sale.totalCost) || 0));
+    });
+
+    stockOutCostBreakdown.byDay.forEach((value, dayKey) => {
+      const [year, month, day] = dayKey.split('-').map((token) => Number(token));
+      const row = ensureDay(dayKey, new Date(year, month - 1, day));
+      row.stockCost = roundMoney(row.stockCost + value);
+    });
+
+    cleaningStockCostBreakdown.byDay.forEach((value, dayKey) => {
+      const [year, month, day] = dayKey.split('-').map((token) => Number(token));
+      const row = ensureDay(dayKey, new Date(year, month - 1, day));
+      row.cleaningCost = roundMoney(row.cleaningCost + value);
+    });
+
+    return [...dailyMap.values()]
+      .sort((a, b) => a.date.getTime() - b.date.getTime())
+      .map((entry) => {
+        const cost = roundMoney(entry.salesCost + entry.stockCost + entry.cleaningCost);
+        return {
+          ...entry,
+          cost,
+          profit: roundMoney(entry.revenue - cost),
+        };
+      });
+  }, [sales, stockOutCostBreakdown, cleaningStockCostBreakdown]);
+  const revenueDistributionData = useMemo(() => {
+    const grouped = new Map<
+      string,
+      {
+        origin: SaleOrigin;
+        fallbackRevenue: number;
+        appRevenue: number | null;
+      }
+    >();
+
+    sales.forEach((sale) => {
+      const key = sale.saleDraftId ? `draft:${sale.saleDraftId}` : `sale:${sale.id}`;
+      const origin = sale.saleOrigin || 'LOCAL';
+      const current = grouped.get(key) || {
+        origin,
+        fallbackRevenue: 0,
+        appRevenue: null,
+      };
+
+      current.origin = origin;
+      current.fallbackRevenue += Number(sale.total) || 0;
+      const appTotal = Number(sale.appOrderTotal);
+      if (Number.isFinite(appTotal) && appTotal > 0) {
+        current.appRevenue = appTotal;
+      }
+
+      grouped.set(key, current);
+    });
+
+    const totals: Record<SaleOrigin, number> = {
+      LOCAL: 0,
+      IFOOD: 0,
+      APP99: 0,
+      KEETA: 0,
+    };
+
+    grouped.forEach((entry) => {
+      const revenue = roundMoney(entry.appRevenue ?? entry.fallbackRevenue);
+      totals[entry.origin] = roundMoney(totals[entry.origin] + revenue);
+    });
+
+    const total = CHANNEL_ORDER.reduce((sum, key) => sum + totals[key], 0);
+
+    return CHANNEL_ORDER.map((origin) => ({
+      origin,
+      label: saleOriginLabels[origin],
+      revenue: roundMoney(totals[origin]),
+      share: total > 0 ? totals[origin] / total : 0,
+      color: CHANNEL_COLORS[origin],
+    }));
+  }, [sales]);
+  const flowFinanceData = useMemo(
+    () => [
+      { label: 'Entradas', value: roundMoney(totalRevenue), color: DASHBOARD_CHART_COLORS.revenue },
+      { label: 'Custos', value: roundMoney(totalCost), color: DASHBOARD_CHART_COLORS.cost },
+      { label: 'Lucro', value: roundMoney(totalProfit), color: DASHBOARD_CHART_COLORS.profit },
+    ],
+    [totalRevenue, totalCost, totalProfit]
+  );
   const totalCleaningStockValue = useMemo(
     () => cleaningMaterials.reduce((sum, material) => sum + material.currentStock * material.cost, 0),
     [cleaningMaterials]
@@ -296,6 +469,59 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
     [dailySalesHistory]
   );
   const latestDailyClose = orderedDailySalesHistory[0];
+  const cashEvolutionSeries = useMemo(() => {
+    return [...orderedDailySalesHistory]
+      .sort((a, b) => toDate(a.closedAt).getTime() - toDate(b.closedAt).getTime())
+      .map((entry) => {
+        const closedDate = toDate(entry.closedAt);
+        const cashExpenses = Number(entry.cashExpenses) > 0 ? Number(entry.cashExpenses) : 0;
+        const estimated = roundMoney(
+          entry.openingCash + entry.totalRevenue - entry.totalPurchases - cashExpenses
+        );
+        const informed = roundMoney(entry.openingCash);
+        const difference = roundMoney(informed - estimated);
+
+        return {
+          id: entry.id,
+          date: closedDate,
+          label: toShortDayLabel(closedDate),
+          estimated,
+          informed,
+          difference,
+        };
+      });
+  }, [orderedDailySalesHistory]);
+  const cashDifferenceStatus = useMemo(() => {
+    if (cashEvolutionSeries.length === 0) {
+      return {
+        value: 0,
+        label: 'Sem dados',
+        tone: 'text-slate-600',
+      };
+    }
+
+    const latestPoint = cashEvolutionSeries[cashEvolutionSeries.length - 1];
+    if (latestPoint.difference > 0) {
+      return {
+        value: latestPoint.difference,
+        label: 'Acima do estimado',
+        tone: 'text-emerald-700',
+      };
+    }
+    if (latestPoint.difference < 0) {
+      return {
+        value: latestPoint.difference,
+        label: 'Abaixo do estimado',
+        tone: 'text-red-700',
+      };
+    }
+
+    return {
+      value: latestPoint.difference,
+      label: 'Alinhado',
+      tone: 'text-slate-700',
+    };
+  }, [cashEvolutionSeries]);
   const currentSessionCashExpenses = useMemo(
     () =>
       sessionStockEntries.reduce((sum, entry) => {
@@ -437,6 +663,216 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
             <StatCard title="Lucro Líquido" value={`R$ ${totalProfit.toFixed(2)}`} color="bg-green-600" icon={<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="m5 12 7-7 7 7"/></svg>} />
             <StatCard title="Vendas Estornadas" value={cancelledSales.length} color="bg-orange-500" icon={<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>} />
             <StatCard title="Materiais de Limpeza" value={`${cleaningMaterials.length} itens`} color="bg-indigo-600" icon={<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="M3 7h18"/><path d="M7 7v13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V7"/><path d="M10 11h4"/><path d="M10 15h4"/><path d="M9 3h6l1 4H8l1-4Z"/></svg>} />
+          </div>
+
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            <div className="bg-white p-6 rounded-[32px] border-2 border-slate-100 shadow-sm">
+              <div className="mb-4">
+                <h3 className="text-xl font-black text-slate-900 uppercase tracking-tight">Evolucao Financeira</h3>
+                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mt-1">
+                  Faturamento, custos e lucro por dia
+                </p>
+              </div>
+              {generalFinanceSeries.length === 0 ? (
+                <div className="h-[280px] rounded-2xl bg-slate-50 border border-slate-200 flex items-center justify-center text-[10px] font-black uppercase tracking-widest text-slate-400">
+                  Sem dados diarios para exibir
+                </div>
+              ) : (
+                <div className="h-[280px]">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={generalFinanceSeries}>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={DASHBOARD_CHART_COLORS.grid} />
+                      <XAxis dataKey="label" tick={{ fill: DASHBOARD_CHART_COLORS.axis, fontSize: 11, fontWeight: 700 }} />
+                      <YAxis
+                        tickFormatter={(value: number) => `${Math.round(value / 1000)}k`}
+                        tick={{ fill: DASHBOARD_CHART_COLORS.mutedAxis, fontSize: 11, fontWeight: 700 }}
+                      />
+                      <Tooltip
+                        contentStyle={DASHBOARD_TOOLTIP_STYLE}
+                        formatter={(value: number) => `R$ ${value.toFixed(2)}`}
+                        labelFormatter={(label) => `Dia: ${label}`}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="revenue"
+                        name="faturamento"
+                        stroke={DASHBOARD_CHART_COLORS.revenue}
+                        strokeWidth={3}
+                        dot={false}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="cost"
+                        name="custos"
+                        stroke={DASHBOARD_CHART_COLORS.cost}
+                        strokeWidth={3}
+                        dot={false}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="profit"
+                        name="lucro"
+                        stroke={DASHBOARD_CHART_COLORS.profit}
+                        strokeWidth={3}
+                        dot={false}
+                      />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </div>
+
+            <div className="bg-white p-6 rounded-[32px] border-2 border-slate-100 shadow-sm">
+              <div className="mb-4">
+                <h3 className="text-xl font-black text-slate-900 uppercase tracking-tight">Distribuicao de Receita</h3>
+                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mt-1">
+                  Participacao por canal: Balcao, iFood, 99 e Keeta
+                </p>
+              </div>
+              <div className="grid grid-cols-1 md:grid-cols-[260px_1fr] gap-4 items-center">
+                <div className="h-[240px]">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie
+                        data={revenueDistributionData}
+                        dataKey="revenue"
+                        nameKey="label"
+                        innerRadius={55}
+                        outerRadius={92}
+                        paddingAngle={2}
+                      >
+                        {revenueDistributionData.map((entry) => (
+                          <Cell key={entry.origin} fill={entry.color} />
+                        ))}
+                      </Pie>
+                      <Tooltip
+                        contentStyle={DASHBOARD_TOOLTIP_STYLE}
+                        formatter={(value: number) => `R$ ${value.toFixed(2)}`}
+                      />
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className="space-y-2">
+                  {revenueDistributionData.map((entry) => (
+                    <div key={entry.origin} className="bg-slate-50 border border-slate-200 rounded-2xl p-3">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="flex items-center gap-2">
+                          <span
+                            className="inline-block w-2.5 h-2.5 rounded-full"
+                            style={{ backgroundColor: entry.color }}
+                          />
+                          <p className="text-xs font-black text-slate-800 uppercase">{entry.label}</p>
+                        </div>
+                        <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">
+                          {(entry.share * 100).toFixed(1)}%
+                        </p>
+                      </div>
+                      <p className="text-sm font-black text-slate-900 mt-1">R$ {entry.revenue.toFixed(2)}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            <div className="bg-white p-6 rounded-[32px] border-2 border-slate-100 shadow-sm">
+              <div className="mb-4">
+                <h3 className="text-xl font-black text-slate-900 uppercase tracking-tight">Fluxo Financeiro</h3>
+                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mt-1">
+                  Comparativo entre entradas, custos e lucro
+                </p>
+              </div>
+              <div className="h-[280px]">
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={flowFinanceData}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={DASHBOARD_CHART_COLORS.grid} />
+                    <XAxis dataKey="label" tick={{ fill: DASHBOARD_CHART_COLORS.axis, fontSize: 11, fontWeight: 700 }} />
+                    <YAxis
+                      tickFormatter={(value: number) => `${Math.round(value / 1000)}k`}
+                      tick={{ fill: DASHBOARD_CHART_COLORS.mutedAxis, fontSize: 11, fontWeight: 700 }}
+                    />
+                    <Tooltip
+                      contentStyle={DASHBOARD_TOOLTIP_STYLE}
+                      formatter={(value: number) => `R$ ${value.toFixed(2)}`}
+                    />
+                    <Bar dataKey="value" radius={[8, 8, 0, 0]}>
+                      {flowFinanceData.map((entry) => (
+                        <Cell key={entry.label} fill={entry.color} />
+                      ))}
+                    </Bar>
+                  </BarChart>
+                </ResponsiveContainer>
+              </div>
+            </div>
+
+            <div className="bg-white p-6 rounded-[32px] border-2 border-slate-100 shadow-sm">
+              <div className="flex items-start justify-between gap-3 mb-4">
+                <div>
+                  <h3 className="text-xl font-black text-slate-900 uppercase tracking-tight">Evolucao do Caixa Diario</h3>
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mt-1">
+                    Caixa estimado x informado e diferenca
+                  </p>
+                </div>
+                <div className="bg-slate-100 rounded-xl px-3 py-2">
+                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">Ultima diferenca</p>
+                  <p className={`text-sm font-black ${cashDifferenceStatus.tone}`}>
+                    R$ {cashDifferenceStatus.value.toFixed(2)}
+                  </p>
+                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-500 mt-1">
+                    {cashDifferenceStatus.label}
+                  </p>
+                </div>
+              </div>
+              {cashEvolutionSeries.length === 0 ? (
+                <div className="h-[280px] rounded-2xl bg-slate-50 border border-slate-200 flex items-center justify-center text-[10px] font-black uppercase tracking-widest text-slate-400">
+                  Sem historico de fechamento diario
+                </div>
+              ) : (
+                <div className="h-[280px]">
+                  <ResponsiveContainer width="100%" height="100%">
+                    <LineChart data={cashEvolutionSeries}>
+                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={DASHBOARD_CHART_COLORS.grid} />
+                      <XAxis dataKey="label" tick={{ fill: DASHBOARD_CHART_COLORS.axis, fontSize: 11, fontWeight: 700 }} />
+                      <YAxis
+                        tickFormatter={(value: number) => `${Math.round(value / 1000)}k`}
+                        tick={{ fill: DASHBOARD_CHART_COLORS.mutedAxis, fontSize: 11, fontWeight: 700 }}
+                      />
+                      <Tooltip
+                        contentStyle={DASHBOARD_TOOLTIP_STYLE}
+                        formatter={(value: number) => `R$ ${value.toFixed(2)}`}
+                        labelFormatter={(label) => `Dia: ${label}`}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="estimated"
+                        name="caixa estimado"
+                        stroke={DASHBOARD_CHART_COLORS.estimatedCash}
+                        strokeWidth={3}
+                        dot={false}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="informed"
+                        name="caixa informado"
+                        stroke={DASHBOARD_CHART_COLORS.informedCash}
+                        strokeWidth={3}
+                        dot={false}
+                      />
+                      <Line
+                        type="monotone"
+                        dataKey="difference"
+                        name="diferenca"
+                        stroke={DASHBOARD_CHART_COLORS.difference}
+                        strokeWidth={2}
+                        strokeDasharray="5 5"
+                        dot={false}
+                      />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+            </div>
           </div>
 
           <div className="qb-admin-cash bg-white p-6 rounded-[32px] border-2 border-slate-100 shadow-sm">
