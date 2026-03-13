@@ -729,7 +729,10 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
       const orderedSales = [...reportSales].sort(
         (a, b) => toDate(a.timestamp).getTime() - toDate(b.timestamp).getTime()
       );
-      const paymentSummary = summarizePaymentMethods(orderedSales);
+      const paymentSummarySales = isSummaryMode
+        ? orderedSales.filter((sale) => !isAppSaleOrigin(sale.saleOrigin))
+        : orderedSales;
+      const paymentSummary = summarizePaymentMethods(paymentSummarySales);
       const paymentSummaryRows = [
         ...paymentSummary.rows,
         ...(paymentSummary.unclassifiedValue > 0
