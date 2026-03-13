@@ -11,6 +11,39 @@ interface PrintSalesReportProps {
   payloadId: string;
 }
 
+type ParsedReportLine =
+  | { kind: 'blank' }
+  | { kind: 'divider' }
+  | { kind: 'row'; label: string; value: string }
+  | { kind: 'text'; value: string; center: boolean; strong: boolean };
+
+const parseReportLines = (lines: string[]): ParsedReportLine[] =>
+  lines.map((rawLine) => {
+    const withoutRightSpaces = rawLine.replace(/\s+$/, '');
+    const line = withoutRightSpaces.trimStart();
+    if (!line) return { kind: 'blank' };
+
+    if (/^-{5,}$/.test(line)) {
+      return { kind: 'divider' };
+    }
+
+    const pairMatch = line.match(/^(.*\S)\s{2,}(\S.*)$/);
+    if (pairMatch) {
+      return { kind: 'row', label: pairMatch[1], value: pairMatch[2] };
+    }
+
+    const isHeadline =
+      /^[A-Z0-9À-Ý ()/.:_-]+$/.test(line) &&
+      !line.startsWith('R$') &&
+      !line.startsWith('#');
+    return {
+      kind: 'text',
+      value: line,
+      center: isHeadline,
+      strong: isHeadline,
+    };
+  });
+
 const PrintSalesReport: React.FC<PrintSalesReportProps> = ({ payloadId }) => {
   const [payload, setPayload] = useState<SalesReportPrintPayload | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -64,7 +97,10 @@ const PrintSalesReport: React.FC<PrintSalesReportProps> = ({ payloadId }) => {
     };
   }, [payloadId]);
 
-  const reportText = useMemo(() => payload?.reportLines.join('\n') ?? '', [payload]);
+  const parsedLines = useMemo(
+    () => parseReportLines(payload?.reportLines ?? []),
+    [payload]
+  );
   const paperWidthMm = useMemo(() => getReceiptPaperWidthMm(), []);
 
   return (
@@ -96,14 +132,30 @@ const PrintSalesReport: React.FC<PrintSalesReportProps> = ({ payloadId }) => {
         }
         .report-center { text-align: center; }
         .report-strong { font-weight: 900; }
-        pre {
+        .report-divider {
+          border-top: 2px dashed #000;
+          margin: 6px 0;
+        }
+        .report-row {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+          align-items: start;
+          column-gap: 6px;
+        }
+        .report-label {
+          min-width: 0;
+          word-break: break-word;
+        }
+        .report-value {
+          text-align: right;
+          white-space: nowrap;
+          font-weight: 800;
+        }
+        .report-text {
           margin: 0;
-          font-family: inherit;
-          font-size: inherit;
-          line-height: inherit;
-          font-weight: inherit;
-          white-space: pre;
-          letter-spacing: 0;
+        }
+        .report-blank {
+          height: 5px;
         }
         @media print {
           html, body {
@@ -131,7 +183,37 @@ const PrintSalesReport: React.FC<PrintSalesReportProps> = ({ payloadId }) => {
       `}</style>
 
       <div className="report-paper">
-        {payload && <pre>{reportText}</pre>}
+        {payload &&
+          parsedLines.map((line, index) => {
+            if (line.kind === 'blank') {
+              return <div key={`blank-${index}`} className="report-blank" />;
+            }
+            if (line.kind === 'divider') {
+              return <div key={`divider-${index}`} className="report-divider" />;
+            }
+            if (line.kind === 'row') {
+              return (
+                <div key={`row-${index}`} className="report-row">
+                  <span className="report-label">{line.label}</span>
+                  <span className="report-value">{line.value}</span>
+                </div>
+              );
+            }
+            return (
+              <p
+                key={`text-${index}`}
+                className={[
+                  'report-text',
+                  line.center ? 'report-center' : '',
+                  line.strong ? 'report-strong' : '',
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
+              >
+                {line.value}
+              </p>
+            );
+          })}
 
         {!payload && (
           <>
