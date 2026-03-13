@@ -909,9 +909,15 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
 
         const printRoutePath = buildSalesReportPrintRoutePath(payloadId);
         const navigateToRoute = (targetWindow: Window): boolean => {
+          setSalesReportPrintPayloadOnWindow(targetWindow, payload);
           try {
-            setSalesReportPrintPayloadOnWindow(targetWindow, payload);
             targetWindow.location.replace(printRoutePath);
+            return true;
+          } catch {
+            // ignore and try href fallback
+          }
+          try {
+            targetWindow.location.href = printRoutePath;
             return true;
           } catch {
             return false;
@@ -922,20 +928,12 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
           return true;
         }
 
-        const openedWindow = window.open('', '_blank', 'noopener,noreferrer');
+        const openedWindow = window.open(printRoutePath, '_blank', 'noopener,noreferrer');
         if (!openedWindow) {
           removeSalesReportPrintPayload(payloadId);
           return false;
         }
-        if (!navigateToRoute(openedWindow)) {
-          removeSalesReportPrintPayload(payloadId);
-          try {
-            openedWindow.close();
-          } catch {
-            // ignore close failures
-          }
-          return false;
-        }
+        setSalesReportPrintPayloadOnWindow(openedWindow, payload);
         return true;
       }
 
