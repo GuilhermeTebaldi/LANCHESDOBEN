@@ -246,7 +246,7 @@ const THERMAL_MIN_COLUMNS = 20;
 const THERMAL_MAX_COLUMNS = 120;
 const THERMAL_COLUMNS_PER_MM = 0.55;
 const THERMAL_COLUMN_SAFETY_OFFSET = 1;
-const THERMAL_LEFT_INSET_CHARS = 2;
+const THERMAL_SUMMARY_LEFT_INSET_CHARS = 2;
 const THERMAL_FULL_REPORT_COLUMNS = 48;
 const THERMAL_FULL_BODY_WIDTH_MM = CASH_PRINT_DEFAULT_BODY_WIDTH_MM;
 const THERMAL_FULL_PAGE_WIDTH_MM = CASH_PRINT_DEFAULT_PAGE_WIDTH_MM;
@@ -713,7 +713,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
       const reportFontSizePx = isSummaryMode ? 10 : 12;
       const reportLineHeight = isSummaryMode ? 1.25 : 1.35;
       const reportFontWeight = isSummaryMode ? 700 : 800;
-      const leftInsetChars = THERMAL_LEFT_INSET_CHARS;
+      const leftInsetChars = isSummaryMode ? THERMAL_SUMMARY_LEFT_INSET_CHARS : 0;
       const contentColumns = Math.max(1, thermalColumns - leftInsetChars);
       const leftInset = ' '.repeat(leftInsetChars);
       const withLeftInset = (value: string): string =>
