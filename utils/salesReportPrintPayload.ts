@@ -1,6 +1,7 @@
 const SALES_REPORT_PRINT_PAYLOAD_KEY_PREFIX = 'qb_sales_report_print_payload_v1:';
 const SALES_REPORT_PRINT_PAYLOAD_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 const SALES_REPORT_PRINT_WINDOW_NAME_PREFIX = 'qb_sales_report_print_payload_window_v1:';
+const SALES_REPORT_PRINT_HASH_PARAM = 'srp';
 
 export interface SalesReportPrintPayload {
   id: string;
@@ -127,6 +128,18 @@ const decodeWindowNamePayload = (windowName: string): SalesReportPrintPayload | 
   }
 };
 
+const encodePayload = (payload: SalesReportPrintPayload): string =>
+  encodeURIComponent(JSON.stringify(payload));
+
+const decodePayload = (encodedPayload: string): SalesReportPrintPayload | null => {
+  if (!encodedPayload) return null;
+  try {
+    return normalizePayload(JSON.parse(decodeURIComponent(encodedPayload)));
+  } catch {
+    return null;
+  }
+};
+
 export const saveSalesReportPrintPayload = (
   input: SalesReportPrintPayloadInput
 ): SalesReportPrintPayload | null => {
@@ -172,8 +185,17 @@ export const consumeSalesReportPrintPayload = (payloadId: string): SalesReportPr
   }
 
   const fromWindowName = decodeWindowNamePayload(window.name || '');
-  if (!fromWindowName || fromWindowName.id !== normalizedId) return null;
-  return fromWindowName;
+  if (fromWindowName?.id === normalizedId) return fromWindowName;
+
+  const hashRaw = window.location.hash.startsWith('#')
+    ? window.location.hash.slice(1)
+    : window.location.hash;
+  const hashParams = new URLSearchParams(hashRaw);
+  const hashPayloadEncoded = hashParams.get(SALES_REPORT_PRINT_HASH_PARAM);
+  if (!hashPayloadEncoded) return null;
+  const fromHash = decodePayload(hashPayloadEncoded);
+  if (!fromHash || fromHash.id !== normalizedId) return null;
+  return fromHash;
 };
 
 export const removeSalesReportPrintPayload = (payloadId: string): void => {
@@ -198,3 +220,6 @@ export const setSalesReportPrintPayloadOnWindow = (
     // ignore window name write failures
   }
 };
+
+export const buildSalesReportPrintHashPayload = (payload: SalesReportPrintPayload): string =>
+  `${SALES_REPORT_PRINT_HASH_PARAM}=${encodePayload(payload)}`;

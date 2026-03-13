@@ -7,6 +7,7 @@ import { buildSalesReportPrintRoutePath } from '../utils/printRoutes';
 import { getReceiptPaperWidthMm } from '../utils/receiptPaper';
 import { formatStockQuantityByUnit, getRecipeQuantityUnitLabel } from '../utils/recipe';
 import {
+  buildSalesReportPrintHashPayload,
   removeSalesReportPrintPayload,
   saveSalesReportPrintPayload,
   setSalesReportPrintPayloadOnWindow,
@@ -908,16 +909,21 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
         const payloadId = payload.id;
 
         const printRoutePath = buildSalesReportPrintRoutePath(payloadId);
+        const printRouteHashPayload = buildSalesReportPrintHashPayload(payload);
+        const printRouteWithHash =
+          printRouteHashPayload.length <= 16000
+            ? `${printRoutePath}#${printRouteHashPayload}`
+            : printRoutePath;
         const navigateToRoute = (targetWindow: Window): boolean => {
           setSalesReportPrintPayloadOnWindow(targetWindow, payload);
           try {
-            targetWindow.location.replace(printRoutePath);
+            targetWindow.location.replace(printRouteWithHash);
             return true;
           } catch {
             // ignore and try href fallback
           }
           try {
-            targetWindow.location.href = printRoutePath;
+            targetWindow.location.href = printRouteWithHash;
             return true;
           } catch {
             return false;
@@ -928,7 +934,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
           return true;
         }
 
-        const openedWindow = window.open(printRoutePath, '_blank', 'noopener,noreferrer');
+        const openedWindow = window.open(printRouteWithHash, '_blank', 'noopener,noreferrer');
         if (!openedWindow) {
           removeSalesReportPrintPayload(payloadId);
           return false;
