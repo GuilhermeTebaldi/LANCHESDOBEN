@@ -5,6 +5,7 @@ import {
   removeSalesReportPrintPayload,
   type SalesReportPrintPayload,
 } from '../utils/salesReportPrintPayload';
+import { getReceiptPaperWidthMm } from '../utils/receiptPaper';
 
 interface PrintSalesReportProps {
   payloadId: string;
@@ -64,7 +65,7 @@ const PrintSalesReport: React.FC<PrintSalesReportProps> = ({ payloadId }) => {
   }, [payloadId]);
 
   const reportText = useMemo(() => payload?.reportLines.join('\n') ?? '', [payload]);
-  const paperWidthMm = payload?.paperWidthMm ?? 80;
+  const paperWidthMm = useMemo(() => getReceiptPaperWidthMm(), []);
 
   return (
     <div className="report-shell">

@@ -276,6 +276,12 @@ const fitThermalText = (value: string, width: number): string => {
   return normalized.slice(0, width);
 };
 
+const fitThermalTextRaw = (value: string, width: number): string => {
+  if (value.length <= width) return value;
+  if (width <= 1) return value.slice(0, width);
+  return value.slice(0, width);
+};
+
 const alignThermalPair = (left: string, right: string, width = THERMAL_DEFAULT_COLUMNS): string => {
   const leftText = normalizeThermalText(left);
   const rightText = normalizeThermalText(right);
@@ -721,10 +727,12 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
       const leftInset = ' '.repeat(leftInsetChars);
       const withLeftInset = (value: string): string =>
         `${leftInset}${fitThermalText(value, contentColumns)}`;
-      const thermalSeparator = withLeftInset('-'.repeat(contentColumns));
+      const withLeftInsetRaw = (value: string): string =>
+        `${leftInset}${fitThermalTextRaw(value, contentColumns)}`;
+      const thermalSeparator = withLeftInsetRaw('-'.repeat(contentColumns));
       const align = (left: string, right = '') =>
-        withLeftInset(alignThermalPair(left, right, contentColumns));
-      const center = (value: string) => withLeftInset(centerThermalText(value, contentColumns));
+        withLeftInsetRaw(alignThermalPair(left, right, contentColumns));
+      const center = (value: string) => withLeftInsetRaw(centerThermalText(value, contentColumns));
       const wrap = (value: string) => wrapThermalText(value, contentColumns).map(withLeftInset);
       const closedAt = toDate(report.closedAt);
       const cashExpenses = roundMoney(Math.max(0, Number(report.cashExpenses) || 0));
