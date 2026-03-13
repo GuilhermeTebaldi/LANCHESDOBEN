@@ -38,6 +38,7 @@ import {
   warmupStateWriteContext,
   type StateCommand,
 } from './data/stateCommandClient';
+import { buildReceiptPrintRoutePath } from './utils/printRoutes';
 import { clampReceiptPaperWidthMm } from './utils/receiptPaper';
 
 const ADMIN_GATE_KEY = 'lanchesdoben_admin_gate';
@@ -343,15 +344,6 @@ const resolveSiteRootUrl = () => {
   }
   return `${origin}/`;
 };
-
-const resolveSystemBasePath = (): string => {
-  if (typeof window === 'undefined') return '';
-  const [firstSegment] = window.location.pathname.split('/').filter(Boolean);
-  return firstSegment === 'sistema' ? '/sistema' : '';
-};
-
-const buildPrintRoutePath = (receiptId: string): string =>
-  `${resolveSystemBasePath()}/print/${encodeURIComponent(receiptId)}`;
 
 const createClientId = (prefix: string): string => {
   if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
@@ -1740,7 +1732,7 @@ const App: React.FC = () => {
       const normalizedId = receiptId.trim();
       if (!normalizedId) return false;
       const printWindow = window.open(
-        buildPrintRoutePath(normalizedId),
+        buildReceiptPrintRoutePath(normalizedId),
         '_blank',
         'noopener,noreferrer'
       );

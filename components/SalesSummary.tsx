@@ -3,8 +3,13 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
 import { DailySalesHistoryEntry, Ingredient, Sale, SaleOrigin, StockEntry } from '../types';
 import { APP_ORIGINS, AppOrigin, buildAppChannelSummary } from '../utils/appChannelSummary';
+import { buildSalesReportPrintRoutePath } from '../utils/printRoutes';
 import { getReceiptPaperWidthMm } from '../utils/receiptPaper';
 import { formatStockQuantityByUnit, getRecipeQuantityUnitLabel } from '../utils/recipe';
+import {
+  removeSalesReportPrintPayload,
+  saveSalesReportPrintPayload,
+} from '../utils/salesReportPrintPayload';
 
 interface SalesSummaryProps {
   sales: Sale[];
@@ -685,11 +690,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
       existingWindow?: Window | null,
       mode: ReportPrintMode = 'FULL'
     ) => {
-      const printWindow =
-        existingWindow && !existingWindow.closed
-          ? existingWindow
-          : window.open('', '_blank', 'width=420,height=980');
-      if (!printWindow) return false;
+      const reusedWindow = existingWindow && !existingWindow.closed ? existingWindow : null;
 
       const isSummaryMode = mode === 'SUMMARY';
       const summaryPaperWidthMm = selectedHistoryPrintPreset.paperWidthMm || getReceiptPaperWidthMm();
@@ -888,12 +889,52 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
       reportLines.push('');
       reportLines.push(center('FIM DO RELATORIO'));
       reportLines.push('');
+      const reportTitle = mode === 'SUMMARY' ? 'Histórico de Fechamentos' : 'Relatório Diário';
+
+      if (isSummaryMode) {
+        const payloadId = saveSalesReportPrintPayload({
+          title: reportTitle,
+          paperWidthMm,
+          pageWidthMm,
+          pageHeightMm,
+          reportPadding,
+          reportFontSizePx,
+          reportLineHeight,
+          reportFontWeight,
+          reportLines,
+        });
+        if (!payloadId) return false;
+
+        const printRoutePath = buildSalesReportPrintRoutePath(payloadId);
+        const navigateToRoute = (targetWindow: Window): boolean => {
+          try {
+            targetWindow.location.replace(printRoutePath);
+            return true;
+          } catch {
+            return false;
+          }
+        };
+
+        if (reusedWindow && navigateToRoute(reusedWindow)) {
+          return true;
+        }
+
+        const openedWindow = window.open(printRoutePath, '_blank', 'noopener,noreferrer');
+        if (!openedWindow) {
+          removeSalesReportPrintPayload(payloadId);
+          return false;
+        }
+        return true;
+      }
+
+      const printWindow = reusedWindow || window.open('', '_blank', 'width=420,height=980');
+      if (!printWindow) return false;
 
       const html = `<!doctype html>
 <html lang="pt-BR">
 <head>
   <meta charset="utf-8" />
-  <title>Relatório Diário</title>
+  <title>${escapeHtml(reportTitle)}</title>
   <style>
     :root { color-scheme: light; }
     * { box-sizing: border-box; }
