@@ -65,17 +65,11 @@ const PrintSalesReport: React.FC<PrintSalesReportProps> = ({ payloadId }) => {
 
   const reportText = useMemo(() => payload?.reportLines.join('\n') ?? '', [payload]);
   const paperWidthMm = payload?.paperWidthMm ?? 80;
-  const pageWidthMm = payload?.pageWidthMm ?? paperWidthMm;
-  const pageHeightMm = payload?.pageHeightMm ?? null;
-  const reportPadding = payload?.reportPadding ?? '2.5mm 2mm';
-  const reportFontSizePx = payload?.reportFontSizePx ?? 10;
-  const reportLineHeight = payload?.reportLineHeight ?? 1.25;
-  const reportFontWeight = payload?.reportFontWeight ?? 700;
 
   return (
     <div className="report-shell">
       <style>{`
-        @page { size: ${pageWidthMm}mm ${pageHeightMm ? `${pageHeightMm}mm` : 'auto'}; margin: 0; }
+        @page { size: ${paperWidthMm}mm auto; margin: 0; }
         html, body {
           margin: 0;
           padding: 0;
@@ -93,10 +87,10 @@ const PrintSalesReport: React.FC<PrintSalesReportProps> = ({ payloadId }) => {
         .report-paper {
           width: ${paperWidthMm}mm;
           max-width: ${paperWidthMm}mm;
-          padding: ${reportPadding};
-          font-size: ${reportFontSizePx}px;
-          line-height: ${reportLineHeight};
-          font-weight: ${reportFontWeight};
+          padding: 3mm 2mm;
+          font-size: 10px;
+          line-height: 1.28;
+          font-weight: 700;
           letter-spacing: 0;
         }
         .report-center { text-align: center; }
@@ -118,10 +112,10 @@ const PrintSalesReport: React.FC<PrintSalesReportProps> = ({ payloadId }) => {
           .report-shell { min-height: auto; }
           .report-paper {
             margin: 0;
-            padding: ${reportPadding};
-            font-size: ${reportFontSizePx}px;
-            line-height: ${reportLineHeight};
-            font-weight: ${reportFontWeight};
+            padding: 2.5mm 2mm;
+            font-size: 10px;
+            line-height: 1.25;
+            font-weight: 700;
           }
           .report-paper * {
             color: #000 !important;
