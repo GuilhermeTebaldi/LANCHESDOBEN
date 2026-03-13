@@ -9,6 +9,7 @@ import { formatStockQuantityByUnit, getRecipeQuantityUnitLabel } from '../utils/
 import {
   removeSalesReportPrintPayload,
   saveSalesReportPrintPayload,
+  setSalesReportPrintPayloadOnWindow,
 } from '../utils/salesReportPrintPayload';
 
 interface SalesSummaryProps {
@@ -892,7 +893,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
       const reportTitle = mode === 'SUMMARY' ? 'Histórico de Fechamentos' : 'Relatório Diário';
 
       if (isSummaryMode) {
-        const payloadId = saveSalesReportPrintPayload({
+        const payload = saveSalesReportPrintPayload({
           title: reportTitle,
           paperWidthMm,
           pageWidthMm,
@@ -903,11 +904,13 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
           reportFontWeight,
           reportLines,
         });
-        if (!payloadId) return false;
+        if (!payload) return false;
+        const payloadId = payload.id;
 
         const printRoutePath = buildSalesReportPrintRoutePath(payloadId);
         const navigateToRoute = (targetWindow: Window): boolean => {
           try {
+            setSalesReportPrintPayloadOnWindow(targetWindow, payload);
             targetWindow.location.replace(printRoutePath);
             return true;
           } catch {
@@ -919,9 +922,18 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
           return true;
         }
 
-        const openedWindow = window.open(printRoutePath, '_blank', 'noopener,noreferrer');
+        const openedWindow = window.open('', '_blank', 'noopener,noreferrer');
         if (!openedWindow) {
           removeSalesReportPrintPayload(payloadId);
+          return false;
+        }
+        if (!navigateToRoute(openedWindow)) {
+          removeSalesReportPrintPayload(payloadId);
+          try {
+            openedWindow.close();
+          } catch {
+            // ignore close failures
+          }
           return false;
         }
         return true;

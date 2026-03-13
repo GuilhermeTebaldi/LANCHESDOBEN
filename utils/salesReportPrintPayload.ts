@@ -1,5 +1,6 @@
 const SALES_REPORT_PRINT_PAYLOAD_KEY_PREFIX = 'qb_sales_report_print_payload_v1:';
 const SALES_REPORT_PRINT_PAYLOAD_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+const SALES_REPORT_PRINT_WINDOW_NAME_PREFIX = 'qb_sales_report_print_payload_window_v1:';
 
 export interface SalesReportPrintPayload {
   id: string;
@@ -110,9 +111,25 @@ const normalizePayload = (value: unknown): SalesReportPrintPayload | null => {
   };
 };
 
+const encodeWindowNamePayload = (payload: SalesReportPrintPayload): string => {
+  const serialized = JSON.stringify(payload);
+  return `${SALES_REPORT_PRINT_WINDOW_NAME_PREFIX}${encodeURIComponent(serialized)}`;
+};
+
+const decodeWindowNamePayload = (windowName: string): SalesReportPrintPayload | null => {
+  if (!windowName.startsWith(SALES_REPORT_PRINT_WINDOW_NAME_PREFIX)) return null;
+  const encodedPayload = windowName.slice(SALES_REPORT_PRINT_WINDOW_NAME_PREFIX.length);
+  if (!encodedPayload) return null;
+  try {
+    return normalizePayload(JSON.parse(decodeURIComponent(encodedPayload)));
+  } catch {
+    return null;
+  }
+};
+
 export const saveSalesReportPrintPayload = (
   input: SalesReportPrintPayloadInput
-): string | null => {
+): SalesReportPrintPayload | null => {
   if (typeof window === 'undefined') return null;
   cleanupExpiredPayloads();
 
@@ -132,7 +149,7 @@ export const saveSalesReportPrintPayload = (
 
   try {
     window.localStorage.setItem(buildStorageKey(payload.id), JSON.stringify(payload));
-    return payload.id;
+    return payload;
   } catch {
     return null;
   }
@@ -145,13 +162,18 @@ export const consumeSalesReportPrintPayload = (payloadId: string): SalesReportPr
 
   const storageKey = buildStorageKey(normalizedId);
   const raw = window.localStorage.getItem(storageKey);
-  if (!raw) return null;
-
-  try {
-    return normalizePayload(JSON.parse(raw));
-  } catch {
-    return null;
+  if (raw) {
+    try {
+      const parsed = normalizePayload(JSON.parse(raw));
+      if (parsed?.id === normalizedId) return parsed;
+    } catch {
+      // ignore malformed storage payload and fallback to window name payload
+    }
   }
+
+  const fromWindowName = decodeWindowNamePayload(window.name || '');
+  if (!fromWindowName || fromWindowName.id !== normalizedId) return null;
+  return fromWindowName;
 };
 
 export const removeSalesReportPrintPayload = (payloadId: string): void => {
@@ -159,4 +181,20 @@ export const removeSalesReportPrintPayload = (payloadId: string): void => {
   const normalizedId = payloadId.trim();
   if (!normalizedId) return;
   window.localStorage.removeItem(buildStorageKey(normalizedId));
+
+  const fromWindowName = decodeWindowNamePayload(window.name || '');
+  if (fromWindowName?.id === normalizedId) {
+    window.name = '';
+  }
+};
+
+export const setSalesReportPrintPayloadOnWindow = (
+  targetWindow: Window,
+  payload: SalesReportPrintPayload
+): void => {
+  try {
+    targetWindow.name = encodeWindowNamePayload(payload);
+  } catch {
+    // ignore window name write failures
+  }
 };
