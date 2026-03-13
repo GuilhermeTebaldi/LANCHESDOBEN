@@ -147,8 +147,6 @@ export const consumeSalesReportPrintPayload = (payloadId: string): SalesReportPr
   const raw = window.localStorage.getItem(storageKey);
   if (!raw) return null;
 
-  window.localStorage.removeItem(storageKey);
-
   try {
     return normalizePayload(JSON.parse(raw));
   } catch {

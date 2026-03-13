@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 
 import {
   consumeSalesReportPrintPayload,
+  removeSalesReportPrintPayload,
   type SalesReportPrintPayload,
 } from '../utils/salesReportPrintPayload';
 
@@ -13,12 +14,14 @@ const PrintSalesReport: React.FC<PrintSalesReportProps> = ({ payloadId }) => {
   const [payload, setPayload] = useState<SalesReportPrintPayload | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const hasTriggeredPrintRef = useRef(false);
+  const hasRemovedPayloadRef = useRef(false);
 
   useEffect(() => {
     const loaded = consumeSalesReportPrintPayload(payloadId);
     setPayload(loaded);
     setErrorMessage(loaded ? null : 'Relatório não encontrado para impressão.');
     hasTriggeredPrintRef.current = false;
+    hasRemovedPayloadRef.current = false;
   }, [payloadId]);
 
   useEffect(() => {
@@ -42,6 +45,10 @@ const PrintSalesReport: React.FC<PrintSalesReportProps> = ({ payloadId }) => {
     if (typeof window === 'undefined') return;
     const previousAfterPrint = window.onafterprint;
     window.onafterprint = (event: Event) => {
+      if (!hasRemovedPayloadRef.current) {
+        removeSalesReportPrintPayload(payloadId);
+        hasRemovedPayloadRef.current = true;
+      }
       try {
         window.close();
       } catch {
@@ -54,7 +61,7 @@ const PrintSalesReport: React.FC<PrintSalesReportProps> = ({ payloadId }) => {
     return () => {
       window.onafterprint = previousAfterPrint;
     };
-  }, []);
+  }, [payloadId]);
 
   const reportText = useMemo(() => payload?.reportLines.join('\n') ?? '', [payload]);
   const paperWidthMm = payload?.paperWidthMm ?? 80;
