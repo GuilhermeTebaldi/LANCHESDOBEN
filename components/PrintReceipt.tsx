@@ -43,6 +43,8 @@ interface ReceiptViewModel {
 }
 
 const DEFAULT_RESTAURANT_NAME = 'LANCHESDOBEN';
+const RECEIPT_LOAD_RETRY_DELAY_MS = 180;
+const RECEIPT_LOAD_MAX_WAIT_MS = 6000;
 
 const moneyFormatter = new Intl.NumberFormat('pt-BR', {
   style: 'currency',
@@ -126,6 +128,18 @@ const normalizeSplitPayments = (entries: SalePaymentSplitEntry[] | undefined) =>
         change,
       };
     });
+
+const summarizeSplitPaymentMethods = (
+  splits: Array<{ methodLabel: string }>
+): string => {
+  const orderedUniqueMethods: string[] = [];
+  splits.forEach((split) => {
+    if (!orderedUniqueMethods.includes(split.methodLabel)) {
+      orderedUniqueMethods.push(split.methodLabel);
+    }
+  });
+  return orderedUniqueMethods.length > 0 ? orderedUniqueMethods.join(' + ') : 'NAO INFORMADO';
+};
 
 const isAppSaleOrigin = (origin: SaleOrigin): boolean =>
   origin === 'IFOOD' || origin === 'APP99' || origin === 'KEETA';
@@ -319,6 +333,10 @@ const buildReceiptViewModel = (state: AppState, receiptId: string): ReceiptViewM
   const paymentCashReceived = normalizeMoneyValue(payment?.cashReceived);
   const paymentChange = normalizeMoneyValue(payment?.change);
   const paymentSplits = paymentMethod === 'DIVIDIDO' ? normalizeSplitPayments(payment?.splitPayments) : [];
+  const paymentMethodLabel =
+    paymentMethod === 'DIVIDIDO'
+      ? summarizeSplitPaymentMethods(paymentSplits)
+      : formatPaymentMethod(paymentMethod);
 
   return {
     restaurantName: getRestaurantName(),
@@ -328,7 +346,7 @@ const buildReceiptViewModel = (state: AppState, receiptId: string): ReceiptViewM
     lines,
     itemsTotal: linesTotal,
     total,
-    paymentMethodLabel: formatPaymentMethod(paymentMethod),
+    paymentMethodLabel,
     paymentCashReceived,
     paymentChange,
     paymentSplits,
@@ -349,32 +367,57 @@ const PrintReceipt: React.FC<PrintReceiptProps> = ({ receiptId }) => {
 
   useEffect(() => {
     let cancelled = false;
+    let retryTimer: number | null = null;
+    let hadLoadFailure = false;
+    const startedAt = Date.now();
     setIsLoading(true);
     setErrorMessage(null);
     setReceipt(null);
     hasTriggeredPrintRef.current = false;
 
-    loadAppState(DEFAULT_APP_STATE)
-      .then((state) => {
+    const scheduleRetry = () => {
+      if (cancelled) return;
+      retryTimer = window.setTimeout(() => {
+        void loadReceipt();
+      }, RECEIPT_LOAD_RETRY_DELAY_MS);
+    };
+
+    const loadReceipt = async () => {
+      try {
+        const state = await loadAppState(DEFAULT_APP_STATE);
         if (cancelled) return;
         const model = buildReceiptViewModel(state, receiptId);
-        if (!model) {
-          setErrorMessage('Pedido não encontrado para impressão.');
+        if (model) {
+          setReceipt(model);
+          setIsLoading(false);
           return;
         }
-        setReceipt(model);
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setErrorMessage('Falha ao carregar dados do cupom.');
-      })
-      .finally(() => {
-        if (cancelled) return;
+      } catch {
+        hadLoadFailure = true;
+      }
+
+      if (cancelled) return;
+
+      if (Date.now() - startedAt >= RECEIPT_LOAD_MAX_WAIT_MS) {
+        setErrorMessage(
+          hadLoadFailure
+            ? 'Falha ao carregar dados do cupom.'
+            : 'Pedido não encontrado para impressão.'
+        );
         setIsLoading(false);
-      });
+        return;
+      }
+
+      scheduleRetry();
+    };
+
+    void loadReceipt();
 
     return () => {
       cancelled = true;
+      if (retryTimer !== null) {
+        window.clearTimeout(retryTimer);
+      }
     };
   }, [receiptId]);
 
@@ -590,14 +633,10 @@ const PrintReceipt: React.FC<PrintReceiptProps> = ({ receiptId }) => {
             )}
             {receipt.paymentSplits.length > 0 && (
               <>
-                <div className="receipt-row">
-                  <span className="receipt-label">Divisão</span>
-                  <span className="receipt-value">{receipt.paymentSplits.length} partes</span>
-                </div>
                 {receipt.paymentSplits.map((split, index) => (
                   <React.Fragment key={`${split.label}-${index}`}>
                     <div className="receipt-row">
-                      <span className="receipt-label">{split.label} ({split.methodLabel})</span>
+                      <span className="receipt-label">{`Pagamento ${index + 1} (${split.methodLabel})`}</span>
                       <span className="receipt-value">{formatMoney(split.amount)}</span>
                     </div>
                     {split.methodLabel === 'DINHEIRO' && split.cashReceived !== null && (

@@ -13,6 +13,18 @@
   }
 }
 
+@keyframes qb-corner-sync-pulse {
+  0%,
+  100% {
+    transform: scale(0.8);
+    opacity: 0.6;
+  }
+  50% {
+    transform: scale(1.15);
+    opacity: 1;
+  }
+}
+
 @keyframes qb-cart-jump-a {
   0% {
     transform: translateY(0) scale(1) rotate(0deg);
@@ -151,6 +163,18 @@
   }
 }
 
+@keyframes qb-payment-confirm-ready-blink {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(22, 163, 74, 0.2);
+    filter: saturate(1);
+  }
+  50% {
+    box-shadow: 0 0 0 7px rgba(22, 163, 74, 0.32);
+    filter: saturate(1.2);
+  }
+}
+
 .qb-cart-button-bump-a {
   animation: qb-cart-jump-a 520ms cubic-bezier(0.22, 0.95, 0.3, 1);
 }
@@ -188,6 +212,10 @@
   animation: qb-payment-origin-icon-pop-b 460ms cubic-bezier(0.2, 0.95, 0.3, 1);
 }
 
+.qb-payment-confirm-ready-blink {
+  animation: qb-payment-confirm-ready-blink 1s ease-in-out infinite;
+}
+
 .qb-sync-spinner {
   width: 20px;
   height: 20px;
@@ -200,6 +228,10 @@
 
 .qb-sync-progress-bar {
   animation: qb-progress-slide 1.2s ease-in-out infinite;
+}
+
+.qb-corner-sync-pulse {
+  animation: qb-corner-sync-pulse 0.9s ease-in-out infinite;
 }
 
 .qb-payment-modal {
