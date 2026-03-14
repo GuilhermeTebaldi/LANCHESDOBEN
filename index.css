@@ -630,18 +630,41 @@
   }
 
   .qb-inventory-actions,
-  .qb-cleaning-tabs,
-  .qb-admin-tabs {
+  .qb-cleaning-tabs {
     flex-wrap: wrap;
     overflow: visible;
     width: 100%;
   }
 
   .qb-inventory-actions .qb-btn-touch,
-  .qb-cleaning-tabs .qb-btn-touch,
-  .qb-admin-tabs .qb-btn-touch {
+  .qb-cleaning-tabs .qb-btn-touch {
     flex: 1 1 calc(50% - 0.25rem);
     justify-content: center;
+  }
+
+  .qb-admin-tabs {
+    width: 100%;
+    flex-wrap: nowrap !important;
+    gap: 0.4rem;
+    overflow-x: auto !important;
+    overflow-y: hidden;
+    padding: 0.35rem !important;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+
+  .qb-admin-tabs::-webkit-scrollbar {
+    display: none;
+  }
+
+  .qb-admin-tabs .qb-btn-touch {
+    flex: 0 0 auto !important;
+    min-width: max-content;
+    justify-content: center;
+    white-space: nowrap;
+    font-size: 0.62rem;
+    letter-spacing: 0.08em;
+    padding: 0.6rem 0.8rem;
   }
 
   .qb-inventory-grid,
@@ -735,13 +758,79 @@
   .qb-sales-list-card,
   .qb-sales-stock-card,
   .qb-admin-summary,
+  .qb-admin-cash,
   .qb-admin-panel,
   .qb-admin-config,
   .qb-cleaning-materials-panel,
   .qb-cleaning-stock-panel,
   .qb-cleaning-history-panel {
-    border-radius: 1.5rem;
-    padding: 1rem;
+    border-radius: 1.5rem !important;
+    padding: 1rem !important;
+  }
+
+  .qb-admin-panel,
+  .qb-admin-config,
+  .qb-admin-summary,
+  .qb-admin-cash {
+    min-height: auto !important;
+  }
+
+  .qb-admin-header h2 {
+    font-size: 1.85rem;
+    line-height: 1.95rem;
+  }
+
+  .qb-admin-header p {
+    font-size: 0.72rem;
+    line-height: 1rem;
+  }
+
+  .qb-admin-stat-card {
+    border-radius: 1.25rem !important;
+    padding: 0.95rem !important;
+  }
+
+  .qb-admin-stat-card h4 {
+    font-size: 1.35rem;
+    line-height: 1.4rem;
+  }
+
+  .qb-admin-panel-head {
+    align-items: flex-start;
+    gap: 0.7rem;
+    margin-bottom: 1rem !important;
+  }
+
+  .qb-admin-panel-head > div:first-child {
+    border-radius: 0.85rem !important;
+    padding: 0.65rem !important;
+  }
+
+  .qb-admin-panel-head h3 {
+    font-size: 1.08rem !important;
+    line-height: 1.2rem !important;
+  }
+
+  .qb-admin-panel-head p {
+    font-size: 0.56rem !important;
+    line-height: 0.72rem !important;
+  }
+
+  .qb-admin-month-toggle {
+    padding: 0.95rem !important;
+  }
+
+  .qb-admin-day-toggle {
+    padding: 0.72rem !important;
+  }
+
+  .qb-archive-tile {
+    padding: 0.95rem !important;
+  }
+
+  .qb-archive-tile svg {
+    height: 32px;
+    width: 32px;
   }
 
   .qb-sales-list-content,
@@ -780,6 +869,20 @@
     padding: 1rem;
   }
 
+  .qb-archive-detail h4 {
+    margin-bottom: 1rem !important;
+  }
+
+  .qb-archive-detail .text-4xl {
+    font-size: 1.6rem !important;
+    line-height: 1.75rem !important;
+  }
+
+  .qb-archive-detail .text-3xl {
+    font-size: 1.35rem !important;
+    line-height: 1.5rem !important;
+  }
+
   .qb-archive-delete-day-btn {
     margin-bottom: 1rem;
     position: static;
@@ -810,7 +913,36 @@
 
   .qb-admin-panel table,
   .qb-cleaning-history-table table {
-    min-width: 640px;
+    min-width: 560px;
+  }
+
+  .qb-admin-config .max-w-2xl,
+  .qb-admin-config .max-w-md {
+    max-width: 100%;
+  }
+
+  .qb-admin-config .mx-auto.qb-btn-touch {
+    width: 100%;
+  }
+
+  .qb-admin-analytics .grid.grid-cols-2 {
+    grid-template-columns: 1fr !important;
+  }
+
+  .qb-admin-analytics h5 {
+    font-size: 0.6rem;
+    line-height: 0.85rem;
+  }
+
+  .qb-admin-analytics .h-\[320px\],
+  .qb-admin-analytics .h-\[280px\],
+  .qb-admin-analytics .h-\[270px\],
+  .qb-admin-analytics .h-\[260px\] {
+    height: 220px;
+  }
+
+  .qb-admin-analytics table {
+    min-width: 560px;
   }
 
   .qb-notification {
@@ -854,10 +986,15 @@
   }
 
   .qb-pos-categories .qb-btn-touch,
-  .qb-admin-tabs .qb-btn-touch,
   .qb-cleaning-tabs .qb-btn-touch,
   .qb-inventory-actions .qb-btn-touch {
     flex: 1 1 100%;
+  }
+
+  .qb-admin-tabs .qb-btn-touch {
+    flex: 0 0 auto !important;
+    font-size: 0.56rem !important;
+    padding: 0.55rem 0.7rem !important;
   }
 
   .qb-product-grid,

@@ -1,187 +1,220 @@
-# Guia de Portabilidade: Impressao (Replica Local -> SaaS)
+# Migração Completa dos Ajustes (Mobile + Cálculo de Arquivos)
 
-## Resumo do que foi implementado neste sistema
+Este documento descreve **tudo o que foi feito neste chat**, do começo ao fim, para você replicar no projeto SaaS equivalente.
 
-Foi implementado um pacote completo de ajustes de impressao, sem remover funcionalidades existentes:
+## 1) Objetivo inicial do trabalho
 
-1. Correcao de corte lateral na impressao.
-2. Correcao do Historico de Fechamentos para trazer valores de pagamento corretamente (PIX, Debito, Credito, Dinheiro, Dividido, canais de app).
-3. Engrenagem com modelos de impressao no Historico de Fechamentos.
-4. Engrenagem com modelos de impressao na Aba Caixa (Relatorio do Dia), mantendo o modo `Padrao` sem alterar o comportamento anterior.
-5. Engrenagem com modelos de impressao no Historico de Vendas (segunda via de cupom), com `Padrao` intacto.
-6. Salvamento permanente das escolhas de modelo no navegador (localStorage).
+Problema reportado:
+- Layout mobile estava ruim e desproporcional.
+- Abas principais afetadas: `CAIXA`, `ESTOQUE`, `VENDAS`, `OUTROS`.
+- Área `ADMINISTRAÇÃO` também quebrava no mobile: `geral`, `ANALISE`, `vendas`, `estornos`, `estoque`, `materiais`, `arquivos`, `CONFIG`.
 
-## Correcoes tecnicas feitas
-
-### 1) Historico de Fechamentos sem perder valores de pagamento
-
-Antes, alguns fechamentos podiam cair em "Sem valores por forma de pagamento" mesmo com vendas no periodo.
-
-Causa principal:
-- Associacao de vendas ao fechamento por `dia` (data local), que falha em cenarios de virada de dia.
-
-Correcao aplicada:
-- Associacao de vendas por janela temporal entre fechamentos (ordenado por `closedAt`), com fallback por dia quando necessario.
-- Evita duplicidade no historico inferido usando controle de IDs de venda ja consumidos.
-
-Impacto:
-- O fechamento impresso passa a usar o conjunto correto de vendas do periodo.
-
-### 2) Corte de texto nas laterais
-
-Causas tratadas:
-- Colunas calculadas sem considerar bem a area util interna.
-- Linhas longas enviadas inteiras para `pre`.
-
-Correcao aplicada:
-- Calculo de colunas baseado na largura interna (descontando padding horizontal).
-- Margem de seguranca no calculo de colunas para reduzir risco de clipping fisico.
-- Quebra de mensagens longas com `wrap()` antes de imprimir.
-
-Impacto:
-- Reducao de cortes de letras nas bordas e de frases truncadas no papel.
-
-## Modelos de impressao adicionados
-
-Os mesmos modelos foram expostos em pontos diferentes da interface:
-
-- `48 x 297 mm`
-- `58 x 297 mm`
-- `72 x 297 mm`
-- `80 x 297 mm`
-- `A4 210 x 297 mm`
-
-No cupom/segunda via existe tambem:
-- `Padrao` (nao altera o comportamento antigo)
-
-## Onde cada engrenagem aparece
-
-### A) Historico de Fechamentos (SalesSummary)
-- Local: painel lateral "Historico de Fechamentos".
-- Exibe modelo atual e permite troca por preset.
-- Persistencia local por chave:
-  - `qb_history_print_preset_v1`
-
-### B) Aba Caixa - Relatorio do Dia (SalesSummary)
-- Local: card escuro "Previa do dia".
-- Engrenagem com modelos de impressao para o relatorio.
-- `Padrao` preserva o layout anterior (larguras e colunas antigas).
-- Persistencia local por chave:
-  - `qb_cash_print_preset_v1`
-
-### C) Historico de Vendas (App - modal de segunda via)
-- Local: cabecalho do modal "Historico de Vendas".
-- Engrenagem ao lado do botao de fechar.
-- Modelos aplicados ao cupom via largura de bobina salva em localStorage.
-- `Padrao` remove override e volta ao comportamento original.
-- Persistencia local por chave:
-  - `qb_receipt_print_preset_v1`
-- Chave de largura usada pelo cupom:
-  - `qb_receipt_paper_width_mm`
-
-## Ajuste de limite de largura para suportar A4
-
-Arquivo utilitario:
-- `utils/receiptPaper.ts`
-
-Mudanca:
-- `MAX_RECEIPT_PAPER_WIDTH_MM` passou de `80` para `210`.
-
-Motivo:
-- Permitir preset `A4 210 x 297 mm` no fluxo de cupom/segunda via.
-
-## Garantia de nao regressao executada aqui
-
-Foi executado apos as alteracoes:
-
-1. `npm run build:sistema` (frontend): OK
-2. `npm --prefix backend test` (backend): OK (60/60)
-
-## Commits relevantes (ordem cronologica)
-
-- `3d46545` - fix(history-print): vincular vendas por janela de fechamento e quebrar linhas longas
-- `5ab151e` - feat(history-print): adicionar engrenagem com presets de tamanho de papel
-- `6ac521c` - feat(print-settings): presets permanentes no historico e cupom da aba caixa
-- `d817220` - feat(receipt-history): engrenagem de modelos no historico de vendas
+Meta:
+- Corrigir responsividade sem regressão de lógica de negócio.
+- Preservar layout desktop.
+- Melhorar navegação mobile.
+- Depois, corrigir divergência de valores na aba `Arquivos`.
 
 ---
 
-## Como portar para o SaaS com padrao por usuario
+## 2) Arquivos alterados no projeto atual
 
-No SaaS, a persistencia nao deve ficar so em localStorage. Cada usuario precisa ter sua propria configuracao salva no backend.
+- `components/Header.tsx`
+- `components/AdminDashboard.tsx`
+- `components/AdminSalesAnalyticsTab.tsx`
+- `components/InventoryManager.tsx`
+- `index.css`
 
-### Objetivo
+---
 
-Cada usuario autenticado deve ter:
+## 3) Ajuste 1: Menu hambúrguer mobile (de dropdown empurrando layout para drawer lateral)
 
-- preset de impressao do Historico de Fechamentos
-- preset de impressao da Aba Caixa
-- preset de impressao do Historico de Vendas (segunda via)
+### Problema
+- O menu mobile abria de cima para baixo e empurrava o conteúdo.
 
-### Modelo de dados recomendado
+### Solução aplicada
+Em `components/Header.tsx`:
+- Substituição do menu inline por **drawer lateral off-canvas**.
+- Inclusão de **overlay/backdrop** para fechar ao tocar fora.
+- Fechamento com tecla `Esc`.
+- Lock de scroll do body quando drawer está aberto (`document.body.style.overflow = 'hidden'`).
+- Mantidas as mesmas rotas/abas (`CAIXA`, `ESTOQUE`, `VENDAS`, `OUTROS`, `ADMIN`) e mesma lógica de navegação.
 
-Criar tabela (exemplo): `user_print_preferences`
+### Resultado
+- Menu abre lateralmente, elegante e sem deslocar layout da página.
 
-Campos sugeridos:
+---
 
-- `user_id` (FK unico)
-- `history_closing_preset` (string)
-- `cash_report_preset` (string)
-- `receipt_history_preset` (string)
-- `updated_at` (timestamp)
+## 4) Ajuste 2: Correções de responsividade mobile em massa
 
-Opcional:
-- `overrides_json` para extensoes futuras (ex: fonte, margem, densidade)
+Foi feito um pacote conservador focado em UI, principalmente em `ADMIN`.
 
-### API recomendada
+## 4.1) Correção crítica encontrada
 
-1. `GET /api/print-preferences`
-- retorna preferencias do usuario logado
+Em `components/InventoryManager.tsx`:
+- Classe raiz estava escrita como `qqb-inventory`.
+- Corrigido para `qb-inventory`.
 
-2. `PUT /api/print-preferences`
-- atualiza parcial/total
-- valida presets permitidos em whitelist
+Impacto:
+- As regras mobile de `.qb-inventory` em `index.css` voltaram a aplicar corretamente.
 
-Payload exemplo:
+---
 
-```json
-{
-  "historyClosingPreset": "80x297",
-  "cashReportPreset": "PADRAO",
-  "receiptHistoryPreset": "58x297"
-}
-```
+## 4.2) Melhorias em `components/AdminDashboard.tsx`
 
-### Regra de precedencia no frontend SaaS
+### Ajustes gerais responsivos
+- Título de `ADMINISTRAÇÃO` ajustado para `text-3xl sm:text-4xl`.
+- Painéis principais ficaram responsivos com padding/radius adaptáveis:
+  - De `p-8 rounded-[40px]` para padrões como `p-4 sm:p-8 rounded-[28px] sm:rounded-[40px]`.
+- Mesma lógica de dados preservada.
 
-1. Preferencia vinda da API do usuario
-2. Fallback para localStorage (migracao suave)
-3. Fallback para default do sistema (`Padrao` ou `80x297`, conforme contexto)
+### Abas ajustadas
+- `estornos`
+- `arquivos`
+- `configuracao`
+- `vendas`
+- `materiais`
+- `estoque`
 
-### Estrategia de migracao segura
+### Ajustes de componentes internos
+- Botões de expansão de mês/dia receberam classes auxiliares:
+  - `qb-admin-month-toggle`
+  - `qb-admin-day-toggle`
+- Cards de arquivo receberam `qb-archive-tile`.
+- Tipografia reduzida no mobile para datas/labels longos.
+- Botões grandes de `CONFIG` ficaram `w-full` no mobile para evitar quebra e overflow.
 
-1. Deploy backend com tabela + endpoints (sem quebrar clientes antigos)
-2. Frontend passa a ler API primeiro
-3. Se usuario tiver apenas valor local antigo, enviar `PUT` 1 vez para migrar e marcar migrou
-4. Depois da migracao, manter sincronizado (salvou no UI -> salva no backend)
+---
 
-### Regras importantes no SaaS
+## 4.3) Melhorias em `components/AdminSalesAnalyticsTab.tsx`
 
-- Validar preset no backend para impedir valores invalidos.
-- Nunca confiar apenas no valor vindo do cliente.
-- Garantir isolamento por `user_id`.
-- Em ambiente multi-tenant, incluir escopo de tenant quando necessario.
+### Ajustes aplicados
+- Painel analytics responsivo com `p-4 sm:p-8` e radius adaptado.
+- Headings principais ajustados para `text-xl sm:text-2xl`.
+- Grades internas que quebravam no celular alteradas para mobile-first:
+  - de `grid-cols-2` para `grid-cols-1 sm:grid-cols-2` em blocos críticos.
 
-## Checklist rapido para replicar no SaaS
+### Resultado
+- Cards e blocos analíticos deixam de ficar espremidos em telas pequenas.
 
-1. Portar constantes de presets e IDs.
-2. Portar os 3 pontos de UI com engrenagem.
-3. Portar o comportamento de `Padrao` sem alteracao de medidas legadas.
-4. Portar a associacao por janela temporal no Historico de Fechamentos.
-5. Portar `wrap` de mensagens longas no layout de impressao.
-6. Substituir persistencia local por API por usuario.
-7. Rodar build + testes de regressao apos merge.
+---
 
-## Observacao final
+## 4.4) Melhorias estruturais em `index.css`
 
-A implementacao atual ficou preparada para operacao local (persistencia no browser) e ja separa claramente os contextos de impressao. Isso facilita a migracao para SaaS por usuario sem alterar regra de negocio de vendas, caixa e historico.
+Foi feito reforço de CSS responsivo para garantir prioridade sobre classes utilitárias fixas.
+
+### Principais mudanças
+- `qb-admin-tabs`:
+  - virou trilha horizontal com scroll (`nowrap`, `overflow-x-auto`), sem wrap quebrando linha.
+  - botões com `flex: 0 0 auto`, `white-space: nowrap`.
+- Painéis admin (`.qb-admin-panel`, `.qb-admin-config`, `.qb-admin-summary`, `.qb-admin-cash`):
+  - padding e border-radius responsivos com prioridade.
+- Ajustes de tipografia e espaçamento:
+  - header admin, stat cards, panel-head.
+- Ajustes de elementos de arquivo:
+  - `qb-admin-month-toggle`, `qb-admin-day-toggle`, `qb-archive-tile`.
+- Ajustes de tabelas:
+  - min-width reduzido para mobile (`560px`) com scroll horizontal.
+- Ajustes específicos de analytics mobile:
+  - grids forçados para 1 coluna em pontos críticos.
+  - alturas de gráficos reduzidas para `220px` no mobile.
+- Ajustes extras para `max-width: 480px`:
+  - refinamento de botões de tabs admin.
+
+---
+
+## 5) Ajuste 3: Correção de cálculo na aba `Arquivos` (ADMIN)
+
+Você reportou que os valores da aba `Arquivos` estavam incorretos.
+
+### Causa identificada
+A aba `Arquivos` somava receita/lucro direto por item (`sale.total`), sem consolidar pedido:
+- Em pedidos com múltiplos itens (`saleDraftId`), pode haver distorção quando a leitura esperada é por pedido.
+- Em pedidos de app (`IFOOD`, `APP99`, `KEETA`), o valor real do pedido pode ser `appOrderTotal`, diferente da soma item a item.
+
+### Solução implementada
+Em `components/AdminDashboard.tsx`:
+
+#### Foi criado:
+- `interface ConsolidatedArchiveFinance`
+- `const isAppOrigin(...)`
+- `const buildConsolidatedArchiveFinance(entries: Sale[])`
+
+#### Regra de consolidação aplicada
+Para cada venda:
+- Chave de agrupamento:
+  - `draft:${saleDraftId}` quando existe `saleDraftId`
+  - `sale:${sale.id}` caso contrário
+- Receita fallback: soma de `sale.total` dos itens
+- Receita app efetiva:
+  - se origem é app e `appOrderTotal > 0`, usa `appOrderTotal`
+  - senão usa fallback
+- Custo: soma de `sale.totalCost` do grupo
+- Lucro: `receita efetiva - custo`
+- Tudo com arredondamento monetário (`roundMoney`).
+
+### Onde os valores foram trocados para o novo cálculo
+Na aba `Arquivos`:
+- Card de mês (lucro do mês)
+- Card de dia (lucro do dia)
+- Header de detalhe do dia (lucro do dia)
+- Cards de detalhe (`Receita` e `Lucro`)
+
+Observação:
+- Resumo de apps (`Apps: pedidos e valor`) continua usando `buildAppChannelSummary`, mantendo compatibilidade com leitura já existente.
+
+---
+
+## 6) Segurança e preservação de comportamento
+
+Durante todas as alterações:
+- Não foi alterada lógica de comandos de estado.
+- Não foi alterada persistência remota/local.
+- Não houve mudança de schema/migrations.
+- Não houve alteração de autenticação/permissões.
+- Mudanças concentradas em UI responsiva + cálculo de exibição em Arquivos.
+
+---
+
+## 7) Validação executada
+
+Comando executado após as mudanças:
+- `npm run build:sistema`
+
+Status:
+- Build concluído com sucesso.
+- Sem erros de TypeScript/compilação.
+
+---
+
+## 8) Checklist para aplicar no projeto SaaS (igual)
+
+Use esta sequência no outro projeto:
+
+1. Aplicar mudança do drawer mobile no `Header`.
+2. Corrigir typo de classe raiz de estoque (`qqb-inventory` -> `qb-inventory`), se existir.
+3. Replicar ajustes responsivos do `AdminDashboard`.
+4. Replicar ajustes responsivos do `AdminSalesAnalyticsTab`.
+5. Replicar bloco de CSS mobile reforçado no `index.css`.
+6. Implementar consolidação de cálculo em `Arquivos` com `buildConsolidatedArchiveFinance`.
+7. Substituir as leituras antigas (`monthProfit/dayProfit/selectedProfit` por soma direta) pelas novas consolidadas.
+8. Rodar build do frontend e validar em celular real.
+
+---
+
+## 9) Pontos de atenção ao portar para SaaS
+
+- Se o SaaS tiver nomes de arquivo/componentes diferentes, portar por bloco lógico, não por linha.
+- Se o SaaS tiver outra modelagem para app (`appOrderTotal` com outro nome), adaptar na função consolidada.
+- Se houver múltiplas moedas/locales, manter `roundMoney` centralizado para evitar divergência visual.
+- Garantir que agrupamento por pedido continue usando `saleDraftId` (ou equivalente no SaaS).
+
+---
+
+## 10) Resumo executivo (curto)
+
+Foi entregue:
+- Navegação mobile moderna com drawer lateral.
+- Responsividade ampla nas telas críticas mobile (com foco no ADMIN completo).
+- Correção real de cálculo na aba `Arquivos`, consolidando por pedido e respeitando `appOrderTotal` para apps.
+- Build validado sem quebrar o sistema.

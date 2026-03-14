@@ -23,6 +23,25 @@ const Header: React.FC<HeaderProps> = ({ currentView, setView, dailyTotal }) => 
     return () => window.removeEventListener('resize', closeMenuOnDesktop);
   }, []);
 
+  useEffect(() => {
+    if (!isMobileMenuOpen) return;
+
+    const previousBodyOverflow = document.body.style.overflow;
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsMobileMenuOpen(false);
+      }
+    };
+
+    document.body.style.overflow = 'hidden';
+    window.addEventListener('keydown', handleEscape);
+
+    return () => {
+      document.body.style.overflow = previousBodyOverflow;
+      window.removeEventListener('keydown', handleEscape);
+    };
+  }, [isMobileMenuOpen]);
+
   const handleChangeView = (view: ViewMode) => {
     setView(view);
     setIsMobileMenuOpen(false);
@@ -79,6 +98,7 @@ const Header: React.FC<HeaderProps> = ({ currentView, setView, dailyTotal }) => 
             className="qb-mobile-menu-toggle lg:hidden bg-red-700/70 p-2.5 rounded-xl border border-red-500/40 active:scale-95 transition-all"
             aria-label={isMobileMenuOpen ? 'Fechar menu' : 'Abrir menu'}
             aria-expanded={isMobileMenuOpen}
+            aria-controls="mobile-nav-drawer"
           >
             {isMobileMenuOpen ? (
               <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
@@ -93,43 +113,83 @@ const Header: React.FC<HeaderProps> = ({ currentView, setView, dailyTotal }) => 
         </div>
       </div>
 
-      {isMobileMenuOpen && (
-        <div className="qb-mobile-nav-panel lg:hidden px-4 pb-4 animate-in fade-in slide-in-from-top-1 duration-200">
-          <nav className="grid grid-cols-2 gap-2 bg-red-700/55 rounded-2xl p-2 border border-red-500/40 shadow-lg">
+      <div
+        className={`qb-mobile-drawer-wrapper fixed inset-0 z-[70] lg:hidden transition-opacity duration-200 ${
+          isMobileMenuOpen ? 'pointer-events-auto opacity-100' : 'pointer-events-none opacity-0'
+        }`}
+        aria-hidden={!isMobileMenuOpen}
+      >
+        <button
+          type="button"
+          onClick={() => setIsMobileMenuOpen(false)}
+          className={`absolute inset-0 bg-slate-950/45 transition-opacity duration-200 ${
+            isMobileMenuOpen ? 'opacity-100' : 'opacity-0'
+          }`}
+          aria-label="Fechar menu"
+        />
+
+        <aside
+          id="mobile-nav-drawer"
+          className={`qb-mobile-nav-panel absolute inset-y-0 right-0 w-[min(86vw,340px)] bg-red-700 border-l border-red-500/60 shadow-2xl p-4 flex flex-col gap-3 transition-transform duration-300 ${
+            isMobileMenuOpen ? 'translate-x-0' : 'translate-x-full'
+          }`}
+        >
+          <div className="flex items-center justify-between">
+            <p className="text-[10px] font-black uppercase tracking-[0.2em] text-red-100">Navegação</p>
+            <button
+              type="button"
+              onClick={() => setIsMobileMenuOpen(false)}
+              className="qb-btn-touch rounded-xl border border-red-400/40 bg-red-600/70 px-3 py-2 text-[10px] font-black uppercase tracking-widest text-white"
+            >
+              Fechar
+            </button>
+          </div>
+
+          <nav className="grid grid-cols-1 gap-2">
             <button
               onClick={() => handleChangeView(ViewMode.POS)}
-              className={`px-3 py-3 rounded-xl text-[11px] font-black tracking-wide transition-all ${currentView === ViewMode.POS ? 'bg-white text-red-600 shadow-sm' : 'bg-red-600/50 hover:bg-red-500'}`}
+              className={`px-3 py-3 rounded-xl text-[11px] font-black tracking-wide transition-all ${
+                currentView === ViewMode.POS ? 'bg-white text-red-600 shadow-sm' : 'bg-red-600/50 hover:bg-red-500'
+              }`}
             >
               CAIXA
             </button>
             <button
               onClick={() => handleChangeView(ViewMode.INVENTORY)}
-              className={`px-3 py-3 rounded-xl text-[11px] font-black tracking-wide transition-all ${currentView === ViewMode.INVENTORY ? 'bg-white text-red-600 shadow-sm' : 'bg-red-600/50 hover:bg-red-500'}`}
+              className={`px-3 py-3 rounded-xl text-[11px] font-black tracking-wide transition-all ${
+                currentView === ViewMode.INVENTORY ? 'bg-white text-red-600 shadow-sm' : 'bg-red-600/50 hover:bg-red-500'
+              }`}
             >
               ESTOQUE
             </button>
             <button
               onClick={() => handleChangeView(ViewMode.REPORTS)}
-              className={`px-3 py-3 rounded-xl text-[11px] font-black tracking-wide transition-all ${currentView === ViewMode.REPORTS ? 'bg-white text-red-600 shadow-sm' : 'bg-red-600/50 hover:bg-red-500'}`}
+              className={`px-3 py-3 rounded-xl text-[11px] font-black tracking-wide transition-all ${
+                currentView === ViewMode.REPORTS ? 'bg-white text-red-600 shadow-sm' : 'bg-red-600/50 hover:bg-red-500'
+              }`}
             >
               VENDAS
             </button>
             <button
               onClick={() => handleChangeView(ViewMode.OTHERS)}
-              className={`px-3 py-3 rounded-xl text-[11px] font-black tracking-wide transition-all ${currentView === ViewMode.OTHERS ? 'bg-white text-red-600 shadow-sm' : 'bg-red-600/50 hover:bg-red-500'}`}
+              className={`px-3 py-3 rounded-xl text-[11px] font-black tracking-wide transition-all ${
+                currentView === ViewMode.OTHERS ? 'bg-white text-red-600 shadow-sm' : 'bg-red-600/50 hover:bg-red-500'
+              }`}
             >
               OUTROS
             </button>
             <button
               onClick={() => handleChangeView(ViewMode.ADMIN)}
-              className={`col-span-2 px-3 py-3 rounded-xl text-[11px] font-black tracking-wide transition-all flex items-center justify-center gap-2 ${currentView === ViewMode.ADMIN ? 'bg-slate-900 text-yellow-400 shadow-sm' : 'bg-red-600/50 hover:bg-red-500'}`}
+              className={`px-3 py-3 rounded-xl text-[11px] font-black tracking-wide transition-all flex items-center justify-center gap-2 ${
+                currentView === ViewMode.ADMIN ? 'bg-slate-900 text-yellow-400 shadow-sm' : 'bg-red-600/50 hover:bg-red-500'
+              }`}
             >
               <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><rect width="18" height="11" x="3" y="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
               ADMIN
             </button>
           </nav>
-        </div>
-      )}
+        </aside>
+      </div>
     </header>
   );
 };

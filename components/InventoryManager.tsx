@@ -117,7 +117,7 @@ const InventoryManager: React.FC<InventoryManagerProps> = ({
   };
 
   return (
-    <div className="qqb-inventory p-4 sm:p-6 max-w-[1600px] mx-auto">
+    <div className="qb-inventory p-4 sm:p-6 max-w-[1600px] mx-auto">
       <div className="qb-inventory-header flex flex-col sm:flex-row sm:items-center justify-between mb-8 gap-4">
         <div>
           <h2 className="text-3xl font-black text-slate-800 tracking-tight">CONTROLE DE ESTOQUE</h2>
