@@ -3,6 +3,11 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { DEFAULT_APP_STATE, loadAppState, type AppState } from '../data/appStorage';
 import type { Sale, SaleBasePaymentMethod, SaleDraft, SaleOrigin, SalePaymentMethod, SalePaymentSplitEntry } from '../types';
 import { getReceiptPaperWidthMm } from '../utils/receiptPaper';
+import {
+  consumeReceiptPrintPayload,
+  removeReceiptPrintPayload,
+  type ReceiptPrintPayload,
+} from '../utils/receiptPrintPayload';
 
 interface PrintReceiptProps {
   receiptId: string;
@@ -44,7 +49,7 @@ interface ReceiptViewModel {
 
 const DEFAULT_RESTAURANT_NAME = 'LANCHESDOBEN';
 const RECEIPT_LOAD_RETRY_DELAY_MS = 180;
-const RECEIPT_LOAD_MAX_WAIT_MS = 6000;
+const RECEIPT_LOAD_MAX_WAIT_MS = 15000;
 
 const moneyFormatter = new Intl.NumberFormat('pt-BR', {
   style: 'currency',
@@ -358,6 +363,56 @@ const buildReceiptViewModel = (state: AppState, receiptId: string): ReceiptViewM
   };
 };
 
+const buildReceiptViewModelFromPayload = (
+  payload: ReceiptPrintPayload
+): ReceiptViewModel | null => {
+  const data = payload.receipt;
+  if (!data || !Array.isArray(data.lines) || data.lines.length === 0) return null;
+
+  const lines = data.lines.map((line) => ({
+    id: line.id,
+    qty: Math.max(1, Math.round(Number(line.qty) || 1)),
+    name: line.name || 'Item',
+    unitPrice: roundMoney(Math.max(0, Number(line.unitPrice) || 0)),
+    subtotal: roundMoney(Math.max(0, Number(line.subtotal) || 0)),
+    note: normalizeText(line.note || undefined) || undefined,
+  }));
+
+  const paymentSplits = (data.paymentSplits || []).map((split, index) => ({
+    label: normalizeText(split.label) || `Parcela ${index + 1}`,
+    methodLabel: normalizeText(split.methodLabel) || 'NAO INFORMADO',
+    amount: roundMoney(Math.max(0, Number(split.amount) || 0)),
+    cashReceived: normalizeMoneyValue(split.cashReceived),
+    change: normalizeMoneyValue(split.change),
+  }));
+
+  const observations = (data.observations || [])
+    .map((entry) => normalizeText(entry))
+    .filter((entry): entry is string => Boolean(entry));
+
+  return {
+    restaurantName: normalizeText(data.restaurantName) || DEFAULT_RESTAURANT_NAME,
+    orderNumber:
+      data.orderNumber === null || data.orderNumber === undefined
+        ? null
+        : Math.max(0, Math.round(Number(data.orderNumber) || 0)),
+    orderId: normalizeText(data.orderId) || '--',
+    paidAt: toDate(data.paidAtIso),
+    lines,
+    itemsTotal: roundMoney(Math.max(0, Number(data.itemsTotal) || 0)),
+    total: roundMoney(Math.max(0, Number(data.total) || 0)),
+    paymentMethodLabel: normalizeText(data.paymentMethodLabel) || 'NAO INFORMADO',
+    paymentCashReceived: normalizeMoneyValue(data.paymentCashReceived),
+    paymentChange: normalizeMoneyValue(data.paymentChange),
+    paymentSplits,
+    saleOriginLabel: normalizeText(data.saleOriginLabel),
+    saleOriginShortLabel: normalizeText(data.saleOriginShortLabel),
+    appOrderTotal: normalizeMoneyValue(data.appOrderTotal),
+    isAppSale: Boolean(data.isAppSale),
+    observations,
+  };
+};
+
 const PrintReceipt: React.FC<PrintReceiptProps> = ({ receiptId }) => {
   const [receipt, setReceipt] = useState<ReceiptViewModel | null>(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -374,6 +429,18 @@ const PrintReceipt: React.FC<PrintReceiptProps> = ({ receiptId }) => {
     setErrorMessage(null);
     setReceipt(null);
     hasTriggeredPrintRef.current = false;
+
+    const localPayload = consumeReceiptPrintPayload(receiptId);
+    if (localPayload) {
+      const payloadModel = buildReceiptViewModelFromPayload(localPayload);
+      if (payloadModel) {
+        setReceipt(payloadModel);
+        setIsLoading(false);
+        return () => {
+          cancelled = true;
+        };
+      }
+    }
 
     const scheduleRetry = () => {
       if (cancelled) return;
@@ -437,6 +504,7 @@ const PrintReceipt: React.FC<PrintReceiptProps> = ({ receiptId }) => {
     if (typeof window === 'undefined') return;
     const previousAfterPrint = window.onafterprint;
     window.onafterprint = (event: Event) => {
+      removeReceiptPrintPayload(receiptId);
       try {
         window.close();
       } catch {
@@ -449,7 +517,7 @@ const PrintReceipt: React.FC<PrintReceiptProps> = ({ receiptId }) => {
     return () => {
       window.onafterprint = previousAfterPrint;
     };
-  }, []);
+  }, [receiptId]);
 
   const printedAt = useMemo(() => new Date(), []);
 

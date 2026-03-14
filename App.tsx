@@ -40,6 +40,13 @@ import {
 } from './data/stateCommandClient';
 import { buildReceiptPrintRoutePath } from './utils/printRoutes';
 import { clampReceiptPaperWidthMm } from './utils/receiptPaper';
+import {
+  removeReceiptPrintPayload,
+  saveReceiptPrintPayload,
+  setReceiptPrintPayloadOnWindow,
+  type ReceiptPrintPayload,
+  type ReceiptPrintPayloadInput,
+} from './utils/receiptPrintPayload';
 
 const ADMIN_GATE_KEY = 'lanchesdoben_admin_gate';
 const ADMIN_SESSION_KEY = 'lanchesdoben_admin_session';
@@ -51,6 +58,8 @@ const LOCAL_CASH_REGISTER_KEY = 'qb_cash_register_local_v1';
 const LOCAL_DAILY_HISTORY_KEY = 'qb_daily_sales_history_local_v1';
 const RECEIPT_PAPER_WIDTH_KEY = 'qb_receipt_paper_width_mm';
 const RECEIPT_PRINT_PRESET_STORAGE_KEY = 'qb_receipt_print_preset_v1';
+const RESTAURANT_NAME_STORAGE_KEY = 'qb_restaurant_name';
+const DEFAULT_RECEIPT_RESTAURANT_NAME = 'LANCHESDOBEN';
 
 type SaleRegisterCommand = Extract<StateCommand, { type: 'SALE_REGISTER' }>;
 type SaleDraftAddItemCommand = Extract<StateCommand, { type: 'SALE_DRAFT_ADD_ITEM' }>;
@@ -461,6 +470,170 @@ const getSaleOriginLabel = (origin: SaleOrigin): string => {
   if (origin === 'APP99') return '99';
   if (origin === 'KEETA') return 'Keeta';
   return 'Balcão';
+};
+
+const readReceiptRestaurantName = (): string => {
+  if (typeof window === 'undefined') return DEFAULT_RECEIPT_RESTAURANT_NAME;
+  const raw = window.localStorage.getItem(RESTAURANT_NAME_STORAGE_KEY);
+  if (typeof raw !== 'string') return DEFAULT_RECEIPT_RESTAURANT_NAME;
+  const trimmed = raw.trim();
+  return trimmed || DEFAULT_RECEIPT_RESTAURANT_NAME;
+};
+
+const toReceiptBasePaymentLabel = (method: SaleBasePaymentMethod): string => {
+  if (method === 'DEBITO') return 'DEBITO';
+  if (method === 'CREDITO') return 'CREDITO';
+  if (method === 'DINHEIRO') return 'DINHEIRO';
+  return 'PIX';
+};
+
+const toReceiptPaymentMethodLabel = (method: SalePaymentMethod): string => {
+  if (method === 'DEBITO') return 'DEBITO';
+  if (method === 'CREDITO') return 'CREDITO';
+  if (method === 'DINHEIRO') return 'DINHEIRO';
+  if (method === 'DIVIDIDO') return 'DIVIDIDO';
+  return 'PIX';
+};
+
+const toReceiptSaleOriginLabel = (origin: SaleOrigin): string | null => {
+  if (origin === 'IFOOD') return 'IFOOD';
+  if (origin === 'APP99') return '99';
+  if (origin === 'KEETA') return 'KEETA';
+  return null;
+};
+
+const toReceiptSaleOriginShortLabel = (origin: SaleOrigin): string | null => {
+  if (origin === 'IFOOD') return 'IF';
+  if (origin === 'APP99') return '99';
+  if (origin === 'KEETA') return 'KT';
+  return null;
+};
+
+const buildReceiptPrintPayloadFromSnapshot = (
+  snapshot: PaymentCommitSnapshot,
+  products: Product[]
+): ReceiptPrintPayloadInput | null => {
+  const productById = new Map(products.map((product) => [product.id, product]));
+  const lines = snapshot.draft.items
+    .map((item) => {
+      const qtyRaw = Number(item.qty);
+      const qty = Number.isFinite(qtyRaw) && qtyRaw > 0 ? Math.max(1, Math.round(qtyRaw)) : 1;
+      const product = productById.get(item.productId);
+      const unitPriceRaw =
+        typeof item.unitPriceSnapshot === 'number' && Number.isFinite(item.unitPriceSnapshot)
+          ? item.unitPriceSnapshot
+          : Number(product?.price) || 0;
+      const unitPrice = roundMoney(Math.max(0, unitPriceRaw));
+      const subtotal = roundMoney(unitPrice * qty);
+      const note = typeof item.note === 'string' && item.note.trim() ? item.note.trim() : undefined;
+      const name = item.nameSnapshot || product?.name || item.productId || 'Item';
+
+      return {
+        id: item.id || createClientId('receipt-line'),
+        qty,
+        name,
+        unitPrice,
+        subtotal,
+        note,
+      };
+    })
+    .filter((line) => line.qty > 0);
+
+  if (lines.length === 0) return null;
+
+  const observations = lines
+    .filter((line) => Boolean(line.note))
+    .map((line) => `${line.name}: ${line.note}`);
+
+  const itemsTotal = roundMoney(lines.reduce((sum, line) => sum + line.subtotal, 0));
+  const appOrderTotalParsed = isAppSaleOrigin(snapshot.saleOrigin)
+    ? parseMoneyInput(snapshot.appOrderTotalInput)
+    : null;
+  const appOrderTotal =
+    appOrderTotalParsed !== null && Number.isFinite(appOrderTotalParsed) && appOrderTotalParsed > 0
+      ? roundMoney(appOrderTotalParsed)
+      : null;
+  const isAppSale = isAppSaleOrigin(snapshot.saleOrigin);
+  const total = roundMoney(isAppSale && appOrderTotal !== null ? appOrderTotal : itemsTotal);
+
+  const paymentSplits =
+    snapshot.paymentMethod === 'DIVIDIDO'
+      ? snapshot.splitCommitted
+          .map((entry, index) => {
+            const amount = roundMoney(Math.max(0, Number(entry.amount) || 0));
+            const cashReceivedCandidate = Number(entry.cashReceived);
+            const fallbackChangeCandidate = Number(entry.change);
+            const cashReceived =
+              entry.method === 'DINHEIRO' && Number.isFinite(cashReceivedCandidate)
+                ? roundMoney(cashReceivedCandidate)
+                : null;
+            const change =
+              entry.method === 'DINHEIRO'
+                ? cashReceived !== null
+                  ? roundMoney(cashReceived - amount)
+                  : Number.isFinite(fallbackChangeCandidate)
+                    ? roundMoney(fallbackChangeCandidate)
+                    : null
+                : null;
+            return {
+              label: entry.label || `Parcela ${index + 1}`,
+              methodLabel: toReceiptBasePaymentLabel(entry.method),
+              amount,
+              cashReceived,
+              change,
+            };
+          })
+          .filter((entry) => entry.amount > 0)
+      : [];
+
+  const splitMethodSummary: string[] = [];
+  paymentSplits.forEach((split) => {
+    if (!splitMethodSummary.includes(split.methodLabel)) {
+      splitMethodSummary.push(split.methodLabel);
+    }
+  });
+
+  const paymentMethodLabel =
+    snapshot.paymentMethod === 'DIVIDIDO'
+      ? splitMethodSummary.length > 0
+        ? splitMethodSummary.join(' + ')
+        : 'DIVIDIDO'
+      : toReceiptPaymentMethodLabel(snapshot.paymentMethod);
+
+  const cashReceivedParsed =
+    snapshot.paymentMethod === 'DINHEIRO' ? parseMoneyInput(snapshot.cashReceivedInput) : null;
+  const paymentCashReceived =
+    snapshot.paymentMethod === 'DINHEIRO' &&
+    cashReceivedParsed !== null &&
+    Number.isFinite(cashReceivedParsed) &&
+    cashReceivedParsed >= 0
+      ? roundMoney(cashReceivedParsed)
+      : null;
+  const paymentChange =
+    snapshot.paymentMethod === 'DINHEIRO' && paymentCashReceived !== null
+      ? roundMoney(paymentCashReceived - total)
+      : null;
+
+  return {
+    receipt: {
+      restaurantName: readReceiptRestaurantName(),
+      orderNumber: null,
+      orderId: snapshot.draft.id,
+      paidAtIso: new Date().toISOString(),
+      lines,
+      itemsTotal,
+      total,
+      paymentMethodLabel,
+      paymentCashReceived,
+      paymentChange,
+      paymentSplits,
+      saleOriginLabel: toReceiptSaleOriginLabel(snapshot.saleOrigin),
+      saleOriginShortLabel: toReceiptSaleOriginShortLabel(snapshot.saleOrigin),
+      appOrderTotal: isAppSale ? appOrderTotal : null,
+      isAppSale,
+      observations,
+    },
+  };
 };
 
 const resolveDraftExpectedPaymentTotal = (draft: SaleDraft, origin: SaleOrigin): number => {
@@ -2372,12 +2545,26 @@ const App: React.FC = () => {
       splitCommitted: splitCommitted.map((entry) => ({ ...entry })),
       effectivePaymentTotal,
     };
+    const receiptPayloadInput = buildReceiptPrintPayloadFromSnapshot(paymentSnapshot, products);
+    const receiptPayload: ReceiptPrintPayload | null = receiptPayloadInput
+      ? saveReceiptPrintPayload(receiptPayloadInput)
+      : null;
     const pendingItemsCount = pendingDraftAddsRef.current[draftId]?.length || 0;
     const preparedPrintWindow = prepareReceiptPrintWindow();
-    const openedPrintWindowEarly =
-      preparedPrintWindow && !preparedPrintWindow.closed
-        ? navigatePreparedReceiptWindow(preparedPrintWindow, draftId)
-        : false;
+    if (receiptPayload && preparedPrintWindow) {
+      setReceiptPrintPayloadOnWindow(preparedPrintWindow, receiptPayload);
+    }
+    const receiptPrintId = receiptPayload?.id || draftId;
+    const openedPrintWindowEarly = navigatePreparedReceiptWindow(preparedPrintWindow, receiptPrintId);
+    if (!openedPrintWindowEarly) {
+      if (receiptPayload) {
+        removeReceiptPrintPayload(receiptPayload.id);
+      }
+      closePreparedReceiptWindow(preparedPrintWindow);
+      showNotification(
+        'Não foi possível abrir o cupom agora. Use o Histórico para segunda via.'
+      );
+    }
     setDraftSyncInProgress(draftId, true);
     setIsSaleOriginSetupOpen(false);
     setIsPaymentOpen(false);
@@ -2396,6 +2583,9 @@ const App: React.FC = () => {
       );
       if (!flushed) {
         closePreparedReceiptWindow(preparedPrintWindow);
+        if (receiptPayload) {
+          removeReceiptPrintPayload(receiptPayload.id);
+        }
         showCornerSync('error', 'Falha ao enviar itens para o banco.', 4800);
         return;
       }
@@ -2408,6 +2598,9 @@ const App: React.FC = () => {
       });
       if (!finalized) {
         closePreparedReceiptWindow(preparedPrintWindow);
+        if (receiptPayload) {
+          removeReceiptPrintPayload(receiptPayload.id);
+        }
         showCornerSync('error', 'Falha ao atualizar forma de pagamento.', 4800);
         return;
       }
@@ -2422,18 +2615,11 @@ const App: React.FC = () => {
       );
       if (!ok) {
         closePreparedReceiptWindow(preparedPrintWindow);
+        if (receiptPayload) {
+          removeReceiptPrintPayload(receiptPayload.id);
+        }
         showCornerSync('error', 'Falha ao concluir a venda no banco.', 4800);
         return;
-      }
-
-      if (!openedPrintWindowEarly) {
-        const opened = navigatePreparedReceiptWindow(preparedPrintWindow, draftId);
-        if (!opened) {
-          closePreparedReceiptWindow(preparedPrintWindow);
-          showNotification(
-            'Pagamento confirmado, mas o navegador bloqueou o cupom. Use o Histórico para segunda via.'
-          );
-        }
       }
 
       setIsSaleOriginSetupOpen(false);
