@@ -6,9 +6,15 @@ interface HeaderProps {
   currentView: ViewMode;
   setView: (view: ViewMode) => void;
   dailyTotal: number;
+  isDailyTotalSyncing?: boolean;
 }
 
-const Header: React.FC<HeaderProps> = ({ currentView, setView, dailyTotal }) => {
+const Header: React.FC<HeaderProps> = ({
+  currentView,
+  setView,
+  dailyTotal,
+  isDailyTotalSyncing = false,
+}) => {
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   useEffect(() => {
@@ -108,7 +114,31 @@ const Header: React.FC<HeaderProps> = ({ currentView, setView, dailyTotal }) => 
           </button>
           <div className="qb-header-total text-right">
             <p className="text-[10px] font-bold opacity-80 uppercase leading-none">Total Hoje</p>
-            <p className="text-lg font-black leading-tight">R$ {dailyTotal.toFixed(2)}</p>
+            {isDailyTotalSyncing ? (
+              <div className="mt-0.5 inline-flex items-center justify-end gap-1.5 text-red-100">
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  width="16"
+                  height="16"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.6"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="animate-spin"
+                  aria-hidden="true"
+                >
+                  <path d="M21 12a9 9 0 1 1-2.64-6.36" />
+                  <path d="M21 3v6h-6" />
+                </svg>
+                <span className="text-[10px] font-black uppercase tracking-widest leading-tight">
+                  Carregando
+                </span>
+              </div>
+            ) : (
+              <p className="text-lg font-black leading-tight">R$ {dailyTotal.toFixed(2)}</p>
+            )}
           </div>
         </div>
       </div>

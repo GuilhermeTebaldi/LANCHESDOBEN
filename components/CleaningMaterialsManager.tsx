@@ -1,6 +1,11 @@
 import React, { useMemo, useRef, useState } from 'react';
 import { CleaningMaterial, CleaningStockEntry } from '../types';
-import { formatStockQuantityByUnit } from '../utils/recipe';
+import {
+  allowsFractionalStockUnit,
+  formatStockQuantityByUnit,
+  normalizeStockMovementByUnit,
+  normalizeStockQuantityByUnit,
+} from '../utils/recipe';
 
 interface CleaningMaterialsManagerProps {
   materials: CleaningMaterial[];
@@ -96,9 +101,9 @@ const CleaningMaterialsManager: React.FC<CleaningMaterialsManagerProps> = ({
 
     const materialPayload = {
       name,
-      unit: form.unit,
-      currentStock,
-      minStock,
+      unit: form.unit.trim(),
+      currentStock: normalizeStockQuantityByUnit(form.unit, currentStock),
+      minStock: normalizeStockQuantityByUnit(form.unit, minStock),
       cost,
       imageUrl: form.imageUrl.trim() ? form.imageUrl.trim() : undefined,
     };
@@ -167,11 +172,14 @@ const CleaningMaterialsManager: React.FC<CleaningMaterialsManagerProps> = ({
   };
 
   const handleStockMove = (material: CleaningMaterial, direction: 'in' | 'out') => {
-    const amount = Number(stockValues[material.id]);
-    if (!Number.isFinite(amount) || amount <= 0) return;
-    if (direction === 'out' && material.currentStock + Number.EPSILON < amount) return;
+    const amountRaw = Number(stockValues[material.id]);
+    if (!Number.isFinite(amountRaw) || amountRaw <= 0) return;
+    if (!allowsFractionalStockUnit(material.unit) && !Number.isInteger(amountRaw)) return;
+    const normalizedAmount = normalizeStockMovementByUnit(material.unit, amountRaw);
+    if (normalizedAmount <= 0) return;
+    if (direction === 'out' && material.currentStock + Number.EPSILON < normalizedAmount) return;
 
-    onUpdateStock(material.id, direction === 'out' ? -amount : amount);
+    onUpdateStock(material.id, direction === 'out' ? -normalizedAmount : normalizedAmount);
     setStockValues((prev) => ({ ...prev, [material.id]: '' }));
   };
 
@@ -283,7 +291,7 @@ const CleaningMaterialsManager: React.FC<CleaningMaterialsManagerProps> = ({
                     </div>
 
                     <div className="flex items-center justify-between text-[11px] font-bold text-slate-500">
-                      <span>Minimo: {material.minStock}</span>
+                      <span>Minimo: {formatStockQuantityByUnit(material.unit, material.minStock)}</span>
                       <span>Custos: R$ {material.cost.toFixed(2)}</span>
 
                     </div>
@@ -322,8 +330,18 @@ const CleaningMaterialsManager: React.FC<CleaningMaterialsManagerProps> = ({
                 {materials.map((material) => {
                   const inputValue = stockValues[material.id] || '';
                   const parsed = Number(inputValue);
-                  const hasValidValue = Number.isFinite(parsed) && parsed > 0;
-                  const canConsume = hasValidValue && material.currentStock + Number.EPSILON >= parsed;
+                  const allowsFractional = allowsFractionalStockUnit(material.unit);
+                  const isValidTypedValue =
+                    Number.isFinite(parsed) &&
+                    parsed > 0 &&
+                    (allowsFractional || Number.isInteger(parsed));
+                  const normalizedTypedValue = isValidTypedValue
+                    ? normalizeStockMovementByUnit(material.unit, parsed)
+                    : 0;
+                  const hasValidValue = normalizedTypedValue > 0;
+                  const canConsume =
+                    hasValidValue &&
+                    material.currentStock + Number.EPSILON >= normalizedTypedValue;
 
                   return (
                     <div key={material.id} className="qb-cleaning-stock-card bg-slate-50 border border-slate-200 rounded-3xl p-4 space-y-3">
@@ -357,6 +375,7 @@ const CleaningMaterialsManager: React.FC<CleaningMaterialsManagerProps> = ({
                       <input
                         type="number"
                         min="0"
+                        step={allowsFractional ? '0.001' : '1'}
                         value={inputValue}
                         onChange={(e) => handleStockInput(material.id, e.target.value)}
                         placeholder="Quantidade"
@@ -500,6 +519,7 @@ const CleaningMaterialsManager: React.FC<CleaningMaterialsManagerProps> = ({
                   <input
                     type="number"
                     min="0"
+                    step={allowsFractionalStockUnit(form.unit) ? '0.001' : '1'}
                     value={form.currentStock}
                     onChange={(e) => handleFormChange('currentStock', e.target.value)}
                     placeholder="0"
@@ -512,6 +532,7 @@ const CleaningMaterialsManager: React.FC<CleaningMaterialsManagerProps> = ({
                   <input
                     type="number"
                     min="0"
+                    step={allowsFractionalStockUnit(form.unit) ? '0.001' : '1'}
                     value={form.minStock}
                     onChange={(e) => handleFormChange('minStock', e.target.value)}
                     placeholder="0"

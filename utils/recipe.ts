@@ -68,11 +68,39 @@ const getRecipeUnitConversion = (
 const isLegacyBaseQuantity = (value: number): boolean =>
   Number.isFinite(value) && value > 0 && value < 1;
 
-export const allowsFractionalStockInput = (ingredient: Pick<Ingredient, 'unit'>): boolean => {
-  const unit = normalizeUnit(ingredient.unit || '');
+export const allowsFractionalStockUnit = (unitValue: string): boolean => {
+  const unit = normalizeUnit(unitValue || '');
   if (!unit) return false;
   if (isGramUnit(unit) || isMlUnit(unit)) return true;
-  return getRecipeUnitConversion(ingredient) !== null;
+  return RECIPE_UNIT_CONVERSIONS.some((profile) => profile.matches(unit));
+};
+
+export const allowsFractionalStockInput = (ingredient: Pick<Ingredient, 'unit'>): boolean => {
+  return allowsFractionalStockUnit(ingredient.unit || '');
+};
+
+export const normalizeStockQuantityByUnit = (unitValue: string, quantity: number): number => {
+  const parsed = Number(quantity);
+  if (!Number.isFinite(parsed)) return 0;
+
+  const safeQuantity = Math.max(0, parsed);
+  if (allowsFractionalStockUnit(unitValue)) {
+    return Number(safeQuantity.toFixed(6));
+  }
+  return Math.trunc(safeQuantity);
+};
+
+export const normalizeStockMovementByUnit = (unitValue: string, amount: number): number => {
+  const parsed = Number(amount);
+  if (!Number.isFinite(parsed)) return 0;
+
+  if (allowsFractionalStockUnit(unitValue)) {
+    return Number(parsed.toFixed(6));
+  }
+
+  const magnitude = Math.trunc(Math.abs(parsed));
+  if (magnitude <= 0) return 0;
+  return parsed < 0 ? -magnitude : magnitude;
 };
 
 export const getStockInputUnitLabel = (ingredient: Pick<Ingredient, 'unit'>): string => {
@@ -173,6 +201,9 @@ const formatTrimmed = (value: number, precision = 3): string =>
 export const formatStockQuantityByUnit = (unitValue: string, quantity: number): string => {
   if (!Number.isFinite(quantity)) return '0';
   const unit = normalizeUnit(unitValue || '');
+  if (!allowsFractionalStockUnit(unit)) {
+    return String(Math.trunc(quantity));
+  }
   if (isKgUnit(unit) || isLiterUnit(unit)) {
     return quantity.toFixed(3);
   }

@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Ingredient } from '../types';
+import { allowsFractionalStockUnit, normalizeStockQuantityByUnit } from '../utils/recipe';
 
 interface EditIngredientModalProps {
   isOpen: boolean;
@@ -70,6 +71,7 @@ const EditIngredientModal: React.FC<EditIngredientModalProps> = ({
 
   const isKgSelected = isKgUnit(unit);
   const isSmallUnit = isGramUnit(unit) || isMlUnit(unit);
+  const stockStep = allowsFractionalStockUnit(unit) ? '0.001' : '1';
   const calcPrice = parseDecimalInput(calcBagPrice);
   const calcKg = parseDecimalInput(calcBagKg);
   const isCalcValid = calcPrice !== null && calcPrice >= 0 && calcKg !== null && calcKg > 0;
@@ -126,9 +128,9 @@ const EditIngredientModal: React.FC<EditIngredientModalProps> = ({
     const updated: Ingredient = {
       ...ingredient,
       name: normalizedName,
-      unit,
-      currentStock: ingredient.currentStock,
-      minStock: parsedMinStock,
+      unit: unit.trim(),
+      currentStock: normalizeStockQuantityByUnit(unit, ingredient.currentStock),
+      minStock: normalizeStockQuantityByUnit(unit, parsedMinStock),
       cost: parsedCost,
       addonPrice: parsedAddonPrice,
       imageUrl: imageUrl.trim() ? imageUrl.trim() : undefined,
@@ -243,6 +245,7 @@ const EditIngredientModal: React.FC<EditIngredientModalProps> = ({
               <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Estoque Mínimo</label>
               <input 
                 type="number" 
+                step={stockStep}
                 value={minStock}
                 onChange={e => setMinStock(e.target.value)}
                 placeholder="Ex: 10"

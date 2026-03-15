@@ -1,6 +1,7 @@
 
 import React, { useRef, useState } from 'react';
 import { Ingredient } from '../types';
+import { allowsFractionalStockUnit, normalizeStockQuantityByUnit } from '../utils/recipe';
 
 interface AddIngredientModalProps {
   isOpen: boolean;
@@ -25,6 +26,7 @@ const AddIngredientModal: React.FC<AddIngredientModalProps> = ({ isOpen, onClose
     normalizedUnit.includes('quilo') ||
     normalizedUnit.includes('litro');
   const isSmallUnit = normalizedUnit === 'g' || normalizedUnit === 'ml';
+  const stockStep = allowsFractionalStockUnit(unit) ? '0.001' : '1';
 
   if (!isOpen) return null;
 
@@ -76,9 +78,9 @@ const AddIngredientModal: React.FC<AddIngredientModalProps> = ({ isOpen, onClose
     const newIng: Ingredient = {
       id: 'i-' + Math.random().toString(36).substr(2, 9),
       name: normalizedName,
-      unit,
-      currentStock: 0,
-      minStock: parsedMinStock,
+      unit: unit.trim(),
+      currentStock: normalizeStockQuantityByUnit(unit, 0),
+      minStock: normalizeStockQuantityByUnit(unit, parsedMinStock),
       cost: parsedCost,
       addonPrice: parsedAddonPrice,
       imageUrl: imageUrl.trim() ? imageUrl.trim() : undefined,
@@ -170,6 +172,7 @@ const AddIngredientModal: React.FC<AddIngredientModalProps> = ({ isOpen, onClose
               <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Estoque Mínimo</label>
               <input 
                 type="number" 
+                step={stockStep}
                 value={minStock}
                 onChange={e => setMinStock(e.target.value)}
                 placeholder="Ex: 10"

@@ -41,6 +41,10 @@ import {
 import { buildReceiptPrintRoutePath } from './utils/printRoutes';
 import { clampReceiptPaperWidthMm } from './utils/receiptPaper';
 import {
+  normalizeStockMovementByUnit,
+  normalizeStockQuantityByUnit,
+} from './utils/recipe';
+import {
   removeReceiptPrintPayload,
   saveReceiptPrintPayload,
   setReceiptPrintPayloadOnWindow,
@@ -53,6 +57,7 @@ const ADMIN_SESSION_KEY = 'lanchesdoben_admin_session';
 const ADMIN_SESSION_BACKUP_KEY = 'lanchesdoben_admin_session_backup';
 const OFFLINE_SALE_QUEUE_KEY = 'qb_offline_sale_queue_v1';
 const PENDING_DRAFT_ADDS_KEY = 'qb_pending_draft_adds_v1';
+const PENDING_PAID_SYNC_QUEUE_KEY = 'qb_pending_paid_sync_queue_v1';
 const CASH_HISTORY_LEGACY_MODE_KEY = 'qb_cash_history_legacy_mode_v1';
 const LOCAL_CASH_REGISTER_KEY = 'qb_cash_register_local_v1';
 const LOCAL_DAILY_HISTORY_KEY = 'qb_daily_sales_history_local_v1';
@@ -95,9 +100,18 @@ interface ReceiptPrintPreset {
   paperWidthMm: number | null;
 }
 
+interface RunCommandErrorSink {
+  error?: unknown;
+  message?: string;
+  retryable?: boolean;
+  statusCode?: number;
+}
+
 interface RunCommandOptions {
   skipOfflineQueue?: boolean;
   silentSuccessNotification?: boolean;
+  silentErrorNotification?: boolean;
+  errorSink?: RunCommandErrorSink;
   trackPendingState?: boolean;
 }
 
@@ -111,6 +125,17 @@ interface PaymentCommitSnapshot {
   splitCount: number | null;
   splitCommitted: SalePaymentSplitEntry[];
   effectivePaymentTotal: number;
+}
+
+interface PendingPaidSyncJob {
+  id: string;
+  draftId: string;
+  snapshot: PaymentCommitSnapshot;
+  confirmCommandId: string;
+  createdAt: string;
+  attempts: number;
+  nextAttemptAt?: string;
+  lastError?: string;
 }
 
 interface UndoSaleGroup {
@@ -193,6 +218,26 @@ const applyReceiptPrintPreset = (presetId: string): void => {
 };
 
 const roundMoney = (value: number): number => Number(value.toFixed(2));
+
+const normalizeIngredientStockByUnit = (ingredient: Ingredient): Ingredient => ({
+  ...ingredient,
+  currentStock: normalizeStockQuantityByUnit(ingredient.unit, ingredient.currentStock),
+  minStock: normalizeStockQuantityByUnit(ingredient.unit, ingredient.minStock),
+});
+
+const normalizeCleaningMaterialStockByUnit = (
+  material: CleaningMaterial
+): CleaningMaterial => ({
+  ...material,
+  currentStock: normalizeStockQuantityByUnit(material.unit, material.currentStock),
+  minStock: normalizeStockQuantityByUnit(material.unit, material.minStock),
+});
+
+const normalizeIngredientsStockList = (items: Ingredient[]): Ingredient[] =>
+  items.map((item) => normalizeIngredientStockByUnit(item));
+
+const normalizeCleaningMaterialsStockList = (items: CleaningMaterial[]): CleaningMaterial[] =>
+  items.map((item) => normalizeCleaningMaterialStockByUnit(item));
 
 const calculateCashRegisterExpensesFromStockEntries = (entries: StockEntry[]): number =>
   roundMoney(
@@ -686,6 +731,22 @@ const isRetryableSyncError = (error: unknown): boolean => {
   return false;
 };
 
+const updateRunCommandErrorSink = (
+  sink: RunCommandErrorSink | undefined,
+  payload: {
+    error?: unknown;
+    message?: string;
+    retryable?: boolean;
+    statusCode?: number;
+  }
+): void => {
+  if (!sink) return;
+  sink.error = payload.error;
+  sink.message = payload.message;
+  sink.retryable = payload.retryable;
+  sink.statusCode = payload.statusCode;
+};
+
 const LEGACY_COMMAND_ERROR_HINTS = [
   'payload inválido',
   'payload invalido',
@@ -739,6 +800,42 @@ const normalizeRecipeOverride = (value: unknown): RecipeItem[] | undefined => {
     .filter((item): item is RecipeItem => item !== null);
 
   return normalized.length > 0 ? normalized : undefined;
+};
+
+const validateDraftItemRecipe = (
+  product: Product | null,
+  recipeValue: unknown,
+  availableIngredientIds: Set<string>
+): { ok: true; recipe: RecipeItem[] } | { ok: false; message: string } => {
+  if (!product) {
+    return {
+      ok: false,
+      message: 'Produto não encontrado para o carrinho. Atualize a tela e tente novamente.',
+    };
+  }
+
+  const normalizedRecipe = normalizeRecipeOverride(recipeValue ?? product.recipe);
+  if (!normalizedRecipe || normalizedRecipe.length === 0) {
+    return {
+      ok: false,
+      message: `${product.name} está sem receita válida e não pode ser vendido.`,
+    };
+  }
+
+  const missingIngredientIds = normalizedRecipe
+    .map((entry) => entry.ingredientId)
+    .filter((ingredientId) => !availableIngredientIds.has(ingredientId));
+  if (missingIngredientIds.length > 0) {
+    return {
+      ok: false,
+      message: `${product.name} possui insumo ausente (${missingIngredientIds.join(', ')}).`,
+    };
+  }
+
+  return {
+    ok: true,
+    recipe: normalizedRecipe,
+  };
 };
 
 const normalizeQueuedSale = (value: unknown): OfflineQueuedSale | null => {
@@ -902,6 +999,150 @@ const savePendingDraftAdds = (pendingAdds: PendingDraftAddsByDraftId): void => {
   }
 };
 
+const clonePaymentCommitSnapshot = (snapshot: PaymentCommitSnapshot): PaymentCommitSnapshot => ({
+  draft: {
+    ...snapshot.draft,
+    items: (snapshot.draft.items || []).map((item) => ({
+      ...item,
+      recipe: (item.recipe || []).map((recipeEntry) => ({ ...recipeEntry })),
+    })),
+    payment: snapshot.draft.payment
+      ? {
+          ...snapshot.draft.payment,
+          splitPayments: (snapshot.draft.payment.splitPayments || []).map((entry) => ({ ...entry })),
+        }
+      : {
+          method: null,
+          cashReceived: null,
+          change: null,
+          confirmedAt: null,
+          splitMode: null,
+          splitCount: null,
+          splitPayments: [],
+        },
+  },
+  paymentMethod: snapshot.paymentMethod || 'PIX',
+  saleOrigin: snapshot.saleOrigin || 'LOCAL',
+  appOrderTotalInput: typeof snapshot.appOrderTotalInput === 'string' ? snapshot.appOrderTotalInput : '',
+  cashReceivedInput: typeof snapshot.cashReceivedInput === 'string' ? snapshot.cashReceivedInput : '',
+  splitMode: snapshot.splitMode || null,
+  splitCount:
+    Number.isFinite(Number(snapshot.splitCount)) && Number(snapshot.splitCount) > 0
+      ? Math.floor(Number(snapshot.splitCount))
+      : null,
+  splitCommitted: (snapshot.splitCommitted || []).map((entry) => ({ ...entry })),
+  effectivePaymentTotal: roundMoney(
+    Number.isFinite(Number(snapshot.effectivePaymentTotal))
+      ? Number(snapshot.effectivePaymentTotal)
+      : Number(snapshot.draft.total) || 0
+  ),
+});
+
+const normalizePendingPaidSyncJob = (value: unknown): PendingPaidSyncJob | null => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const source = value as Record<string, unknown>;
+  const snapshotRaw = source.snapshot;
+  if (!snapshotRaw || typeof snapshotRaw !== 'object' || Array.isArray(snapshotRaw)) return null;
+
+  const snapshotRecord = snapshotRaw as Partial<PaymentCommitSnapshot>;
+  const snapshotDraft =
+    snapshotRecord.draft && typeof snapshotRecord.draft === 'object'
+      ? (snapshotRecord.draft as SaleDraft)
+      : null;
+  if (!snapshotDraft) return null;
+
+  const draftIdFromRecord = typeof source.draftId === 'string' ? source.draftId.trim() : '';
+  const draftIdFromSnapshot = typeof snapshotDraft.id === 'string' ? snapshotDraft.id.trim() : '';
+  const draftId = draftIdFromRecord || draftIdFromSnapshot;
+  if (!draftId) return null;
+
+  const id =
+    typeof source.id === 'string' && source.id.trim()
+      ? source.id.trim()
+      : createClientId('paid-sync-job');
+  const confirmCommandId =
+    typeof source.confirmCommandId === 'string' && source.confirmCommandId.trim()
+      ? source.confirmCommandId.trim()
+      : createClientId('cmd');
+  const attemptsRaw = Number(source.attempts);
+  const attempts = Number.isFinite(attemptsRaw) && attemptsRaw >= 0 ? Math.floor(attemptsRaw) : 0;
+  const createdAt =
+    typeof source.createdAt === 'string' && !Number.isNaN(Date.parse(source.createdAt))
+      ? source.createdAt
+      : new Date().toISOString();
+  const nextAttemptAt =
+    typeof source.nextAttemptAt === 'string' && !Number.isNaN(Date.parse(source.nextAttemptAt))
+      ? source.nextAttemptAt
+      : undefined;
+  const lastError = typeof source.lastError === 'string' ? source.lastError : undefined;
+
+  const snapshot: PaymentCommitSnapshot = clonePaymentCommitSnapshot({
+    draft: {
+      ...snapshotDraft,
+      id: draftId,
+    },
+    paymentMethod: (snapshotRecord.paymentMethod || 'PIX') as SalePaymentMethod,
+    saleOrigin: (snapshotRecord.saleOrigin || 'LOCAL') as SaleOrigin,
+    appOrderTotalInput:
+      typeof snapshotRecord.appOrderTotalInput === 'string' ? snapshotRecord.appOrderTotalInput : '',
+    cashReceivedInput:
+      typeof snapshotRecord.cashReceivedInput === 'string' ? snapshotRecord.cashReceivedInput : '',
+    splitMode: (snapshotRecord.splitMode || null) as SalePaymentSplitMode | null,
+    splitCount:
+      Number.isFinite(Number(snapshotRecord.splitCount)) && Number(snapshotRecord.splitCount) > 0
+        ? Math.floor(Number(snapshotRecord.splitCount))
+        : null,
+    splitCommitted: Array.isArray(snapshotRecord.splitCommitted)
+      ? snapshotRecord.splitCommitted.map((entry) => ({ ...(entry as SalePaymentSplitEntry) }))
+      : [],
+    effectivePaymentTotal: roundMoney(
+      Number.isFinite(Number(snapshotRecord.effectivePaymentTotal))
+        ? Number(snapshotRecord.effectivePaymentTotal)
+        : Number(snapshotDraft.total) || 0
+    ),
+  });
+
+  return {
+    id,
+    draftId,
+    snapshot,
+    confirmCommandId,
+    createdAt,
+    attempts,
+    nextAttemptAt,
+    lastError,
+  };
+};
+
+const loadPendingPaidSyncQueue = (): PendingPaidSyncJob[] => {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = window.localStorage.getItem(PENDING_PAID_SYNC_QUEUE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((entry) => normalizePendingPaidSyncJob(entry))
+      .filter((entry): entry is PendingPaidSyncJob => entry !== null);
+  } catch {
+    return [];
+  }
+};
+
+const savePendingPaidSyncQueue = (queue: PendingPaidSyncJob[]): void => {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(PENDING_PAID_SYNC_QUEUE_KEY, JSON.stringify(queue));
+  } catch {
+    // ignore storage write failures
+  }
+};
+
+const getPendingPaidSyncRetryDelayMs = (attempts: number): number => {
+  const safeAttempts = Math.max(1, Math.floor(attempts));
+  return Math.min(120000, 2000 * 2 ** Math.max(0, safeAttempts - 1));
+};
+
 const App: React.FC = () => {
   const [view, setView] = useState<ViewMode>(ViewMode.POS);
   const [isAdminAuthenticated, setIsAdminAuthenticated] = useState(false);
@@ -911,13 +1152,18 @@ const App: React.FC = () => {
   const [isStateHydrating, setIsStateHydrating] = useState(true);
   const [pendingStateOps, setPendingStateOps] = useState(0);
   const [pendingOfflineSales, setPendingOfflineSales] = useState(0);
+  const [pendingPaidSyncJobs, setPendingPaidSyncJobs] = useState(0);
   const commandQueueRef = useRef<Promise<void>>(Promise.resolve());
   const offlineSalesQueueRef = useRef<OfflineQueuedSale[]>([]);
+  const pendingPaidSyncQueueRef = useRef<PendingPaidSyncJob[]>([]);
   const pendingDraftAddsRef = useRef<PendingDraftAddsByDraftId>({});
   const syncingPaidDraftIdsRef = useRef<Set<string>>(new Set());
   const isPendingDraftAddsHydratedRef = useRef(false);
+  const isPendingPaidSyncQueueHydratedRef = useRef(false);
+  const isPendingPaidSyncQueueRunningRef = useRef(false);
   const isFlushingOfflineSalesRef = useRef(false);
   const isOfflineQueueHydratedRef = useRef(false);
+  const pendingPaidSyncRetryTimerRef = useRef<number | null>(null);
   const activeDraftIdRef = useRef<string | null>(null);
   const saleDraftsRef = useRef<SaleDraft[]>(DEFAULT_APP_STATE.saleDrafts);
   const pendingDraftCreationRef = useRef<Promise<string | null> | null>(null);
@@ -1126,11 +1372,11 @@ const App: React.FC = () => {
     loadAppState(DEFAULT_APP_STATE)
       .then((state) => {
         if (cancelled) return;
-        setIngredients(state.ingredients);
+        setIngredients(normalizeIngredientsStockList(state.ingredients));
         setProducts(state.products);
         setSales(state.sales);
         setStockEntries(state.stockEntries);
-        setCleaningMaterials(state.cleaningMaterials);
+        setCleaningMaterials(normalizeCleaningMaterialsStockList(state.cleaningMaterials));
         setCleaningStockEntries(state.cleaningStockEntries);
         setGlobalSales(state.globalSales);
         setGlobalCancelledSales(state.globalCancelledSales);
@@ -1206,6 +1452,9 @@ const App: React.FC = () => {
       if (cornerSyncTimeoutRef.current !== null) {
         window.clearTimeout(cornerSyncTimeoutRef.current);
       }
+      if (pendingPaidSyncRetryTimerRef.current !== null) {
+        window.clearTimeout(pendingPaidSyncRetryTimerRef.current);
+      }
     };
   }, []);
 
@@ -1239,6 +1488,35 @@ const App: React.FC = () => {
     if (!isAccessVerified) return;
     hydratePendingDraftAdds();
   }, [hydratePendingDraftAdds, isAccessVerified]);
+
+  const replacePendingPaidSyncQueue = useCallback(
+    (nextQueue: PendingPaidSyncJob[]) => {
+      const normalizedQueue = nextQueue
+        .map((entry) => normalizePendingPaidSyncJob(entry))
+        .filter((entry): entry is PendingPaidSyncJob => entry !== null);
+      pendingPaidSyncQueueRef.current = normalizedQueue;
+      setPendingPaidSyncJobs(normalizedQueue.length);
+      savePendingPaidSyncQueue(normalizedQueue);
+      isPendingPaidSyncQueueHydratedRef.current = true;
+    },
+    []
+  );
+
+  const hydratePendingPaidSyncQueue = useCallback(() => {
+    if (isPendingPaidSyncQueueHydratedRef.current) return;
+    const loadedQueue = loadPendingPaidSyncQueue();
+    pendingPaidSyncQueueRef.current = loadedQueue;
+    setPendingPaidSyncJobs(loadedQueue.length);
+    loadedQueue.forEach((job) => {
+      setDraftSyncInProgress(job.draftId, true);
+    });
+    isPendingPaidSyncQueueHydratedRef.current = true;
+  }, [setDraftSyncInProgress]);
+
+  useEffect(() => {
+    if (!isAccessVerified) return;
+    hydratePendingPaidSyncQueue();
+  }, [hydratePendingPaidSyncQueue, isAccessVerified]);
 
   const replaceOfflineSalesQueue = useCallback((nextQueue: OfflineQueuedSale[]) => {
     offlineSalesQueueRef.current = nextQueue;
@@ -1284,11 +1562,11 @@ const App: React.FC = () => {
   }, [hydrateOfflineSalesQueue]);
 
   const applyStateSnapshot = useCallback((state: AppState) => {
-    setIngredients(state.ingredients);
+    setIngredients(normalizeIngredientsStockList(state.ingredients));
     setProducts(state.products);
     setSales(state.sales);
     setStockEntries(state.stockEntries);
-    setCleaningMaterials(state.cleaningMaterials);
+    setCleaningMaterials(normalizeCleaningMaterialsStockList(state.cleaningMaterials));
     setCleaningStockEntries(state.cleaningStockEntries);
     setGlobalSales(state.globalSales);
     setGlobalCancelledSales(state.globalCancelledSales);
@@ -1352,6 +1630,12 @@ const App: React.FC = () => {
       });
 
       if (result.ok) {
+        updateRunCommandErrorSink(options.errorSink, {
+          error: undefined,
+          message: undefined,
+          retryable: undefined,
+          statusCode: undefined,
+        });
         if (successMessage && !options.silentSuccessNotification) {
           showNotification(successMessage);
         }
@@ -1359,20 +1643,33 @@ const App: React.FC = () => {
       }
 
       const message = getStateSyncErrorMessage(result.error);
+      const retryable = isRetryableSyncError(result.error);
+      const statusCode =
+        result.error instanceof StateCommandSyncError ? result.error.statusCode : undefined;
+      updateRunCommandErrorSink(options.errorSink, {
+        error: result.error,
+        message,
+        retryable,
+        statusCode,
+      });
       const shouldQueueOfflineSale =
         !options.skipOfflineQueue &&
         isSaleRegisterCommand(normalizedCommand) &&
-        isRetryableSyncError(result.error);
+        retryable;
 
       if (shouldQueueOfflineSale) {
         queueOfflineSale(normalizedCommand, message);
-        showNotification(
-          `Sem internet. Venda guardada no navegador (${offlineSalesQueueRef.current.length} pendente(s)).`
-        );
+        if (!options.silentErrorNotification) {
+          showNotification(
+            `Sem internet. Venda guardada no navegador (${offlineSalesQueueRef.current.length} pendente(s)).`
+          );
+        }
         return true;
       }
 
-      showNotification(message);
+      if (!options.silentErrorNotification) {
+        showNotification(message);
+      }
       return false;
     },
     [executeSyncedCommand, queueOfflineSale]
@@ -1475,7 +1772,8 @@ const App: React.FC = () => {
     if (!isPendingDraftAddsHydratedRef.current) return;
     const staleDraftIds = Object.keys(pendingDraftAddsRef.current).filter((draftId) => {
       const serverDraft = saleDrafts.find((entry) => entry.id === draftId);
-      if (!serverDraft) return syncingPaidDraftIdsRef.current.has(draftId);
+      // Keep local-only pending carts until they are explicitly flushed/removed.
+      if (!serverDraft) return false;
       return serverDraft.status !== 'DRAFT' && serverDraft.status !== 'PENDING_PAYMENT';
     });
     if (staleDraftIds.length === 0) return;
@@ -1763,8 +2061,19 @@ const App: React.FC = () => {
       product: Product,
       recipeOverride?: RecipeItem[],
       priceOverride?: number
-    ) => {
-      const normalizedRecipe = normalizeRecipeOverride(recipeOverride ?? product.recipe);
+    ): boolean => {
+      const ingredientIdSet = new Set(ingredients.map((ingredient) => ingredient.id));
+      const recipeValidation = validateDraftItemRecipe(
+        product,
+        recipeOverride ?? product.recipe,
+        ingredientIdSet
+      );
+      if (!recipeValidation.ok) {
+        showNotification(recipeValidation.message);
+        return false;
+      }
+
+      const normalizedRecipe = recipeValidation.recipe;
       const normalizedPriceOverrideRaw = Number(priceOverride);
       const normalizedPriceOverride =
         Number.isFinite(normalizedPriceOverrideRaw) && normalizedPriceOverrideRaw >= 0
@@ -1805,8 +2114,10 @@ const App: React.FC = () => {
           },
         ];
       });
+
+      return true;
     },
-    [updatePendingDraftAddsForDraft]
+    [ingredients, showNotification, updatePendingDraftAddsForDraft]
   );
 
   const updatePendingDraftAddByItemId = useCallback(
@@ -1855,7 +2166,8 @@ const App: React.FC = () => {
         setActiveDraftId(draftId);
       }
 
-      queuePendingDraftAdd(draftId, product, recipeOverride, priceOverride);
+      const queued = queuePendingDraftAdd(draftId, product, recipeOverride, priceOverride);
+      if (!queued) return;
 
       showNotification(`${product.name} adicionado ao carrinho!`);
       triggerCartEntryEffect(product.name);
@@ -2266,7 +2578,8 @@ const App: React.FC = () => {
   const flushPendingDraftAdds = useCallback(
     async (
       draftId: string,
-      customerType: SaleCustomerType = 'BALCAO'
+      customerType: SaleCustomerType = 'BALCAO',
+      options: { silentErrorNotification?: boolean; errorSink?: RunCommandErrorSink } = {}
     ): Promise<boolean> => {
       hydratePendingDraftAdds();
 
@@ -2281,6 +2594,8 @@ const App: React.FC = () => {
           undefined,
           {
             silentSuccessNotification: true,
+            silentErrorNotification: options.silentErrorNotification,
+            errorSink: options.errorSink,
             trackPendingState: false,
           }
         );
@@ -2294,18 +2609,39 @@ const App: React.FC = () => {
         }
 
         const current = currentPendingAdds[0];
+        const product = products.find((entry) => entry.id === current.productId) || null;
+        const ingredientIdSet = new Set(ingredients.map((ingredient) => ingredient.id));
+        const recipeValidation = validateDraftItemRecipe(
+          product,
+          current.recipeOverride ?? product?.recipe,
+          ingredientIdSet
+        );
+        if (!recipeValidation.ok) {
+          updateRunCommandErrorSink(options.errorSink, {
+            message: recipeValidation.message,
+            retryable: false,
+            statusCode: 422,
+          });
+          if (!options.silentErrorNotification) {
+            showNotification(recipeValidation.message);
+          }
+          return false;
+        }
+
         const syncCommand: SaleDraftAddItemCommand = {
           type: 'SALE_DRAFT_ADD_ITEM',
           draftId,
           productId: current.productId,
           quantity: Math.max(1, Math.round(current.quantity)),
-          recipeOverride: current.recipeOverride,
+          recipeOverride: recipeValidation.recipe,
           priceOverride: current.priceOverride,
           note: current.note,
           commandId: current.commandId,
         };
         const ok = await runCommandWithSync(syncCommand, undefined, {
           silentSuccessNotification: true,
+          silentErrorNotification: options.silentErrorNotification,
+          errorSink: options.errorSink,
           trackPendingState: false,
         });
         if (!ok) return false;
@@ -2320,13 +2656,37 @@ const App: React.FC = () => {
         replacePendingDraftAdds(nextPendingByDraft);
       }
     },
-    [hydratePendingDraftAdds, replacePendingDraftAdds, runCommandWithSync]
+    [
+      hydratePendingDraftAdds,
+      ingredients,
+      products,
+      replacePendingDraftAdds,
+      runCommandWithSync,
+      showNotification,
+    ]
   );
 
   const handleSavePaymentMethod = async (
     snapshot: PaymentCommitSnapshot | null,
-    options: { trackPendingState?: boolean; silentSavedNotification?: boolean } = {}
+    options: {
+      trackPendingState?: boolean;
+      silentSavedNotification?: boolean;
+      silentErrorNotification?: boolean;
+      errorSink?: RunCommandErrorSink;
+    } = {}
   ): Promise<boolean> => {
+    const notifyError = (message: string) => {
+      updateRunCommandErrorSink(options.errorSink, {
+        error: undefined,
+        message,
+        retryable: false,
+        statusCode: 422,
+      });
+      if (!options.silentErrorNotification) {
+        showNotification(message);
+      }
+    };
+
     const fallbackSnapshot: PaymentCommitSnapshot | null = activeDraft
       ? {
           draft: activeDraft,
@@ -2356,7 +2716,7 @@ const App: React.FC = () => {
     } = activeSnapshot;
 
     if (draft.items.length === 0) {
-      showNotification('Carrinho vazio. Não é possível finalizar.');
+      notifyError('Carrinho vazio. Não é possível finalizar.');
       return false;
     }
 
@@ -2367,7 +2727,7 @@ const App: React.FC = () => {
       isAppSaleOrigin(snapshotSaleOrigin) &&
       (appOrderTotalParsed === null || appOrderTotalParsed <= 0)
     ) {
-      showNotification('Informe o valor real da venda no app (iFood/99).');
+      notifyError('Informe o valor real da venda no app (iFood/99).');
       return false;
     }
 
@@ -2377,30 +2737,30 @@ const App: React.FC = () => {
       snapshotPaymentMethod === 'DINHEIRO' &&
       (cashReceivedParsed === null || cashReceivedParsed < 0)
     ) {
-      showNotification('Informe um valor recebido válido em dinheiro.');
+      notifyError('Informe um valor recebido válido em dinheiro.');
       return false;
     }
 
     let finalizeCommand: StateCommand;
     if (snapshotPaymentMethod === 'DIVIDIDO') {
       if (!snapshotSplitMode || !snapshotSplitCount) {
-        showNotification('Finalize o dividido na janela de parcelas antes de confirmar.');
+        notifyError('Finalize o dividido na janela de parcelas antes de confirmar.');
         return false;
       }
 
       if (snapshotSplitMode === 'PEOPLE' && snapshotSplitCommitted.length !== snapshotSplitCount) {
-        showNotification('Finalize toda a divisão antes de confirmar.');
+        notifyError('Finalize toda a divisão antes de confirmar.');
         return false;
       }
 
       if (snapshotSplitMode === 'MIXED' && snapshotSplitCommitted.length < 2) {
-        showNotification('No dividido, informe ao menos duas parcelas (ex: PIX + dinheiro).');
+        notifyError('No dividido, informe ao menos duas parcelas (ex: PIX + dinheiro).');
         return false;
       }
 
       const totalDividido = sumSplitAmounts(snapshotSplitCommitted);
       if (Math.abs(totalDividido - snapshotEffectivePaymentTotal) > 0.009) {
-        showNotification(
+        notifyError(
           `A divisão ainda está incompleta. Restante: R$ ${formatMoney(
             Math.abs(snapshotEffectivePaymentTotal - totalDividido)
           )}`
@@ -2449,6 +2809,8 @@ const App: React.FC = () => {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const ok = await runCommandWithSync(finalizeCommand, undefined, {
         silentSuccessNotification: true,
+        silentErrorNotification: options.silentErrorNotification,
+        errorSink: options.errorSink,
         trackPendingState: options.trackPendingState,
       });
       if (!ok) return false;
@@ -2479,11 +2841,215 @@ const App: React.FC = () => {
       }
     }
 
-    showNotification(
+    notifyError(
       'O servidor não confirmou o valor do app. Atualize o backend/sessão antes de confirmar o pagamento.'
     );
     return false;
   };
+
+  const enqueuePendingPaidSyncJob = useCallback(
+    (jobInput: PendingPaidSyncJob) => {
+      hydratePendingPaidSyncQueue();
+      const normalizedJob = normalizePendingPaidSyncJob(jobInput);
+      if (!normalizedJob) return;
+
+      const existingIndex = pendingPaidSyncQueueRef.current.findIndex(
+        (entry) => entry.draftId === normalizedJob.draftId
+      );
+
+      if (existingIndex >= 0) {
+        const nextQueue = [...pendingPaidSyncQueueRef.current];
+        const existing = nextQueue[existingIndex];
+        nextQueue[existingIndex] = {
+          ...normalizedJob,
+          id: existing.id,
+          createdAt: existing.createdAt,
+          attempts: 0,
+          nextAttemptAt: undefined,
+          lastError: undefined,
+        };
+        replacePendingPaidSyncQueue(nextQueue);
+        setDraftSyncInProgress(normalizedJob.draftId, true);
+        return;
+      }
+
+      replacePendingPaidSyncQueue([...pendingPaidSyncQueueRef.current, normalizedJob]);
+      setDraftSyncInProgress(normalizedJob.draftId, true);
+    },
+    [hydratePendingPaidSyncQueue, replacePendingPaidSyncQueue, setDraftSyncInProgress]
+  );
+
+  const processPendingPaidSyncQueue = useCallback(async (): Promise<void> => {
+    hydratePendingPaidSyncQueue();
+    if (isStateHydrating) return;
+    if (isPendingPaidSyncQueueRunningRef.current) return;
+    if (pendingPaidSyncQueueRef.current.length === 0) return;
+
+    if (pendingPaidSyncRetryTimerRef.current !== null) {
+      window.clearTimeout(pendingPaidSyncRetryTimerRef.current);
+      pendingPaidSyncRetryTimerRef.current = null;
+    }
+
+    isPendingPaidSyncQueueRunningRef.current = true;
+
+    try {
+      while (pendingPaidSyncQueueRef.current.length > 0) {
+        const currentJob = pendingPaidSyncQueueRef.current[0];
+        if (!currentJob) return;
+
+        const nextAttemptAtMs = currentJob.nextAttemptAt
+          ? Date.parse(currentJob.nextAttemptAt)
+          : Number.NaN;
+        if (Number.isFinite(nextAttemptAtMs) && nextAttemptAtMs > Date.now()) {
+          const delayMs = Math.max(250, nextAttemptAtMs - Date.now());
+          pendingPaidSyncRetryTimerRef.current = window.setTimeout(() => {
+            void processPendingPaidSyncQueue();
+          }, delayMs);
+          return;
+        }
+
+        const currentServerDraft = saleDraftsRef.current.find(
+          (draft) => draft.id === currentJob.draftId
+        );
+        if (
+          currentServerDraft &&
+          (currentServerDraft.status === 'PAID' || currentServerDraft.status === 'CANCELLED')
+        ) {
+          replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
+          setDraftSyncInProgress(currentJob.draftId, false);
+          continue;
+        }
+
+        setDraftSyncInProgress(currentJob.draftId, true);
+        showCornerSync('syncing', 'Sincronizando venda no banco...');
+
+        const markJobAsFailed = (
+          fallbackMessage: string,
+          errorSink?: RunCommandErrorSink
+        ) => {
+          const message = errorSink?.message || fallbackMessage;
+          const retryable = errorSink?.retryable ?? true;
+          const statusCode = errorSink?.statusCode;
+
+          if (!retryable) {
+            replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
+            setDraftSyncInProgress(currentJob.draftId, false);
+            showCornerSync('error', 'Falha no pedido. Próximos seguem na fila.', 2600);
+            showNotification(`Erro ao enviar pedido: ${message}`);
+            return;
+          }
+
+          const nextAttempts = currentJob.attempts + 1;
+          const retryDelayMs = getPendingPaidSyncRetryDelayMs(nextAttempts);
+          const retryAt = new Date(Date.now() + retryDelayMs).toISOString();
+          const failedJob: PendingPaidSyncJob = {
+            ...currentJob,
+            attempts: nextAttempts,
+            nextAttemptAt: retryAt,
+            lastError: statusCode ? `${message} (HTTP ${statusCode})` : message,
+          };
+          replacePendingPaidSyncQueue([failedJob, ...pendingPaidSyncQueueRef.current.slice(1)]);
+          showCornerSync('error', 'Banco lento. Pedido segue na fila.', 1800);
+          pendingPaidSyncRetryTimerRef.current = window.setTimeout(() => {
+            void processPendingPaidSyncQueue();
+          }, retryDelayMs);
+        };
+
+        const draftAddsErrorSink: RunCommandErrorSink = {};
+        const flushed = await flushPendingDraftAdds(
+          currentJob.draftId,
+          (currentJob.snapshot.draft.customerType || 'BALCAO') as SaleCustomerType,
+          {
+            silentErrorNotification: true,
+            errorSink: draftAddsErrorSink,
+          }
+        );
+        if (!flushed) {
+          markJobAsFailed('Falha ao enviar itens pendentes.', draftAddsErrorSink);
+          return;
+        }
+
+        const finalizeErrorSink: RunCommandErrorSink = {};
+        const finalized = await handleSavePaymentMethod(currentJob.snapshot, {
+          trackPendingState: false,
+          silentSavedNotification: true,
+          silentErrorNotification: true,
+          errorSink: finalizeErrorSink,
+        });
+        if (!finalized) {
+          markJobAsFailed('Falha ao salvar forma de pagamento.', finalizeErrorSink);
+          return;
+        }
+
+        const confirmErrorSink: RunCommandErrorSink = {};
+        const confirmed = await runCommandWithSync(
+          {
+            type: 'SALE_DRAFT_CONFIRM_PAID',
+            draftId: currentJob.draftId,
+            commandId: currentJob.confirmCommandId,
+          },
+          undefined,
+          {
+            trackPendingState: false,
+            silentSuccessNotification: true,
+            silentErrorNotification: true,
+            errorSink: confirmErrorSink,
+          }
+        );
+        if (!confirmed) {
+          markJobAsFailed('Falha ao confirmar pagamento.', confirmErrorSink);
+          return;
+        }
+
+        replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
+        setDraftSyncInProgress(currentJob.draftId, false);
+        showCornerSync('success', 'Banco OK', 1400);
+      }
+    } finally {
+      isPendingPaidSyncQueueRunningRef.current = false;
+    }
+  }, [
+    flushPendingDraftAdds,
+    handleSavePaymentMethod,
+    hydratePendingPaidSyncQueue,
+    isStateHydrating,
+    replacePendingPaidSyncQueue,
+    runCommandWithSync,
+    setDraftSyncInProgress,
+    showCornerSync,
+    showNotification,
+  ]);
+
+  useEffect(() => {
+    if (!isAccessVerified || isStateHydrating) return;
+    if (pendingPaidSyncJobs === 0) return;
+    void processPendingPaidSyncQueue();
+  }, [
+    isAccessVerified,
+    isStateHydrating,
+    pendingPaidSyncJobs,
+    processPendingPaidSyncQueue,
+  ]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const handleOnline = () => {
+      if (pendingPaidSyncQueueRef.current.length === 0) return;
+      void processPendingPaidSyncQueue();
+    };
+
+    window.addEventListener('online', handleOnline);
+    const intervalId = window.setInterval(() => {
+      if (pendingPaidSyncQueueRef.current.length === 0) return;
+      void processPendingPaidSyncQueue();
+    }, 10000);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.clearInterval(intervalId);
+    };
+  }, [processPendingPaidSyncQueue]);
 
   const openReceiptPrintWindow = useCallback(
     (receiptId: string): boolean => {
@@ -2550,6 +3116,7 @@ const App: React.FC = () => {
   const handleConfirmPaid = () => {
     if (!activeDraft) return;
     if (isConfirmingPaid) return;
+
     const draftId = activeDraft.id;
     const paymentSnapshot: PaymentCommitSnapshot = {
       draft: activeDraft,
@@ -2562,6 +3129,58 @@ const App: React.FC = () => {
       splitCommitted: splitCommitted.map((entry) => ({ ...entry })),
       effectivePaymentTotal,
     };
+
+    if (paymentSnapshot.draft.items.length === 0) {
+      showNotification('Carrinho vazio. Não é possível finalizar.');
+      return;
+    }
+
+    if (isAppSaleOrigin(paymentSnapshot.saleOrigin)) {
+      const appOrderTotalParsed = parseMoneyInput(paymentSnapshot.appOrderTotalInput);
+      if (appOrderTotalParsed === null || appOrderTotalParsed <= 0) {
+        showNotification('Informe o valor real da venda no app (iFood/99).');
+        return;
+      }
+    }
+
+    if (paymentSnapshot.paymentMethod === 'DINHEIRO') {
+      const cashReceivedParsed = parseMoneyInput(paymentSnapshot.cashReceivedInput);
+      if (cashReceivedParsed === null || cashReceivedParsed < 0) {
+        showNotification('Informe um valor recebido válido em dinheiro.');
+        return;
+      }
+    }
+
+    if (paymentSnapshot.paymentMethod === 'DIVIDIDO') {
+      if (!paymentSnapshot.splitMode || !paymentSnapshot.splitCount) {
+        showNotification('Finalize o dividido na janela de parcelas antes de confirmar.');
+        return;
+      }
+      if (
+        paymentSnapshot.splitMode === 'PEOPLE' &&
+        paymentSnapshot.splitCommitted.length !== paymentSnapshot.splitCount
+      ) {
+        showNotification('Finalize toda a divisão antes de confirmar.');
+        return;
+      }
+      if (
+        paymentSnapshot.splitMode === 'MIXED' &&
+        paymentSnapshot.splitCommitted.length < 2
+      ) {
+        showNotification('No dividido, informe ao menos duas parcelas (ex: PIX + dinheiro).');
+        return;
+      }
+      const totalDividido = sumSplitAmounts(paymentSnapshot.splitCommitted);
+      if (Math.abs(totalDividido - paymentSnapshot.effectivePaymentTotal) > 0.009) {
+        showNotification(
+          `A divisão ainda está incompleta. Restante: R$ ${formatMoney(
+            Math.abs(paymentSnapshot.effectivePaymentTotal - totalDividido)
+          )}`
+        );
+        return;
+      }
+    }
+
     const receiptPayloadInput = buildReceiptPrintPayloadFromSnapshot(paymentSnapshot, products);
     const receiptPayload: ReceiptPrintPayload | null = receiptPayloadInput
       ? saveReceiptPrintPayload(receiptPayloadInput)
@@ -2582,71 +3201,32 @@ const App: React.FC = () => {
         'Não foi possível abrir o cupom agora. Use o Histórico para segunda via.'
       );
     }
+
+    const queuedJob: PendingPaidSyncJob = {
+      id: createClientId('paid-sync-job'),
+      draftId,
+      snapshot: clonePaymentCommitSnapshot(paymentSnapshot),
+      confirmCommandId: createClientId('cmd'),
+      createdAt: new Date().toISOString(),
+      attempts: 0,
+    };
+
     setDraftSyncInProgress(draftId, true);
     setIsSaleOriginSetupOpen(false);
+    setIsSplitSetupOpen(false);
     setIsPaymentOpen(false);
     setIsCartOpen(false);
     setIsConfirmingPaid(true);
+
+    enqueuePendingPaidSyncJob(queuedJob);
     showCornerSync(
       'syncing',
       pendingItemsCount > 0
-        ? `Enviando ${pendingItemsCount} item(ns) para o banco...`
-        : 'Confirmando pagamento no banco...'
+        ? `Pedido em fila. Enviando ${pendingItemsCount} item(ns)...`
+        : 'Pedido em fila. Confirmando no banco...'
     );
-    void (async () => {
-      const flushed = await flushPendingDraftAdds(
-        draftId,
-        (paymentSnapshot.draft.customerType || 'BALCAO') as SaleCustomerType
-      );
-      if (!flushed) {
-        closePreparedReceiptWindow(preparedPrintWindow);
-        if (receiptPayload) {
-          removeReceiptPrintPayload(receiptPayload.id);
-        }
-        showCornerSync('error', 'Falha ao enviar itens para o banco.', 4800);
-        return;
-      }
-
-      showCornerSync('syncing', 'Confirmando pagamento no banco...');
-
-      const finalized = await handleSavePaymentMethod(paymentSnapshot, {
-        trackPendingState: false,
-        silentSavedNotification: true,
-      });
-      if (!finalized) {
-        closePreparedReceiptWindow(preparedPrintWindow);
-        if (receiptPayload) {
-          removeReceiptPrintPayload(receiptPayload.id);
-        }
-        showCornerSync('error', 'Falha ao atualizar forma de pagamento.', 4800);
-        return;
-      }
-
-      const ok = await runCommandWithSync(
-        {
-          type: 'SALE_DRAFT_CONFIRM_PAID',
-          draftId,
-        },
-        'Pagamento confirmado. Estoque debitado.',
-        { trackPendingState: false }
-      );
-      if (!ok) {
-        closePreparedReceiptWindow(preparedPrintWindow);
-        if (receiptPayload) {
-          removeReceiptPrintPayload(receiptPayload.id);
-        }
-        showCornerSync('error', 'Falha ao concluir a venda no banco.', 4800);
-        return;
-      }
-
-      setIsSaleOriginSetupOpen(false);
-      setIsPaymentOpen(false);
-      setIsCartOpen(false);
-      showCornerSync('success', 'Banco OK', 2200);
-    })().finally(() => {
-      setIsConfirmingPaid(false);
-      setDraftSyncInProgress(draftId, false);
-    });
+    void processPendingPaidSyncQueue();
+    setIsConfirmingPaid(false);
   };
 
   const handleUndoLastSale = () => {
@@ -2752,23 +3332,30 @@ const App: React.FC = () => {
   };
 
   const handleUpdateStock = useCallback((id: string, amount: number, options: StockUpdateOptions = {}) => {
-    const useCashRegister = amount > 0 && options.useCashRegister === true;
+    const ingredient = ingredients.find((entry) => entry.id === id);
+    const normalizedAmount = ingredient
+      ? normalizeStockMovementByUnit(ingredient.unit, amount)
+      : amount;
+    if (!Number.isFinite(normalizedAmount) || normalizedAmount === 0) {
+      return;
+    }
+    const useCashRegister = normalizedAmount > 0 && options.useCashRegister === true;
     const purchaseDescription = useCashRegister ? options.purchaseDescription?.trim() : undefined;
     void runCommandWithSync(
       {
         type: 'INGREDIENT_STOCK_MOVE',
         ingredientId: id,
-        amount,
+        amount: normalizedAmount,
         useCashRegister,
         purchaseDescription,
       },
-      amount > 0
+      normalizedAmount > 0
         ? useCashRegister
           ? 'Estoque atualizado e compra abatida do caixa!'
           : 'Estoque Atualizado!'
         : 'Gasto de Insumo Registrado!'
     );
-  }, [runCommandWithSync]);
+  }, [ingredients, runCommandWithSync]);
 
   const handleRegisterCashPurchase = useCallback(
     async (
@@ -2794,7 +3381,8 @@ const App: React.FC = () => {
       }
 
       const stockAmount = Number((normalizedPurchaseAmount / ingredient.cost).toFixed(6));
-      if (!Number.isFinite(stockAmount) || stockAmount <= 0) {
+      const normalizedStockAmount = normalizeStockMovementByUnit(ingredient.unit, stockAmount);
+      if (!Number.isFinite(normalizedStockAmount) || normalizedStockAmount <= 0) {
         showNotification('Não foi possível calcular a quantidade de estoque para essa compra.');
         return false;
       }
@@ -2803,7 +3391,7 @@ const App: React.FC = () => {
         {
           type: 'INGREDIENT_STOCK_MOVE',
           ingredientId,
-          amount: stockAmount,
+          amount: normalizedStockAmount,
           useCashRegister: true,
           purchaseDescription: purchaseDescription?.trim() || undefined,
         },
@@ -2896,7 +3484,11 @@ const App: React.FC = () => {
   };
 
   const handleAddIngredient = (ingredient: Ingredient) => {
-    void runCommandWithSync({ type: 'INGREDIENT_CREATE', ingredient }, 'Ingrediente Adicionado!');
+    const normalizedIngredient = normalizeIngredientStockByUnit(ingredient);
+    void runCommandWithSync(
+      { type: 'INGREDIENT_CREATE', ingredient: normalizedIngredient },
+      'Ingrediente Adicionado!'
+    );
   };
 
   const handleEditIngredient = (ingredient: Ingredient) => {
@@ -2904,19 +3496,25 @@ const App: React.FC = () => {
   };
 
   const handleSaveIngredient = (updated: Ingredient) => {
-    void runCommandWithSync({ type: 'INGREDIENT_UPDATE', ingredient: updated }, 'Ingrediente Atualizado!');
+    const normalizedIngredient = normalizeIngredientStockByUnit(updated);
+    void runCommandWithSync(
+      { type: 'INGREDIENT_UPDATE', ingredient: normalizedIngredient },
+      'Ingrediente Atualizado!'
+    );
   };
 
   const handleAddCleaningMaterial = (material: CleaningMaterial) => {
+    const normalizedMaterial = normalizeCleaningMaterialStockByUnit(material);
     void runCommandWithSync(
-      { type: 'CLEANING_MATERIAL_CREATE', material },
+      { type: 'CLEANING_MATERIAL_CREATE', material: normalizedMaterial },
       'Material de limpeza adicionado!'
     );
   };
 
   const handleUpdateCleaningMaterial = (updated: CleaningMaterial) => {
+    const normalizedMaterial = normalizeCleaningMaterialStockByUnit(updated);
     void runCommandWithSync(
-      { type: 'CLEANING_MATERIAL_UPDATE', material: updated },
+      { type: 'CLEANING_MATERIAL_UPDATE', material: normalizedMaterial },
       'Material de limpeza atualizado!'
     );
   };
@@ -2929,15 +3527,22 @@ const App: React.FC = () => {
   };
 
   const handleUpdateCleaningStock = useCallback((id: string, amount: number) => {
+    const material = cleaningMaterials.find((entry) => entry.id === id);
+    const normalizedAmount = material
+      ? normalizeStockMovementByUnit(material.unit, amount)
+      : amount;
+    if (!Number.isFinite(normalizedAmount) || normalizedAmount === 0) {
+      return;
+    }
     void runCommandWithSync(
       {
         type: 'CLEANING_STOCK_MOVE',
         materialId: id,
-        amount,
+        amount: normalizedAmount,
       },
-      amount > 0 ? 'Estoque de material atualizado!' : 'Baixa de material registrada!'
+      normalizedAmount > 0 ? 'Estoque de material atualizado!' : 'Baixa de material registrada!'
     );
-  }, [runCommandWithSync]);
+  }, [cleaningMaterials, runCommandWithSync]);
 
   const buildCurrentCloseDayReport = useCallback((): DailySalesHistoryEntry => {
     const totalRevenue = roundMoney(
@@ -3124,6 +3729,7 @@ const App: React.FC = () => {
   };
 
   const dailyTotal = useMemo(() => sales.reduce((acc, sale) => acc + sale.total, 0), [sales]);
+  const isDailyTotalSyncing = pendingPaidSyncJobs > 0 || syncingPaidDraftIds.length > 0;
   const todaySaleDayKey = new Date().toLocaleDateString('pt-BR');
   const recentSalesForUndo = useMemo(
     () =>
@@ -3368,7 +3974,12 @@ const App: React.FC = () => {
 
   return (
     <div className="qb-app min-h-screen bg-slate-50 flex flex-col">
-      <Header currentView={view} setView={setView} dailyTotal={dailyTotal} />
+      <Header
+        currentView={view}
+        setView={setView}
+        dailyTotal={dailyTotal}
+        isDailyTotalSyncing={isDailyTotalSyncing}
+      />
       <SyncStatusOverlay
         visible={isSyncIndicatorVisible}
         message={syncIndicatorMessage}
