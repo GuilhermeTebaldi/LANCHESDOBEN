@@ -1881,15 +1881,17 @@ const App: React.FC = () => {
   }, [pendingDraftAddsByDraft, products, saleDrafts]);
 
   const openSaleDrafts = useMemo(
-    () =>
-      saleDraftsWithPendingAdds.filter(
-        (draft) => {
-          if (syncingPaidDraftIds.includes(draft.id)) return false;
-          if (draft.status !== 'DRAFT' && draft.status !== 'PENDING_PAYMENT') return false;
-          const pendingLocalItemsCount = (pendingDraftAddsByDraft[draft.id] || []).length;
-          return draft.items.length > 0 || pendingLocalItemsCount > 0;
-        }
-      ),
+    () => {
+      const syncingDraftIds = syncingPaidDraftIdsRef.current;
+      return saleDraftsWithPendingAdds.filter((draft) => {
+        const isSyncingNow =
+          syncingDraftIds.has(draft.id) || syncingPaidDraftIds.includes(draft.id);
+        if (isSyncingNow) return false;
+        if (draft.status !== 'DRAFT' && draft.status !== 'PENDING_PAYMENT') return false;
+        const pendingLocalItemsCount = (pendingDraftAddsByDraft[draft.id] || []).length;
+        return draft.items.length > 0 || pendingLocalItemsCount > 0;
+      });
+    },
     [pendingDraftAddsByDraft, saleDraftsWithPendingAdds, syncingPaidDraftIds]
   );
   useEffect(() => {
