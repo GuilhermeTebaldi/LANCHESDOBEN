@@ -50,8 +50,11 @@ const CleaningMaterialsManager: React.FC<CleaningMaterialsManagerProps> = ({
   const [stockValues, setStockValues] = useState<Record<string, string>>({});
   const [isMaterialFormOpen, setIsMaterialFormOpen] = useState(false);
   const [deleteMenuId, setDeleteMenuId] = useState<string | null>(null);
+  const [isPhotoOptionsOpen, setIsPhotoOptionsOpen] = useState(false);
+  const [photoSourceMode, setPhotoSourceMode] = useState<'GALLERY' | 'LINK'>('LINK');
 
   const timerRef = useRef<number | null>(null);
+  const galleryInputRef = useRef<HTMLInputElement | null>(null);
 
   const sortedEntries = useMemo(
     () => entries.slice().sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime()),
@@ -69,6 +72,11 @@ const CleaningMaterialsManager: React.FC<CleaningMaterialsManagerProps> = ({
   const resetForm = () => {
     setForm(INITIAL_FORM);
     setEditingMaterialId(null);
+    setIsPhotoOptionsOpen(false);
+    setPhotoSourceMode('LINK');
+    if (galleryInputRef.current) {
+      galleryInputRef.current.value = '';
+    }
   };
 
   const closeMaterialForm = () => {
@@ -79,6 +87,21 @@ const CleaningMaterialsManager: React.FC<CleaningMaterialsManagerProps> = ({
   const openCreateMaterialForm = () => {
     resetForm();
     setIsMaterialFormOpen(true);
+  };
+
+  const isLocalGalleryImage = form.imageUrl.trim().startsWith('data:image/');
+
+  const handleGalleryFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const selectedFile = e.target.files?.[0];
+    if (!selectedFile) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        handleFormChange('imageUrl', reader.result);
+      }
+    };
+    reader.readAsDataURL(selectedFile);
+    e.target.value = '';
   };
 
   const handleSubmitMaterial = (e: React.FormEvent) => {
@@ -136,6 +159,8 @@ const CleaningMaterialsManager: React.FC<CleaningMaterialsManagerProps> = ({
       cost: String(material.cost),
       imageUrl: material.imageUrl ?? '',
     });
+    setIsPhotoOptionsOpen(Boolean(material.imageUrl));
+    setPhotoSourceMode(material.imageUrl?.trim().startsWith('data:image/') ? 'GALLERY' : 'LINK');
     setActiveTab('estoque');
     setIsMaterialFormOpen(true);
   };
@@ -457,7 +482,7 @@ const CleaningMaterialsManager: React.FC<CleaningMaterialsManagerProps> = ({
                   {editingMaterialId ? 'Editar Material' : 'Cadastrar Material'}
                 </h3>
                 <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mt-1">
-                  Inclui URL da foto do produto
+                  Inclui foto por link ou galeria
                 </p>
               </div>
               <button
@@ -541,15 +566,75 @@ const CleaningMaterialsManager: React.FC<CleaningMaterialsManagerProps> = ({
                 </div>
               </div>
 
-              <div>
-                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">URL da Foto</label>
+              <div className="space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Foto (opcional)</label>
+                  <button
+                    type="button"
+                    onClick={() => setIsPhotoOptionsOpen((current) => !current)}
+                    className="qb-btn-touch bg-slate-100 text-slate-700 px-3 py-2 rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-slate-200 transition-colors"
+                  >
+                    Foto
+                  </button>
+                </div>
+
                 <input
-                  type="text"
-                  value={form.imageUrl}
-                  onChange={(e) => handleFormChange('imageUrl', e.target.value)}
-                  placeholder="https://imagem-do-produto.jpg"
-                  className="mt-1 w-full bg-slate-100 border-none rounded-2xl px-4 py-3 font-bold text-slate-800 focus:ring-2 focus:ring-red-500"
+                  ref={galleryInputRef}
+                  type="file"
+                  accept="image/*"
+                  onChange={handleGalleryFileChange}
+                  className="hidden"
                 />
+
+                {isPhotoOptionsOpen && (
+                  <>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setPhotoSourceMode('GALLERY');
+                          galleryInputRef.current?.click();
+                        }}
+                        className={`qb-btn-touch px-3 py-2 rounded-xl font-black text-[10px] uppercase tracking-widest border transition-colors ${
+                          photoSourceMode === 'GALLERY'
+                            ? 'bg-red-600 text-white border-red-600'
+                            : 'bg-white text-slate-700 border-slate-200 hover:border-red-300'
+                        }`}
+                      >
+                        Galeria
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setPhotoSourceMode('LINK')}
+                        className={`qb-btn-touch px-3 py-2 rounded-xl font-black text-[10px] uppercase tracking-widest border transition-colors ${
+                          photoSourceMode === 'LINK'
+                            ? 'bg-red-600 text-white border-red-600'
+                            : 'bg-white text-slate-700 border-slate-200 hover:border-red-300'
+                        }`}
+                      >
+                        Link
+                      </button>
+                    </div>
+
+                    {photoSourceMode === 'GALLERY' ? (
+                      <button
+                        type="button"
+                        onClick={() => galleryInputRef.current?.click()}
+                        className="qb-btn-touch w-full bg-slate-100 text-slate-700 px-4 py-3 rounded-2xl font-black text-[10px] uppercase tracking-widest hover:bg-slate-200 transition-colors text-left"
+                      >
+                        {isLocalGalleryImage ? 'Trocar imagem da galeria' : 'Selecionar imagem da galeria'}
+                      </button>
+                    ) : (
+                      <input
+                        type="text"
+                        value={form.imageUrl}
+                        onChange={(e) => handleFormChange('imageUrl', e.target.value)}
+                        placeholder="https://res.cloudinary.com/.../image/upload/..."
+                        className="w-full bg-slate-100 border-none rounded-2xl px-4 py-3 font-bold text-slate-800 focus:ring-2 focus:ring-red-500"
+                      />
+                    )}
+                  </>
+                )}
               </div>
 
               <div className="qb-cleaning-form-actions flex gap-3 pt-2">
