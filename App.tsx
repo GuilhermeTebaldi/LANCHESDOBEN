@@ -65,6 +65,9 @@ const RECEIPT_PAPER_WIDTH_KEY = 'qb_receipt_paper_width_mm';
 const RECEIPT_PRINT_PRESET_STORAGE_KEY = 'qb_receipt_print_preset_v1';
 const RESTAURANT_NAME_STORAGE_KEY = 'qb_restaurant_name';
 const DEFAULT_RECEIPT_RESTAURANT_NAME = 'LANCHESDOBEN';
+const AUTO_UPDATE_SCROLL_STATE_KEY = 'qb_auto_update_scroll_state_v1';
+const AUTO_UPDATE_CHECK_INTERVAL_MS = 45_000;
+const AUTO_UPDATE_FORCE_RELOAD_AFTER_MS = 10 * 60 * 1000;
 
 type SaleRegisterCommand = Extract<StateCommand, { type: 'SALE_REGISTER' }>;
 type SaleDraftAddItemCommand = Extract<StateCommand, { type: 'SALE_DRAFT_ADD_ITEM' }>;
@@ -218,6 +221,43 @@ const applyReceiptPrintPreset = (presetId: string): void => {
 };
 
 const roundMoney = (value: number): number => Number(value.toFixed(2));
+
+const buildUpdateCheckIndexUrl = (): string => {
+  const baseUrl = (import.meta.env.BASE_URL || '/').replace(/\/+$/, '');
+  const prefix = baseUrl || '';
+  return `${prefix}/index.html?__update_check=${Date.now()}`;
+};
+
+const normalizeEntrypointPath = (value: string): string | null => {
+  if (typeof window === 'undefined') return null;
+  try {
+    const url = new URL(value, window.location.origin);
+    return url.pathname;
+  } catch {
+    return null;
+  }
+};
+
+const readCurrentEntrypointPath = (): string | null => {
+  if (typeof document === 'undefined') return null;
+  const scriptNodes = Array.from(document.querySelectorAll('script[type="module"][src]'));
+  for (let index = scriptNodes.length - 1; index >= 0; index -= 1) {
+    const rawSrc = scriptNodes[index].getAttribute('src');
+    if (!rawSrc) continue;
+    if (rawSrc.includes('/@vite/')) continue;
+    const normalized = normalizeEntrypointPath(rawSrc);
+    if (normalized) return normalized;
+  }
+  return null;
+};
+
+const readEntrypointPathFromHtml = (html: string): string | null => {
+  const moduleScriptMatch = html.match(
+    /<script[^>]*type=["']module["'][^>]*src=["']([^"']+)["'][^>]*>/i
+  );
+  if (!moduleScriptMatch || !moduleScriptMatch[1]) return null;
+  return normalizeEntrypointPath(moduleScriptMatch[1]);
+};
 
 const normalizeIngredientStockByUnit = (ingredient: Ingredient): Ingredient => ({
   ...ingredient,
@@ -1165,6 +1205,7 @@ const App: React.FC = () => {
   const [pendingStateOps, setPendingStateOps] = useState(0);
   const [pendingOfflineSales, setPendingOfflineSales] = useState(0);
   const [pendingPaidSyncJobs, setPendingPaidSyncJobs] = useState(0);
+  const [hasPendingVersionUpdate, setHasPendingVersionUpdate] = useState(false);
   const commandQueueRef = useRef<Promise<void>>(Promise.resolve());
   const offlineSalesQueueRef = useRef<OfflineQueuedSale[]>([]);
   const pendingPaidSyncQueueRef = useRef<PendingPaidSyncJob[]>([]);
@@ -1175,6 +1216,8 @@ const App: React.FC = () => {
   const isPendingPaidSyncQueueRunningRef = useRef(false);
   const isFlushingOfflineSalesRef = useRef(false);
   const isOfflineQueueHydratedRef = useRef(false);
+  const pendingVersionDetectedAtRef = useRef<number | null>(null);
+  const isAutoReloadingRef = useRef(false);
   const pendingPaidSyncRetryTimerRef = useRef<number | null>(null);
   const activeDraftIdRef = useRef<string | null>(null);
   const saleDraftsRef = useRef<SaleDraft[]>(DEFAULT_APP_STATE.saleDrafts);
@@ -1260,6 +1303,137 @@ const App: React.FC = () => {
     () => getReceiptPrintPresetById(receiptPrintPresetId),
     [receiptPrintPresetId]
   );
+  const canAutoReloadNow = useMemo(
+    () =>
+      isAccessVerified &&
+      !isStateHydrating &&
+      pendingStateOps === 0 &&
+      pendingOfflineSales === 0 &&
+      pendingPaidSyncJobs === 0 &&
+      syncingPaidDraftIds.length === 0 &&
+      !isConfirmingPaid &&
+      !isUndoProcessing &&
+      !isPaymentOpen &&
+      !isSplitSetupOpen &&
+      !isCartOpen &&
+      !isCancellingDraft,
+    [
+      isAccessVerified,
+      isCartOpen,
+      isCancellingDraft,
+      isConfirmingPaid,
+      isPaymentOpen,
+      isSplitSetupOpen,
+      isStateHydrating,
+      isUndoProcessing,
+      pendingOfflineSales,
+      pendingPaidSyncJobs,
+      pendingStateOps,
+      syncingPaidDraftIds,
+    ]
+  );
+
+  const performSilentAutoReload = useCallback(() => {
+    if (typeof window === 'undefined') return;
+    if (isAutoReloadingRef.current) return;
+    isAutoReloadingRef.current = true;
+    try {
+      window.sessionStorage.setItem(
+        AUTO_UPDATE_SCROLL_STATE_KEY,
+        JSON.stringify({
+          x: window.scrollX,
+          y: window.scrollY,
+          at: Date.now(),
+        })
+      );
+    } catch {
+      // ignore storage write failures
+    }
+    window.location.reload();
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      const raw = window.sessionStorage.getItem(AUTO_UPDATE_SCROLL_STATE_KEY);
+      if (!raw) return;
+      window.sessionStorage.removeItem(AUTO_UPDATE_SCROLL_STATE_KEY);
+      const parsed = JSON.parse(raw) as { x?: unknown; y?: unknown; at?: unknown };
+      const x = Number(parsed.x);
+      const y = Number(parsed.y);
+      const at = Number(parsed.at);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+      if (Number.isFinite(at) && Date.now() - at > 30_000) return;
+      window.requestAnimationFrame(() => {
+        window.scrollTo(x, y);
+      });
+    } catch {
+      // ignore restore failures
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!isAccessVerified) return;
+    if (import.meta.env.DEV) return;
+    if (hasPendingVersionUpdate) return;
+
+    let cancelled = false;
+
+    const checkForPublishedUpdate = async () => {
+      if (cancelled || isAutoReloadingRef.current) return;
+      const currentEntrypoint = readCurrentEntrypointPath();
+      if (!currentEntrypoint) return;
+
+      try {
+        const response = await fetch(buildUpdateCheckIndexUrl(), {
+          cache: 'no-store',
+          headers: { 'Cache-Control': 'no-cache' },
+        });
+        if (!response.ok) return;
+        const html = await response.text();
+        const latestEntrypoint = readEntrypointPathFromHtml(html);
+        if (!latestEntrypoint || latestEntrypoint === currentEntrypoint) return;
+        pendingVersionDetectedAtRef.current = Date.now();
+        setHasPendingVersionUpdate(true);
+      } catch {
+        // ignore temporary network/proxy failures
+      }
+    };
+
+    void checkForPublishedUpdate();
+    const intervalId = window.setInterval(() => {
+      void checkForPublishedUpdate();
+    }, AUTO_UPDATE_CHECK_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [hasPendingVersionUpdate, isAccessVerified]);
+
+  useEffect(() => {
+    if (!hasPendingVersionUpdate) return;
+
+    const tryReloadIfSafe = () => {
+      if (!canAutoReloadNow || isAutoReloadingRef.current) return;
+      const detectedAt = pendingVersionDetectedAtRef.current;
+      const forceReload =
+        typeof detectedAt === 'number' &&
+        Date.now() - detectedAt >= AUTO_UPDATE_FORCE_RELOAD_AFTER_MS;
+      if (document.visibilityState === 'hidden' || forceReload) {
+        performSilentAutoReload();
+      }
+    };
+
+    tryReloadIfSafe();
+    const intervalId = window.setInterval(tryReloadIfSafe, 10_000);
+    document.addEventListener('visibilitychange', tryReloadIfSafe);
+
+    return () => {
+      window.clearInterval(intervalId);
+      document.removeEventListener('visibilitychange', tryReloadIfSafe);
+    };
+  }, [canAutoReloadNow, hasPendingVersionUpdate, performSilentAutoReload]);
 
   useEffect(() => {
     isCashHistoryLegacyModeRef.current = isCashHistoryLegacyMode;
