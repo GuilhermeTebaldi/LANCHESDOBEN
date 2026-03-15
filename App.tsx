@@ -1138,9 +1138,21 @@ const savePendingPaidSyncQueue = (queue: PendingPaidSyncJob[]): void => {
   }
 };
 
+const PENDING_PAID_SYNC_RETRY_BASE_MS = 5000;
+const PENDING_PAID_SYNC_RETRY_MAX_MS = 15 * 60 * 1000;
+const PENDING_PAID_SYNC_RETRY_JITTER = 0.2;
+
 const getPendingPaidSyncRetryDelayMs = (attempts: number): number => {
   const safeAttempts = Math.max(1, Math.floor(attempts));
-  return Math.min(120000, 2000 * 2 ** Math.max(0, safeAttempts - 1));
+  const exponentialDelay =
+    PENDING_PAID_SYNC_RETRY_BASE_MS * 2 ** Math.max(0, safeAttempts - 1);
+  const cappedDelay = Math.min(PENDING_PAID_SYNC_RETRY_MAX_MS, exponentialDelay);
+  const jitterFactor =
+    1 + (Math.random() * 2 - 1) * PENDING_PAID_SYNC_RETRY_JITTER;
+  return Math.max(
+    PENDING_PAID_SYNC_RETRY_BASE_MS,
+    Math.round(cappedDelay * jitterFactor)
+  );
 };
 
 const App: React.FC = () => {

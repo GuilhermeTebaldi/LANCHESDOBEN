@@ -167,7 +167,13 @@ const getStateApiUrl = (): string => {
 const getStateCommandsApiUrl = (): string => `${getStateApiUrl()}/commands`;
 
 const isRetryableHttpStatus = (statusCode: number): boolean =>
-  statusCode === 408 || statusCode === 425 || statusCode === 429 || statusCode >= 500;
+  statusCode === 408 ||
+  statusCode === 409 ||
+  statusCode === 412 ||
+  statusCode === 425 ||
+  statusCode === 428 ||
+  statusCode === 429 ||
+  statusCode >= 500;
 
 const asRetryableNetworkError = (error: unknown): StateCommandSyncError => {
   if (error instanceof StateCommandSyncError) return error;
@@ -474,7 +480,9 @@ export const runStateCommand = async (command: StateCommand): Promise<AppState> 
 
     const context = writeContext;
     if (!context) {
-      throw new StateCommandSyncError('Contexto de escrita indisponível.');
+      throw new StateCommandSyncError('Contexto de escrita indisponível.', {
+        retryable: true,
+      });
     }
 
     const response = await fetchWithTimeout(getStateCommandsApiUrl(), {
@@ -502,5 +510,7 @@ export const runStateCommand = async (command: StateCommand): Promise<AppState> 
     throw await toApiError(response);
   }
 
-  throw new StateCommandSyncError('Não foi possível sincronizar o comando de estado.');
+  throw new StateCommandSyncError('Não foi possível sincronizar o comando de estado.', {
+    retryable: true,
+  });
 };
