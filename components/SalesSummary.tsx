@@ -168,6 +168,23 @@ const getSaleOriginLabel = (origin: SaleOrigin | null | undefined): string => {
 const isAppSaleOrigin = (origin: SaleOrigin | null | undefined): boolean =>
   origin === 'IFOOD' || origin === 'APP99' || origin === 'KEETA';
 
+const buildOrderGroupKey = (sale: Sale, fallbackIndex: number): string => {
+  const draftId = typeof sale.saleDraftId === 'string' ? sale.saleDraftId.trim() : '';
+  if (draftId) return `draft:${draftId}`;
+  const saleId = typeof sale.id === 'string' ? sale.id.trim() : '';
+  if (saleId) return `sale:${saleId}`;
+  return `fallback:${fallbackIndex}`;
+};
+
+const countOrders = (sales: Sale[]): number => {
+  const keys = new Set<string>();
+  sales.forEach((sale, index) => {
+    if (!sale) return;
+    keys.add(buildOrderGroupKey(sale, index));
+  });
+  return keys.size;
+};
+
 const formatCurrency = (value: number): string => `R$ ${value.toFixed(2)}`;
 
 const parseMoneyInput = (raw: string): number | null => {
@@ -529,6 +546,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
     () => cashRegisterAmount + totalRevenue - totalCost - cashRegisterExpenses,
     [cashRegisterAmount, totalRevenue, totalCost, cashRegisterExpenses]
   );
+  const totalOrderCount = useMemo(() => countOrders(sales), [sales]);
 
   const currentDayReport = useMemo<DailySalesHistoryEntry>(
     () => ({
@@ -538,10 +556,10 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
       totalRevenue,
       totalPurchases: totalCost,
       totalProfit,
-      saleCount: sales.length,
+      saleCount: totalOrderCount,
       cashExpenses: cashRegisterExpenses,
     }),
-    [cashRegisterAmount, cashRegisterExpenses, totalCost, totalProfit, totalRevenue, sales.length]
+    [cashRegisterAmount, cashRegisterExpenses, totalCost, totalOrderCount, totalProfit, totalRevenue]
   );
 
   const archiveSalesByDay = useMemo(() => {
@@ -680,7 +698,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
           totalRevenue,
           totalPurchases,
           totalProfit: roundMoney(totalRevenue - totalPurchases),
-          saleCount: unassignedDaySales.length,
+          saleCount: countOrders(unassignedDaySales),
           cashExpenses: 0,
         },
       });
@@ -740,6 +758,10 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
       const orderedSales = [...reportSales].sort(
         (a, b) => toDate(a.timestamp).getTime() - toDate(b.timestamp).getTime()
       );
+      const reportOrderCount =
+        orderedSales.length > 0
+          ? countOrders(orderedSales)
+          : Math.max(0, Math.floor(Number(report.saleCount) || 0));
       const paymentSummarySales = isSummaryMode
         ? orderedSales.filter((sale) => !isAppSaleOrigin(sale.saleOrigin))
         : orderedSales;
@@ -790,7 +812,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
         reportLines.push(align('Saida de caixa:', formatThermalCurrency(cashExpenses)));
         reportLines.push(align('Resultado operacional:', formatThermalCurrency(report.totalProfit)));
         reportLines.push(align('Caixa estimado:', formatThermalCurrency(estimatedCash)));
-        reportLines.push(align('Total de vendas:', String(report.saleCount)));
+        reportLines.push(align('Total de pedidos:', String(reportOrderCount)));
         reportLines.push(thermalSeparator);
         reportLines.push(center('VALORES INFORMADOS'));
         reportLines.push(thermalSeparator);
@@ -826,7 +848,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
         reportLines.push(align('Faturamento:', formatThermalCurrency(report.totalRevenue)));
         reportLines.push(align('Compras (Insumos):', formatThermalCurrency(report.totalPurchases)));
         reportLines.push(align('Lucro:', formatThermalCurrency(report.totalProfit)));
-        reportLines.push(align('Pedidos:', String(report.saleCount)));
+        reportLines.push(align('Pedidos:', String(reportOrderCount)));
         reportLines.push(align('Saida de Caixa:', formatThermalCurrency(cashExpenses)));
         reportLines.push(align('Caixa Estimado:', formatThermalCurrency(estimatedCash)));
         reportLines.push(thermalSeparator);
@@ -1588,7 +1610,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
             </div>
             <div className="qb-sales-stat-card bg-white p-6 rounded-3xl border-2 border-slate-100 shadow-sm">
               <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400 mb-1">Pedidos</p>
-              <h4 className="text-3xl font-black text-slate-800">{sales.length}</h4>
+              <h4 className="text-3xl font-black text-slate-800">{totalOrderCount}</h4>
             </div>
           </div>
           {appOriginRows.length > 0 && (

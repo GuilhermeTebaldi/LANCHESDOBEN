@@ -424,6 +424,23 @@ const formatSaleDateTime = (timestamp: Date | string): string => {
   return saleDate.toLocaleString('pt-BR');
 };
 
+const buildSaleOrderGroupKey = (sale: Sale, fallbackIndex: number): string => {
+  const draftId = typeof sale.saleDraftId === 'string' ? sale.saleDraftId.trim() : '';
+  if (draftId) return `draft:${draftId}`;
+  const saleId = typeof sale.id === 'string' ? sale.id.trim() : '';
+  if (saleId) return `sale:${saleId}`;
+  return `fallback:${fallbackIndex}`;
+};
+
+const countSaleOrders = (sales: Sale[]): number => {
+  const orderKeys = new Set<string>();
+  sales.forEach((sale, index) => {
+    if (!sale) return;
+    orderKeys.add(buildSaleOrderGroupKey(sale, index));
+  });
+  return orderKeys.size;
+};
+
 const getSaleDayKey = (timestamp: Date | string): string | null => {
   const saleDate = toSaleDate(timestamp);
   if (!saleDate) return null;
@@ -2633,6 +2650,7 @@ const App: React.FC = () => {
   };
 
   const handleUndoLastSale = () => {
+    if (isUndoProcessing) return;
     if (sales.length === 0) {
       showNotification('Nenhuma venda para desfazer!');
       return;
@@ -2647,9 +2665,31 @@ const App: React.FC = () => {
         ? `Desfazer o último pedido do carrinho (${salesFromSameDraft.length} itens) e devolver insumos ao estoque?`
         : `Desfazer a última venda (${lastSale.productName}) e devolver insumos ao estoque?`;
 
-    if (confirm(confirmLabel)) {
-      void runCommandWithSync({ type: 'SALE_UNDO_LAST' }, 'Venda Estornada!');
-    }
+    if (!confirm(confirmLabel)) return;
+
+    setIsUndoProcessing(true);
+    showCornerSync(
+      'syncing',
+      salesFromSameDraft.length > 1
+        ? `Desfazendo ${salesFromSameDraft.length} item(ns) no banco...`
+        : 'Desfazendo última venda no banco...'
+    );
+
+    void (async () => {
+      const ok = await runCommandWithSync(
+        { type: 'SALE_UNDO_LAST' },
+        undefined,
+        { silentSuccessNotification: true, trackPendingState: false }
+      );
+      if (!ok) {
+        showCornerSync('error', 'Falha ao desfazer no banco.', 4800);
+        return;
+      }
+      showNotification('Venda Estornada!');
+      showCornerSync('success', 'Estorno concluído', 2200);
+    })().finally(() => {
+      setIsUndoProcessing(false);
+    });
   };
 
   const handleOpenUndoHistory = () => {
@@ -2922,7 +2962,7 @@ const App: React.FC = () => {
       totalRevenue,
       totalPurchases,
       totalProfit: roundMoney(totalRevenue - totalPurchases),
-      saleCount: sales.length,
+      saleCount: countSaleOrders(sales),
       cashExpenses,
     };
   }, [cashRegisterAmount, sales, stockEntries]);
@@ -3424,16 +3464,16 @@ const App: React.FC = () => {
                 </div>
                 <button 
                   onClick={handleUndoLastSale}
-                  disabled={sales.length === 0}
+                  disabled={sales.length === 0 || isUndoProcessing}
                   className="qb-btn-touch bg-slate-900 text-yellow-400 px-5 py-3 rounded-2xl font-black text-[10px] uppercase tracking-tighter shadow-xl hover:bg-black active:scale-95 transition-all disabled:opacity-30 disabled:grayscale disabled:scale-100 whitespace-nowrap flex items-center gap-2 group"
-                  title="Desfazer o último pedido"
+                  title={isUndoProcessing ? 'Desfazendo no banco...' : 'Desfazer o último pedido'}
                 >
                   <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" className="group-hover:-rotate-45 transition-transform"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
-                  Desfazer Última
+                  {isUndoProcessing ? 'Desfazendo...' : 'Desfazer Última'}
                 </button>
                 <button
                   onClick={handleOpenUndoHistory}
-                  disabled={recentUndoGroups.length === 0}
+                  disabled={recentUndoGroups.length === 0 || isUndoProcessing}
                   className="qb-btn-touch bg-white text-slate-800 px-4 py-3 rounded-2xl font-black text-[10px] uppercase tracking-tighter shadow-sm border border-slate-200 hover:border-red-400 hover:text-red-600 active:scale-95 transition-all disabled:opacity-30 disabled:grayscale disabled:scale-100 whitespace-nowrap flex items-center gap-2"
                   title="Selecionar venda no histórico para desfazer"
                 >
