@@ -204,6 +204,30 @@ const toDate = (value: Date | string): Date => {
 const getDayKey = (value: Date | string): string => toDate(value).toLocaleDateString('pt-BR');
 
 const roundMoney = (value: number): number => Number(value.toFixed(2));
+const LEGACY_COST_RATIO_MAX = 3.5;
+const LEGACY_COST_RATIO_TARGET = 0.45;
+const LEGACY_COST_DIVISORS = [1, 10, 100, 1000] as const;
+
+const normalizeLegacyHistoryCost = (rawCost: number, rawRevenue: number): number => {
+  if (!Number.isFinite(rawCost) || rawCost <= 0) return 0;
+  const cost = roundMoney(rawCost);
+  if (!Number.isFinite(rawRevenue) || rawRevenue <= 0) return cost;
+
+  const revenue = roundMoney(rawRevenue);
+  const ratio = cost / revenue;
+  if (ratio <= LEGACY_COST_RATIO_MAX) return cost;
+
+  const viableCandidates = LEGACY_COST_DIVISORS
+    .map((divisor) => roundMoney(cost / divisor))
+    .filter((candidate) => candidate >= 0 && candidate / revenue <= LEGACY_COST_RATIO_MAX);
+  if (viableCandidates.length === 0) return cost;
+
+  return viableCandidates.reduce((best, candidate) => {
+    const bestDelta = Math.abs(best / revenue - LEGACY_COST_RATIO_TARGET);
+    const candidateDelta = Math.abs(candidate / revenue - LEGACY_COST_RATIO_TARGET);
+    return candidateDelta < bestDelta ? candidate : best;
+  }, viableCandidates[0]);
+};
 const LOCAL_DAILY_HISTORY_KEY = 'qb_daily_sales_history_local_v1';
 
 const normalizeDailyHistoryEntry = (value: unknown): DailySalesHistoryEntry | null => {
@@ -229,7 +253,8 @@ const normalizeDailyHistoryEntry = (value: unknown): DailySalesHistoryEntry | nu
       ? rawTotalPurchases
       : fallbackTotalPurchases
   );
-  const totalProfit = roundMoney(totalRevenue - totalPurchases);
+  const normalizedPurchases = normalizeLegacyHistoryCost(totalPurchases, totalRevenue);
+  const totalProfit = roundMoney(totalRevenue - normalizedPurchases);
 
   return {
     id:
@@ -239,7 +264,7 @@ const normalizeDailyHistoryEntry = (value: unknown): DailySalesHistoryEntry | nu
     closedAt,
     openingCash: roundMoney(Math.max(0, Number(source.openingCash) || 0)),
     totalRevenue,
-    totalPurchases,
+    totalPurchases: normalizedPurchases,
     totalProfit,
     saleCount,
     cashExpenses: roundMoney(Math.max(0, Number(source.cashExpenses) || 0)),

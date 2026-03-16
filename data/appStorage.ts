@@ -169,11 +169,35 @@ const normalizeStockEntryList = (items: StockEntry[]): StockEntry[] =>
   items.map(normalizeStockEntryMetadata);
 
 const roundMoney = (value: number): number => Number(value.toFixed(2));
+const LEGACY_COST_RATIO_MAX = 3.5;
+const LEGACY_COST_RATIO_TARGET = 0.45;
+const LEGACY_COST_DIVISORS = [1, 10, 100, 1000] as const;
 
 const toNonNegativeNumber = (value: unknown, fallback = 0): number => {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) return fallback;
   return parsed;
+};
+
+const normalizeLegacyHistoryCost = (rawCost: number, rawRevenue: number): number => {
+  if (!Number.isFinite(rawCost) || rawCost <= 0) return 0;
+  const cost = roundMoney(rawCost);
+  if (!Number.isFinite(rawRevenue) || rawRevenue <= 0) return cost;
+
+  const revenue = roundMoney(rawRevenue);
+  const ratio = cost / revenue;
+  if (ratio <= LEGACY_COST_RATIO_MAX) return cost;
+
+  const viableCandidates = LEGACY_COST_DIVISORS
+    .map((divisor) => roundMoney(cost / divisor))
+    .filter((candidate) => candidate >= 0 && candidate / revenue <= LEGACY_COST_RATIO_MAX);
+  if (viableCandidates.length === 0) return cost;
+
+  return viableCandidates.reduce((best, candidate) => {
+    const bestDelta = Math.abs(best / revenue - LEGACY_COST_RATIO_TARGET);
+    const candidateDelta = Math.abs(candidate / revenue - LEGACY_COST_RATIO_TARGET);
+    return candidateDelta < bestDelta ? candidate : best;
+  }, viableCandidates[0]);
 };
 
 const normalizeDailyHistoryEntry = (item: DailySalesHistoryEntry): DailySalesHistoryEntry => {
@@ -189,14 +213,15 @@ const normalizeDailyHistoryEntry = (item: DailySalesHistoryEntry): DailySalesHis
       ? rawTotalPurchases
       : fallbackTotalPurchases
   );
+  const normalizedPurchases = normalizeLegacyHistoryCost(totalPurchases, totalRevenue);
 
   return {
     ...item,
     closedAt: item.closedAt && !(item.closedAt instanceof Date) ? new Date(item.closedAt as string) : item.closedAt,
     openingCash: roundMoney(toNonNegativeNumber(item.openingCash)),
     totalRevenue,
-    totalPurchases,
-    totalProfit: roundMoney(totalRevenue - totalPurchases),
+    totalPurchases: normalizedPurchases,
+    totalProfit: roundMoney(totalRevenue - normalizedPurchases),
     saleCount: Number.isFinite(Number(item.saleCount)) ? Math.max(0, Math.floor(Number(item.saleCount))) : 0,
     cashExpenses: roundMoney(toNonNegativeNumber(item.cashExpenses ?? 0)),
   };

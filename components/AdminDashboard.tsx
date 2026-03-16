@@ -115,6 +115,30 @@ const toDate = (value: Date | string): Date => {
 };
 
 const roundMoney = (value: number): number => Number(value.toFixed(2));
+const LEGACY_COST_RATIO_MAX = 3.5;
+const LEGACY_COST_RATIO_TARGET = 0.45;
+const LEGACY_COST_DIVISORS = [1, 10, 100, 1000] as const;
+
+const normalizeLegacySaleCost = (rawCost: number, rawRevenue: number): number => {
+  if (!Number.isFinite(rawCost) || rawCost <= 0) return 0;
+  const cost = roundMoney(rawCost);
+  if (!Number.isFinite(rawRevenue) || rawRevenue <= 0) return cost;
+
+  const revenue = roundMoney(rawRevenue);
+  const ratio = cost / revenue;
+  if (ratio <= LEGACY_COST_RATIO_MAX) return cost;
+
+  const viableCandidates = LEGACY_COST_DIVISORS
+    .map((divisor) => roundMoney(cost / divisor))
+    .filter((candidate) => candidate >= 0 && candidate / revenue <= LEGACY_COST_RATIO_MAX);
+  if (viableCandidates.length === 0) return cost;
+
+  return viableCandidates.reduce((best, candidate) => {
+    const bestDelta = Math.abs(best / revenue - LEGACY_COST_RATIO_TARGET);
+    const candidateDelta = Math.abs(candidate / revenue - LEGACY_COST_RATIO_TARGET);
+    return candidateDelta < bestDelta ? candidate : best;
+  }, viableCandidates[0]);
+};
 
 const CHANNEL_ORDER: SaleOrigin[] = ['LOCAL', 'IFOOD', 'APP99', 'KEETA'];
 
@@ -233,8 +257,9 @@ const buildConsolidatedArchiveFinance = (entries: Sale[]): ConsolidatedArchiveFi
     }
 
     const cost = Number(sale.totalCost);
+    const saleRevenueReference = Math.max(0, Number(sale.total) || 0);
     if (Number.isFinite(cost)) {
-      current.cost = roundMoney(current.cost + cost);
+      current.cost = roundMoney(current.cost + normalizeLegacySaleCost(cost, saleRevenueReference));
     }
 
     const appRevenue = Number(sale.appOrderTotal);
@@ -426,7 +451,10 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
       const dayKey = toDayKey(date);
       const day = ensureDay(dayKey, new Date(date.getFullYear(), date.getMonth(), date.getDate()));
       day.revenue = roundMoney(day.revenue + (Number(sale.total) || 0));
-      day.salesCost = roundMoney(day.salesCost + (Number(sale.totalCost) || 0));
+      day.salesCost = roundMoney(
+        day.salesCost +
+          normalizeLegacySaleCost(Number(sale.totalCost) || 0, Math.max(0, Number(sale.total) || 0))
+      );
     });
 
     return [...dailyMap.values()]
