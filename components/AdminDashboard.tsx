@@ -426,16 +426,31 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const stockOutCost = stockOutCostBreakdown.total;
   const cleaningStockOutCost = cleaningStockCostBreakdown.total;
   const operationalExtraCost = roundMoney(stockOutCost + cleaningStockOutCost);
+  const comboProductIds = useMemo(() => {
+    const ids = new Set<string>();
+    allProducts.forEach((product) => {
+      const hasComboItems = Array.isArray(product.comboItems) && product.comboItems.length > 0;
+      if (product.category === 'Combo' || hasComboItems) {
+        ids.add(product.id);
+      }
+    });
+    return ids;
+  }, [allProducts]);
   const salesCostConsumerBreakdown = useMemo(() => {
     const grouped = new Map<string, { id: string; name: string; totalCost: number; saleCount: number }>();
     let total = 0;
 
     sales.forEach((sale) => {
+      const saleName = (sale.productName || '').trim();
+      const isComboByCatalog = Boolean(sale.productId && comboProductIds.has(sale.productId));
+      const isComboByName = saleName.toLocaleLowerCase('pt-BR').includes('combo');
+      if (isComboByCatalog || isComboByName) return;
+
       const saleRevenueReference = Math.max(0, Number(sale.total) || 0);
       const saleCost = normalizeLegacySaleCost(Number(sale.totalCost) || 0, saleRevenueReference);
       if (!Number.isFinite(saleCost) || saleCost <= 0) return;
 
-      const productName = (sale.productName || '').trim() || 'Produto sem nome';
+      const productName = saleName || 'Produto sem nome';
       const productId = sale.productId || `product:${productName.toLocaleLowerCase('pt-BR')}`;
       const current = grouped.get(productId) || {
         id: productId,
@@ -462,7 +477,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
       totalCost: total,
       entries,
     };
-  }, [sales]);
+  }, [sales, comboProductIds]);
   const appChannelSummary = useMemo(() => buildAppChannelSummary(sales), [sales]);
   // KPI principal da aba GERAL: custo e lucro das vendas (COGS), sem misturar saídas operacionais.
   const totalCost = salesCost;
@@ -986,6 +1001,9 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   </p>
                   <p className="text-[10px] font-black text-slate-700 uppercase mt-1">
                     Top vendas • R$ {salesCostConsumerBreakdown.totalCost.toFixed(2)}
+                  </p>
+                  <p className="text-[9px] font-black text-slate-500 uppercase mt-1">
+                    Combos ignorados
                   </p>
                   {salesCostConsumerBreakdown.entries.length === 0 ? (
                     <p className="mt-2 text-[10px] font-bold uppercase tracking-widest text-slate-400">
