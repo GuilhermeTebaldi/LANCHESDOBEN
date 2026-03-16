@@ -296,8 +296,13 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [selectedEstoqueYear, setSelectedEstoqueYear] = useState<string | null>(null);
   const [selectedMateriaisYear, setSelectedMateriaisYear] = useState<string | null>(null);
 
-  const totalRevenue = sales.reduce((sum, s) => sum + s.total, 0);
-  const salesCost = sales.reduce((sum, s) => sum + (s.totalCost || 0), 0);
+  const consolidatedSalesFinance = useMemo(
+    () => buildConsolidatedArchiveFinance(sales),
+    [sales]
+  );
+  const totalRevenue = consolidatedSalesFinance.revenue;
+  const salesCost = consolidatedSalesFinance.cost;
+  const salesProfit = consolidatedSalesFinance.profit;
   const cancelledRevenue = cancelledSales.reduce((sum, s) => sum + s.total, 0);
   const stockOutCostBreakdown = useMemo(() => {
     const saleOutByIngredient = new Map<string, number>();
@@ -384,9 +389,13 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   }, [cleaningStockEntries, cleaningMaterials]);
   const stockOutCost = stockOutCostBreakdown.total;
   const cleaningStockOutCost = cleaningStockCostBreakdown.total;
+  const operationalExtraCost = roundMoney(stockOutCost + cleaningStockOutCost);
   const appChannelSummary = useMemo(() => buildAppChannelSummary(sales), [sales]);
-  const totalCost = salesCost + stockOutCost + cleaningStockOutCost;
-  const totalProfit = totalRevenue - totalCost;
+  // KPI principal da aba GERAL: custo e lucro das vendas (COGS), sem misturar saídas operacionais.
+  const totalCost = salesCost;
+  const totalProfit = salesProfit;
+  // Resultado operacional inclui baixas não relacionadas diretamente ao custo das vendas.
+  const operationalNetProfit = roundMoney(totalProfit - operationalExtraCost);
   const generalFinanceSeries = useMemo(() => {
     const dailyMap = new Map<
       string,
@@ -396,8 +405,6 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
         date: Date;
         revenue: number;
         salesCost: number;
-        stockCost: number;
-        cleaningCost: number;
       }
     >();
 
@@ -409,8 +416,6 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
           date,
           revenue: 0,
           salesCost: 0,
-          stockCost: 0,
-          cleaningCost: 0,
         });
       }
       return dailyMap.get(dayKey)!;
@@ -424,29 +429,17 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
       day.salesCost = roundMoney(day.salesCost + (Number(sale.totalCost) || 0));
     });
 
-    stockOutCostBreakdown.byDay.forEach((value, dayKey) => {
-      const [year, month, day] = dayKey.split('-').map((token) => Number(token));
-      const row = ensureDay(dayKey, new Date(year, month - 1, day));
-      row.stockCost = roundMoney(row.stockCost + value);
-    });
-
-    cleaningStockCostBreakdown.byDay.forEach((value, dayKey) => {
-      const [year, month, day] = dayKey.split('-').map((token) => Number(token));
-      const row = ensureDay(dayKey, new Date(year, month - 1, day));
-      row.cleaningCost = roundMoney(row.cleaningCost + value);
-    });
-
     return [...dailyMap.values()]
       .sort((a, b) => a.date.getTime() - b.date.getTime())
       .map((entry) => {
-        const cost = roundMoney(entry.salesCost + entry.stockCost + entry.cleaningCost);
+        const cost = roundMoney(entry.salesCost);
         return {
           ...entry,
           cost,
           profit: roundMoney(entry.revenue - cost),
         };
       });
-  }, [sales, stockOutCostBreakdown, cleaningStockCostBreakdown]);
+  }, [sales]);
   const revenueDistributionData = useMemo(() => {
     const grouped = new Map<
       string,
@@ -729,7 +722,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
           <div className="qb-admin-general-grid grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
             <StatCard title="Faturamento Total" value={`R$ ${totalRevenue.toFixed(2)}`} color="bg-blue-600" icon={<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="M12 2v20"/><path d="m17 5-5-3-5 3"/><path d="m17 19-5 3-5-3"/><path d="M2 12h20"/><path d="m5 7 3 5-3 5"/><path d="m19 7-3 5 3 5"/></svg>} />
             <StatCard title="Custo de Insumos" value={`R$ ${totalCost.toFixed(2)}`} color="bg-slate-800" icon={<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="M12 22V12"/></svg>} />
-            <StatCard title="Lucro Líquido" value={`R$ ${totalProfit.toFixed(2)}`} color="bg-green-600" icon={<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="m5 12 7-7 7 7"/></svg>} />
+            <StatCard title="Lucro de Vendas" value={`R$ ${totalProfit.toFixed(2)}`} color="bg-green-600" icon={<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="m5 12 7-7 7 7"/></svg>} />
             <StatCard title="Vendas Estornadas" value={cancelledSales.length} color="bg-orange-500" icon={<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>} />
             <StatCard title="Materiais de Limpeza" value={`${cleaningMaterials.length} itens`} color="bg-indigo-600" icon={<svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="M3 7h18"/><path d="M7 7v13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2V7"/><path d="M10 11h4"/><path d="M10 15h4"/><path d="M9 3h6l1 4H8l1-4Z"/></svg>} />
           </div>
@@ -1068,9 +1061,9 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </p>
               </div>
               <div className="bg-slate-100 px-3 py-2 rounded-xl">
-                <p className="text-[10px] font-black text-slate-400 uppercase">Resultado</p>
-                <p className={`text-xl font-black ${totalProfit >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                  R$ {totalProfit.toFixed(2)}
+                <p className="text-[10px] font-black text-slate-400 uppercase">Resultado Operacional</p>
+                <p className={`text-xl font-black ${operationalNetProfit >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                  R$ {operationalNetProfit.toFixed(2)}
                 </p>
               </div>
             </div>
@@ -1103,14 +1096,14 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </div>
                 <div className="flex items-center justify-between pt-3 mt-3 border-t border-red-100">
                   <span className="text-[10px] font-black text-red-500 uppercase tracking-widest">Total saiu</span>
-                  <span className="text-sm font-black text-red-700">R$ {totalCost.toFixed(2)}</span>
+                  <span className="text-sm font-black text-red-700">R$ {(totalCost + operationalExtraCost).toFixed(2)}</span>
                 </div>
               </div>
 
               <div className="bg-emerald-50 rounded-2xl border border-emerald-100 p-4">
                 <p className="text-[10px] font-black text-emerald-600 uppercase tracking-widest mb-2">Resultado</p>
                 <div className="flex items-center justify-between py-2 border-b border-emerald-100">
-                  <span className="text-xs font-black text-slate-700 uppercase">Lucro Liquido</span>
+                  <span className="text-xs font-black text-slate-700 uppercase">Lucro das vendas</span>
                   <span className={`text-sm font-black ${totalProfit >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>
                     R$ {totalProfit.toFixed(2)}
                   </span>
@@ -1119,8 +1112,14 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   <span className="text-[10px] font-black text-slate-500 uppercase">Estornos (info)</span>
                   <span className="text-xs font-black text-orange-600">R$ {cancelledRevenue.toFixed(2)}</span>
                 </div>
+                <div className="flex items-center justify-between pt-2">
+                  <span className="text-[10px] font-black text-slate-500 uppercase">Resultado operacional</span>
+                  <span className={`text-xs font-black ${operationalNetProfit >= 0 ? 'text-emerald-700' : 'text-red-600'}`}>
+                    R$ {operationalNetProfit.toFixed(2)}
+                  </span>
+                </div>
                 <p className="mt-2 text-[10px] font-bold text-slate-500 uppercase">
-                  Estornos ja removidos das vendas liquidas.
+                  Custo de vendas separado das baixas operacionais.
                 </p>
               </div>
             </div>
