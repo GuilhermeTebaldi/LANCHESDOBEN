@@ -1161,7 +1161,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
         return;
       }
       setSelectedSaleId(null);
-      printReport(reportSnapshot, salesSnapshot, deferredPrintWindow);
+      printReport(reportSnapshot, salesSnapshot, deferredPrintWindow, 'SUMMARY');
     } finally {
       setIsClosing(false);
     }
