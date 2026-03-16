@@ -1956,7 +1956,18 @@ const App: React.FC = () => {
     if (!isAccessVerified) return;
     if (isStateHydrating) return;
     if (!isPendingDraftAddsHydratedRef.current) return;
+    const knownPersistedDraftIds = new Set<string>();
+    [...sales, ...globalSales, ...globalCancelledSales].forEach((entry) => {
+      const saleDraftId =
+        typeof entry.saleDraftId === 'string' ? entry.saleDraftId.trim() : '';
+      if (saleDraftId) {
+        knownPersistedDraftIds.add(saleDraftId);
+      }
+    });
     const staleDraftIds = Object.keys(pendingDraftAddsRef.current).filter((draftId) => {
+      if (knownPersistedDraftIds.has(draftId)) {
+        return true;
+      }
       const serverDraft = saleDrafts.find((entry) => entry.id === draftId);
       // Keep local-only pending carts until they are explicitly flushed/removed.
       if (!serverDraft) return false;
@@ -1968,7 +1979,15 @@ const App: React.FC = () => {
       delete next[draftId];
     });
     replacePendingDraftAdds(next);
-  }, [isAccessVerified, isStateHydrating, replacePendingDraftAdds, saleDrafts]);
+  }, [
+    globalCancelledSales,
+    globalSales,
+    isAccessVerified,
+    isStateHydrating,
+    replacePendingDraftAdds,
+    saleDrafts,
+    sales,
+  ]);
 
   const saleDraftsWithPendingAdds = useMemo(() => {
     const buildPendingItems = (pendingAdds: PendingDraftAdd[]) =>
@@ -2011,10 +2030,20 @@ const App: React.FC = () => {
     );
 
     const serverDraftIds = new Set(saleDrafts.map((draft) => draft.id));
+    const knownPersistedDraftIds = new Set<string>();
+    [...sales, ...globalSales, ...globalCancelledSales].forEach((entry) => {
+      const saleDraftId =
+        typeof entry.saleDraftId === 'string' ? entry.saleDraftId.trim() : '';
+      if (saleDraftId) {
+        knownPersistedDraftIds.add(saleDraftId);
+      }
+    });
     const pendingOnlyDrafts = Object.entries(pendingDraftAddsByDraft)
       .filter(
         ([draftId, entries]) =>
-          entries.length > 0 && !serverDraftIds.has(draftId)
+          entries.length > 0 &&
+          !serverDraftIds.has(draftId) &&
+          !knownPersistedDraftIds.has(draftId)
       )
       .map(([draftId, entries]) => {
         const pendingItems = buildPendingItems(entries);
@@ -2052,7 +2081,7 @@ const App: React.FC = () => {
       });
 
     return [...mergedServerDrafts, ...pendingOnlyDrafts];
-  }, [pendingDraftAddsByDraft, products, saleDrafts]);
+  }, [globalCancelledSales, globalSales, pendingDraftAddsByDraft, products, saleDrafts, sales]);
 
   const openSaleDrafts = useMemo(
     () => {
