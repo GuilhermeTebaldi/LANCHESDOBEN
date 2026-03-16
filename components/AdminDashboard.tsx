@@ -1,5 +1,5 @@
 
-import React, { useState, useMemo } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bar,
   BarChart,
@@ -328,6 +328,9 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [selectedEstornosYear, setSelectedEstornosYear] = useState<string | null>(null);
   const [selectedEstoqueYear, setSelectedEstoqueYear] = useState<string | null>(null);
   const [selectedMateriaisYear, setSelectedMateriaisYear] = useState<string | null>(null);
+  const [isStockCostPopoverOpen, setIsStockCostPopoverOpen] = useState(false);
+  const stockCostPopoverRef = useRef<HTMLDivElement | null>(null);
+  const stockCostPopoverButtonRef = useRef<HTMLButtonElement | null>(null);
 
   const consolidatedSalesFinance = useMemo(
     () => buildConsolidatedArchiveFinance(sales),
@@ -579,6 +582,31 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
     ],
     [totalRevenue, totalCost, totalProfit]
   );
+
+  useEffect(() => {
+    if (!isStockCostPopoverOpen) return;
+
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (!target) return;
+      if (stockCostPopoverRef.current?.contains(target)) return;
+      if (stockCostPopoverButtonRef.current?.contains(target)) return;
+      setIsStockCostPopoverOpen(false);
+    };
+
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setIsStockCostPopoverOpen(false);
+      }
+    };
+
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleEscape);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleEscape);
+    };
+  }, [isStockCostPopoverOpen]);
   const totalCleaningStockValue = useMemo(
     () => cleaningMaterials.reduce((sum, material) => sum + material.currentStock * material.cost, 0),
     [cleaningMaterials]
@@ -919,11 +947,21 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
             <div className="bg-white p-6 rounded-[32px] border-2 border-slate-100 shadow-sm">
-              <div className="mb-4">
-                <h3 className="text-xl font-black text-slate-900 uppercase tracking-tight">Fluxo Financeiro</h3>
-                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mt-1">
-                  Comparativo entre entradas, custos e lucro
-                </p>
+              <div className="mb-4 flex items-start justify-between gap-3">
+                <div>
+                  <h3 className="text-xl font-black text-slate-900 uppercase tracking-tight">Fluxo Financeiro</h3>
+                  <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mt-1">
+                    Comparativo entre entradas, custos e lucro
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  ref={stockCostPopoverButtonRef}
+                  onClick={() => setIsStockCostPopoverOpen((current) => !current)}
+                  className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-[10px] font-black uppercase tracking-widest text-slate-700 hover:bg-slate-100 active:scale-[0.98] transition"
+                >
+                  Top custos
+                </button>
               </div>
               <div className="h-[280px] relative">
                 <ResponsiveContainer width="100%" height="100%">
@@ -945,40 +983,45 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     </Bar>
                   </BarChart>
                 </ResponsiveContainer>
-                <div className="absolute bottom-2 right-2 w-[260px] max-w-[calc(100%-16px)] rounded-2xl border border-slate-200 bg-white/95 backdrop-blur px-3 py-3 shadow-xl">
-                  <p className="text-[9px] font-black text-slate-500 uppercase tracking-widest">
-                    Itens que mais consomem custo
-                  </p>
-                  <p className="text-[10px] font-black text-slate-700 uppercase mt-1">
-                    Top estoque • R$ {stockCostConsumerBreakdown.totalCost.toFixed(2)}
-                  </p>
-                  {stockCostConsumerBreakdown.entries.length === 0 ? (
-                    <p className="mt-2 text-[10px] font-bold uppercase tracking-widest text-slate-400">
-                      Sem baixas de estoque
+                {isStockCostPopoverOpen && (
+                  <div
+                    ref={stockCostPopoverRef}
+                    className="absolute bottom-2 right-2 w-[260px] max-w-[calc(100%-16px)] rounded-2xl border border-slate-200 bg-white/95 backdrop-blur px-3 py-3 shadow-xl"
+                  >
+                    <p className="text-[9px] font-black text-slate-500 uppercase tracking-widest">
+                      Itens que mais consomem custo
                     </p>
-                  ) : (
-                    <div className="mt-2 space-y-2">
-                      {stockCostConsumerBreakdown.entries.map((item, index) => (
-                        <div key={item.id}>
-                          <div className="flex items-center justify-between gap-2">
-                            <p className="text-[10px] font-black text-slate-700 truncate">
-                              {index + 1}. {item.name}
-                            </p>
-                            <p className="text-[10px] font-black text-red-600 whitespace-nowrap">
-                              R$ {item.totalCost.toFixed(2)}
-                            </p>
+                    <p className="text-[10px] font-black text-slate-700 uppercase mt-1">
+                      Top estoque • R$ {stockCostConsumerBreakdown.totalCost.toFixed(2)}
+                    </p>
+                    {stockCostConsumerBreakdown.entries.length === 0 ? (
+                      <p className="mt-2 text-[10px] font-bold uppercase tracking-widest text-slate-400">
+                        Sem baixas de estoque
+                      </p>
+                    ) : (
+                      <div className="mt-2 space-y-2">
+                        {stockCostConsumerBreakdown.entries.map((item, index) => (
+                          <div key={item.id}>
+                            <div className="flex items-center justify-between gap-2">
+                              <p className="text-[10px] font-black text-slate-700 truncate">
+                                {index + 1}. {item.name}
+                              </p>
+                              <p className="text-[10px] font-black text-red-600 whitespace-nowrap">
+                                R$ {item.totalCost.toFixed(2)}
+                              </p>
+                            </div>
+                            <div className="h-1.5 rounded-full bg-slate-200 overflow-hidden mt-1">
+                              <div
+                                className="h-full rounded-full bg-gradient-to-r from-red-500 via-orange-500 to-amber-400"
+                                style={{ width: `${Math.max(8, Math.min(100, item.share * 100))}%` }}
+                              />
+                            </div>
                           </div>
-                          <div className="h-1.5 rounded-full bg-slate-200 overflow-hidden mt-1">
-                            <div
-                              className="h-full rounded-full bg-gradient-to-r from-red-500 via-orange-500 to-amber-400"
-                              style={{ width: `${Math.max(8, Math.min(100, item.share * 100))}%` }}
-                            />
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             </div>
 
