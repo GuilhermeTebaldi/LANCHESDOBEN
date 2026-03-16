@@ -225,11 +225,11 @@ interface ConsolidatedArchiveFinance {
   profit: number;
 }
 
-interface StockCostConsumerEntry {
+interface SalesCostConsumerEntry {
   id: string;
   name: string;
   totalCost: number;
-  movements: number;
+  saleCount: number;
   share: number;
 }
 
@@ -426,38 +426,31 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const stockOutCost = stockOutCostBreakdown.total;
   const cleaningStockOutCost = cleaningStockCostBreakdown.total;
   const operationalExtraCost = roundMoney(stockOutCost + cleaningStockOutCost);
-  const stockCostConsumerBreakdown = useMemo(() => {
-    const grouped = new Map<string, { id: string; name: string; totalCost: number; movements: number }>();
+  const salesCostConsumerBreakdown = useMemo(() => {
+    const grouped = new Map<string, { id: string; name: string; totalCost: number; saleCount: number }>();
     let total = 0;
 
-    stockEntries.forEach((entry) => {
-      const quantity = Number(entry.quantity);
-      if (!Number.isFinite(quantity) || quantity >= 0) return;
+    sales.forEach((sale) => {
+      const saleRevenueReference = Math.max(0, Number(sale.total) || 0);
+      const saleCost = normalizeLegacySaleCost(Number(sale.totalCost) || 0, saleRevenueReference);
+      if (!Number.isFinite(saleCost) || saleCost <= 0) return;
 
-      const ingredient = allIngredients.find((item) => item.id === entry.ingredientId);
-      const rawUnitCost = Number(entry.unitCost ?? ingredient?.cost ?? 0);
-      if (!Number.isFinite(rawUnitCost) || rawUnitCost <= 0) return;
-
-      const normalizedUnitCost = normalizeIngredientCostForReport(ingredient, rawUnitCost);
-      const impact = roundMoney(Math.abs(quantity) * normalizedUnitCost);
-      if (!Number.isFinite(impact) || impact <= 0) return;
-
-      const ingredientId = entry.ingredientId || `unknown-${entry.ingredientName || entry.id}`;
-      const ingredientName = ingredient?.name || entry.ingredientName || 'Insumo sem nome';
-      const current = grouped.get(ingredientId) || {
-        id: ingredientId,
-        name: ingredientName,
+      const productName = (sale.productName || '').trim() || 'Produto sem nome';
+      const productId = sale.productId || `product:${productName.toLocaleLowerCase('pt-BR')}`;
+      const current = grouped.get(productId) || {
+        id: productId,
+        name: productName,
         totalCost: 0,
-        movements: 0,
+        saleCount: 0,
       };
 
-      current.totalCost = roundMoney(current.totalCost + impact);
-      current.movements += 1;
-      grouped.set(ingredientId, current);
-      total = roundMoney(total + impact);
+      current.totalCost = roundMoney(current.totalCost + saleCost);
+      current.saleCount += 1;
+      grouped.set(productId, current);
+      total = roundMoney(total + saleCost);
     });
 
-    const entries: StockCostConsumerEntry[] = [...grouped.values()]
+    const entries: SalesCostConsumerEntry[] = [...grouped.values()]
       .sort((a, b) => b.totalCost - a.totalCost)
       .slice(0, 5)
       .map((entry) => ({
@@ -469,7 +462,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
       totalCost: total,
       entries,
     };
-  }, [stockEntries, allIngredients]);
+  }, [sales]);
   const appChannelSummary = useMemo(() => buildAppChannelSummary(sales), [sales]);
   // KPI principal da aba GERAL: custo e lucro das vendas (COGS), sem misturar saídas operacionais.
   const totalCost = salesCost;
@@ -989,23 +982,23 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     className="absolute bottom-2 right-2 w-[260px] max-w-[calc(100%-16px)] rounded-2xl border border-slate-200 bg-white/95 backdrop-blur px-3 py-3 shadow-xl"
                   >
                     <p className="text-[9px] font-black text-slate-500 uppercase tracking-widest">
-                      Itens que mais consomem custo
+                    Itens de venda que mais consomem custo
+                  </p>
+                  <p className="text-[10px] font-black text-slate-700 uppercase mt-1">
+                    Top vendas • R$ {salesCostConsumerBreakdown.totalCost.toFixed(2)}
+                  </p>
+                  {salesCostConsumerBreakdown.entries.length === 0 ? (
+                    <p className="mt-2 text-[10px] font-bold uppercase tracking-widest text-slate-400">
+                      Sem vendas registradas
                     </p>
-                    <p className="text-[10px] font-black text-slate-700 uppercase mt-1">
-                      Top estoque • R$ {stockCostConsumerBreakdown.totalCost.toFixed(2)}
-                    </p>
-                    {stockCostConsumerBreakdown.entries.length === 0 ? (
-                      <p className="mt-2 text-[10px] font-bold uppercase tracking-widest text-slate-400">
-                        Sem baixas de estoque
-                      </p>
-                    ) : (
-                      <div className="mt-2 space-y-2">
-                        {stockCostConsumerBreakdown.entries.map((item, index) => (
-                          <div key={item.id}>
-                            <div className="flex items-center justify-between gap-2">
-                              <p className="text-[10px] font-black text-slate-700 truncate">
-                                {index + 1}. {item.name}
-                              </p>
+                  ) : (
+                    <div className="mt-2 space-y-2">
+                      {salesCostConsumerBreakdown.entries.map((item, index) => (
+                        <div key={item.id}>
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="text-[10px] font-black text-slate-700 truncate">
+                              {index + 1}. {item.name}
+                            </p>
                               <p className="text-[10px] font-black text-red-600 whitespace-nowrap">
                                 R$ {item.totalCost.toFixed(2)}
                               </p>
