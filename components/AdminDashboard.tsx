@@ -27,7 +27,7 @@ import {
 } from '../types';
 import { APP_ORIGINS, buildAppChannelSummary } from '../utils/appChannelSummary';
 import { DASHBOARD_CHART_COLORS, DASHBOARD_TOOLTIP_STYLE } from '../utils/chartTheme';
-import { formatIngredientStockQuantity, formatStockQuantityByUnit } from '../utils/recipe';
+import { calculateRecipeCost, formatIngredientStockQuantity, formatStockQuantityByUnit } from '../utils/recipe';
 import AdminSalesAnalyticsTab from './AdminSalesAnalyticsTab';
 
 interface AdminDashboardProps {
@@ -426,43 +426,89 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const stockOutCost = stockOutCostBreakdown.total;
   const cleaningStockOutCost = cleaningStockCostBreakdown.total;
   const operationalExtraCost = roundMoney(stockOutCost + cleaningStockOutCost);
-  const comboProductIds = useMemo(() => {
-    const ids = new Set<string>();
+  const productById = useMemo(() => {
+    const map = new Map<string, Product>();
     allProducts.forEach((product) => {
-      const hasComboItems = Array.isArray(product.comboItems) && product.comboItems.length > 0;
-      if (product.category === 'Combo' || hasComboItems) {
-        ids.add(product.id);
-      }
+      map.set(product.id, product);
     });
-    return ids;
+    return map;
   }, [allProducts]);
+  const productBaseCostById = useMemo(() => {
+    const map = new Map<string, number>();
+    allProducts.forEach((product) => {
+      const baseCost = roundMoney(calculateRecipeCost(allIngredients, product.recipe || []).totalCost);
+      map.set(product.id, baseCost);
+    });
+    return map;
+  }, [allProducts, allIngredients]);
   const salesCostConsumerBreakdown = useMemo(() => {
     const grouped = new Map<string, { id: string; name: string; totalCost: number; saleCount: number }>();
     let total = 0;
-
-    sales.forEach((sale) => {
-      const saleName = (sale.productName || '').trim();
-      const isComboByCatalog = Boolean(sale.productId && comboProductIds.has(sale.productId));
-      const isComboByName = saleName.toLocaleLowerCase('pt-BR').includes('combo');
-      if (isComboByCatalog || isComboByName) return;
-
-      const saleRevenueReference = Math.max(0, Number(sale.total) || 0);
-      const saleCost = normalizeLegacySaleCost(Number(sale.totalCost) || 0, saleRevenueReference);
-      if (!Number.isFinite(saleCost) || saleCost <= 0) return;
-
-      const productName = saleName || 'Produto sem nome';
-      const productId = sale.productId || `product:${productName.toLocaleLowerCase('pt-BR')}`;
+    const addProductCost = (productId: string, productName: string, cost: number) => {
+      if (!Number.isFinite(cost) || cost <= 0) return;
       const current = grouped.get(productId) || {
         id: productId,
         name: productName,
         totalCost: 0,
         saleCount: 0,
       };
-
-      current.totalCost = roundMoney(current.totalCost + saleCost);
+      current.totalCost = roundMoney(current.totalCost + cost);
       current.saleCount += 1;
       grouped.set(productId, current);
+    };
+
+    sales.forEach((sale) => {
+      const saleName = (sale.productName || '').trim();
+      const saleRevenueReference = Math.max(0, Number(sale.total) || 0);
+      const saleCost = normalizeLegacySaleCost(Number(sale.totalCost) || 0, saleRevenueReference);
+      if (!Number.isFinite(saleCost) || saleCost <= 0) return;
       total = roundMoney(total + saleCost);
+
+      const saleProduct = sale.productId ? productById.get(sale.productId) : undefined;
+      const hasComboItems = Boolean(saleProduct?.comboItems && saleProduct.comboItems.length > 0);
+      const isComboByCatalog = Boolean(
+        saleProduct && (saleProduct.category === 'Combo' || hasComboItems)
+      );
+      const isComboByName = saleName.toLocaleLowerCase('pt-BR').includes('combo');
+      const isComboSale = isComboByCatalog || isComboByName;
+
+      if (isComboSale && hasComboItems && saleProduct) {
+        const expanded = saleProduct.comboItems
+          .map((item) => {
+            const qty = Number(item.quantity);
+            if (!Number.isFinite(qty) || qty <= 0) return null;
+            const child = productById.get(item.productId);
+            const childName = (child?.name || item.productId || 'Produto').trim();
+            const childKey = item.productId || `product:${childName.toLocaleLowerCase('pt-BR')}`;
+            const childBaseCost = Math.max(0, Number(productBaseCostById.get(item.productId) || 0));
+            const weight = childBaseCost > 0 ? childBaseCost * qty : qty;
+            if (!Number.isFinite(weight) || weight <= 0) return null;
+            return { key: childKey, name: childName || 'Produto', weight };
+          })
+          .filter((item): item is { key: string; name: string; weight: number } => item !== null);
+
+        if (expanded.length > 0) {
+          const totalWeight = expanded.reduce((sum, item) => sum + item.weight, 0);
+          if (totalWeight > 0) {
+            let allocated = 0;
+            expanded.forEach((item, index) => {
+              const isLast = index === expanded.length - 1;
+              const proportional = roundMoney((saleCost * item.weight) / totalWeight);
+              const allocatedCost = isLast
+                ? roundMoney(Math.max(0, saleCost - allocated))
+                : proportional;
+              if (allocatedCost <= 0) return;
+              allocated = roundMoney(allocated + allocatedCost);
+              addProductCost(item.key, item.name, allocatedCost);
+            });
+            return;
+          }
+        }
+      }
+
+      const productName = saleName || 'Produto sem nome';
+      const productId = sale.productId || `product:${productName.toLocaleLowerCase('pt-BR')}`;
+      addProductCost(productId, productName, saleCost);
     });
 
     const entries: SalesCostConsumerEntry[] = [...grouped.values()]
@@ -477,7 +523,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
       totalCost: total,
       entries,
     };
-  }, [sales, comboProductIds]);
+  }, [sales, productById, productBaseCostById]);
   const appChannelSummary = useMemo(() => buildAppChannelSummary(sales), [sales]);
   // KPI principal da aba GERAL: custo e lucro das vendas (COGS), sem misturar saídas operacionais.
   const totalCost = salesCost;
@@ -1003,7 +1049,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     Top vendas • R$ {salesCostConsumerBreakdown.totalCost.toFixed(2)}
                   </p>
                   <p className="text-[9px] font-black text-slate-500 uppercase mt-1">
-                    Combos ignorados
+                    Combo distribuido nos itens
                   </p>
                   {salesCostConsumerBreakdown.entries.length === 0 ? (
                     <p className="mt-2 text-[10px] font-bold uppercase tracking-widest text-slate-400">
