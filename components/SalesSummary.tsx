@@ -1149,7 +1149,9 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
       closedAt: new Date(),
     };
     const salesSnapshot = [...sales];
-    const deferredPrintWindow = window.open('', '_blank', 'width=420,height=980');
+    // Pré-abre uma aba para evitar bloqueio de pop-up após o fechamento assíncrono,
+    // sem forçar tamanho de popup (deve ficar igual ao fluxo do Histórico).
+    const deferredPrintWindow = window.open('', '_blank');
 
     setIsClosing(true);
     try {
