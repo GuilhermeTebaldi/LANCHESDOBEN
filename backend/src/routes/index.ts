@@ -9,6 +9,7 @@ import { sessionRouter } from './session.routes.js';
 import { saleRouter } from './sale.routes.js';
 import { reportRouter } from './report.routes.js';
 import { auditRouter } from './audit.routes.js';
+import { errorMonitorRouter } from './error-monitor.routes.js';
 
 export const apiRouter = Router();
 
@@ -21,3 +22,4 @@ apiRouter.use('/sessions', sessionRouter);
 apiRouter.use('/sales', saleRouter);
 apiRouter.use('/reports', reportRouter);
 apiRouter.use('/audit', auditRouter);
+apiRouter.use('/errors', errorMonitorRouter);

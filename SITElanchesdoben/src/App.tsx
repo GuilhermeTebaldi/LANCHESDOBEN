@@ -25,6 +25,7 @@ import {
   type PublicProduct,
 } from './services/publicCatalog';
 import DeveloperPortal from './developer/DeveloperPortal';
+import ErrorMonitorPortal from './developer/ErrorMonitorPortal';
 
 const ADMIN_EMAIL = 'meu@admin.com';
 const ADMIN_PASSWORD = 'ben123';
@@ -137,6 +138,11 @@ const areProductsEqual = (current: PublicProduct[], next: PublicProduct[]): bool
 const isDeveloperRoute = (): boolean => {
   if (typeof window === 'undefined') return false;
   return window.location.pathname.startsWith('/desenvolvedor');
+};
+
+const isErrorMonitorRoute = (): boolean => {
+  if (typeof window === 'undefined') return false;
+  return window.location.pathname.startsWith('/rede');
 };
 
 function MainSiteApp() {
@@ -909,6 +915,9 @@ function MainSiteApp() {
 }
 
 export default function App() {
+  if (isErrorMonitorRoute()) {
+    return <ErrorMonitorPortal />;
+  }
   if (isDeveloperRoute()) {
     return <DeveloperPortal />;
   }

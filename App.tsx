@@ -51,6 +51,7 @@ import {
   type ReceiptPrintPayload,
   type ReceiptPrintPayloadInput,
 } from './utils/receiptPrintPayload';
+import { reportErrorMonitorEvent } from './utils/errorMonitorClient';
 
 const ADMIN_GATE_KEY = 'lanchesdoben_admin_gate';
 const ADMIN_SESSION_KEY = 'lanchesdoben_admin_session';
@@ -769,6 +770,25 @@ const isRetryableSyncError = (error: unknown): boolean => {
     );
   }
   return false;
+};
+
+const toCommandSyncErrorContext = (command: StateCommand): Record<string, unknown> => {
+  const context: Record<string, unknown> = {
+    commandType: command.type,
+    commandId: command.commandId || null,
+  };
+
+  if ('draftId' in command) context.draftId = command.draftId;
+  if ('productId' in command) context.productId = command.productId;
+  if ('itemId' in command) context.itemId = command.itemId;
+  if ('ingredientId' in command) context.ingredientId = command.ingredientId;
+  if ('materialId' in command) context.materialId = command.materialId;
+  if ('saleId' in command) context.saleId = command.saleId;
+  if ('saleIds' in command) context.saleIdsCount = command.saleIds.length;
+  if ('paymentMethod' in command) context.paymentMethod = command.paymentMethod;
+  if ('splitMode' in command) context.splitMode = command.splitMode || null;
+
+  return context;
 };
 
 const updateRunCommandErrorSink = (
@@ -1837,6 +1857,14 @@ const App: React.FC = () => {
         message,
         retryable,
         statusCode,
+      });
+      reportErrorMonitorEvent({
+        source: 'sistema:command-sync',
+        level: retryable ? 'warn' : 'error',
+        message,
+        statusCode,
+        stack: result.error instanceof Error ? result.error.stack : undefined,
+        context: toCommandSyncErrorContext(normalizedCommand),
       });
       const shouldQueueOfflineSale =
         !options.skipOfflineQueue &&

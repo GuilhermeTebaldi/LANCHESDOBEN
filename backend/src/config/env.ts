@@ -18,6 +18,7 @@ const baseEnvSchema = z.object({
       return !['0', 'false', 'off', 'no'].includes(normalized);
     }),
   APP_STATE_BACKUP_CHECK_INTERVAL_MS: z.coerce.number().int().min(60000).max(86400000).default(3600000),
+  ERROR_MONITOR_PASSWORD: z.string().min(4).default('admin1234'),
 });
 
 const authEnvSchema = z.object({
