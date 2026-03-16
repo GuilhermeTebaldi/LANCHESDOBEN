@@ -16,6 +16,14 @@ interface BackendErrorMonitorInput {
   stack?: string;
 }
 
+const isExpectedStateVersionConflict = (req: Request, statusCode: number, message: string): boolean => {
+  if (statusCode !== 412) return false;
+  const path = (req.originalUrl || req.url || '').toLowerCase();
+  if (!path.includes('/api/v1/state/commands')) return false;
+  const normalizedMessage = (message || '').toLowerCase();
+  return normalizedMessage.includes('conflito de versão') || normalizedMessage.includes('token de estado');
+};
+
 const reportBackendErrorEvent = (req: Request, input: BackendErrorMonitorInput): void => {
   const requestPath = `${req.method.toUpperCase()} ${req.originalUrl || req.url || ''}`.trim();
   void new AuditService(prisma)
@@ -148,7 +156,11 @@ export const errorMiddleware = (error: unknown, req: Request, res: Response, _ne
   }
 
   reportBackendErrorEvent(req, {
-    level: httpError.statusCode >= 500 ? 'error' : 'warn',
+    level: isExpectedStateVersionConflict(req, httpError.statusCode, httpError.message)
+      ? 'info'
+      : httpError.statusCode >= 500
+        ? 'error'
+        : 'warn',
     message: httpError.message,
     statusCode: httpError.statusCode,
     details: httpError.details,

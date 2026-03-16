@@ -15,9 +15,13 @@ import type {
 import { DEFAULT_APP_STATE, type AppState } from './appStorage';
 
 const API_TIMEOUT_MS = 12000;
-const COMMAND_MAX_ATTEMPTS = 4;
-const COMMAND_RETRY_BASE_DELAY_MS = 450;
-const COMMAND_RETRY_MAX_DELAY_MS = 4000;
+const COMMAND_MAX_ATTEMPTS = 8;
+const COMMAND_RETRY_BASE_DELAY_MS = 500;
+const COMMAND_RETRY_MAX_DELAY_MS = 8000;
+const COMMAND_RETRY_JITTER_MIN = 0.75;
+const COMMAND_RETRY_JITTER_MAX = 1.35;
+const COMMAND_VERSION_CONFLICT_RETRY_BASE_DELAY_MS = 140;
+const COMMAND_VERSION_CONFLICT_RETRY_MAX_DELAY_MS = 2200;
 const DEFAULT_API_BASE_URL = 'https://xburger-backend.onrender.com';
 
 type BaseCommand = {
@@ -186,7 +190,21 @@ const wait = (ms: number): Promise<void> =>
 const getRetryDelayMs = (attempt: number): number => {
   const safeAttempt = Math.max(0, Math.floor(attempt));
   const exponential = COMMAND_RETRY_BASE_DELAY_MS * 2 ** safeAttempt;
-  return Math.min(COMMAND_RETRY_MAX_DELAY_MS, exponential);
+  const capped = Math.min(COMMAND_RETRY_MAX_DELAY_MS, exponential);
+  const jitterFactor =
+    COMMAND_RETRY_JITTER_MIN +
+    Math.random() * (COMMAND_RETRY_JITTER_MAX - COMMAND_RETRY_JITTER_MIN);
+  return Math.max(0, Math.round(capped * jitterFactor));
+};
+
+const getVersionConflictRetryDelayMs = (attempt: number): number => {
+  const safeAttempt = Math.max(0, Math.floor(attempt));
+  const exponential = COMMAND_VERSION_CONFLICT_RETRY_BASE_DELAY_MS * 2 ** safeAttempt;
+  const capped = Math.min(COMMAND_VERSION_CONFLICT_RETRY_MAX_DELAY_MS, exponential);
+  const jitterFactor =
+    COMMAND_RETRY_JITTER_MIN +
+    Math.random() * (COMMAND_RETRY_JITTER_MAX - COMMAND_RETRY_JITTER_MIN);
+  return Math.max(0, Math.round(capped * jitterFactor));
 };
 
 const asRetryableNetworkError = (error: unknown): StateCommandSyncError => {
@@ -531,10 +549,15 @@ export const runStateCommand = async (command: StateCommand): Promise<AppState> 
       return normalizeAppState(payload);
     }
 
-    if (response.status === 401 || response.status === 412 || response.status === 428) {
+    const isVersionConflictStatus = response.status === 412 || response.status === 428;
+    if (response.status === 401 || isVersionConflictStatus) {
       writeContext = null;
       if (attempt < COMMAND_MAX_ATTEMPTS - 1) {
-        await wait(getRetryDelayMs(attempt));
+        await wait(
+          isVersionConflictStatus
+            ? getVersionConflictRetryDelayMs(attempt)
+            : getRetryDelayMs(attempt)
+        );
         continue;
       }
     }
