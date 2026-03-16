@@ -341,22 +341,42 @@ const normalizeStockEntryMetadata = (entry: StockEntry): StockEntry => {
 const normalizeStockEntryList = (items: StockEntry[]): StockEntry[] =>
   items.map(normalizeStockEntryMetadata);
 
-const reviveDailySalesHistory = (items: DailySalesHistoryEntry[]): DailySalesHistoryEntry[] =>
-  items.map((item) => {
-    if (item.closedAt && !(item.closedAt instanceof Date)) {
-      return {
-        ...item,
-        closedAt: new Date(item.closedAt as string),
-      };
-    }
-    return item;
-  });
+const roundMoney = (value: number): number => Number(value.toFixed(2));
 
 const toNonNegativeNumber = (value: unknown, fallback = 0): number => {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) return fallback;
   return parsed;
 };
+
+const normalizeDailyHistoryEntry = (item: DailySalesHistoryEntry): DailySalesHistoryEntry => {
+  const totalRevenue = roundMoney(toNonNegativeNumber(item.totalRevenue));
+  const rawTotalPurchases = Number(item.totalPurchases);
+  const rawTotalProfit = Number(item.totalProfit);
+  const fallbackTotalPurchases =
+    Number.isFinite(rawTotalProfit) && rawTotalProfit <= totalRevenue
+      ? Math.max(0, totalRevenue - rawTotalProfit)
+      : 0;
+  const totalPurchases = roundMoney(
+    Number.isFinite(rawTotalPurchases) && rawTotalPurchases >= 0
+      ? rawTotalPurchases
+      : fallbackTotalPurchases
+  );
+
+  return {
+    ...item,
+    closedAt: item.closedAt && !(item.closedAt instanceof Date) ? new Date(item.closedAt as string) : item.closedAt,
+    openingCash: roundMoney(toNonNegativeNumber(item.openingCash)),
+    totalRevenue,
+    totalPurchases,
+    totalProfit: roundMoney(totalRevenue - totalPurchases),
+    saleCount: Number.isFinite(Number(item.saleCount)) ? Math.max(0, Math.floor(Number(item.saleCount))) : 0,
+    cashExpenses: roundMoney(toNonNegativeNumber(item.cashExpenses ?? 0)),
+  };
+};
+
+const reviveDailySalesHistory = (items: DailySalesHistoryEntry[]): DailySalesHistoryEntry[] =>
+  items.map(normalizeDailyHistoryEntry);
 
 const normalizeAppState = (payload: unknown): AppState => {
   if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {

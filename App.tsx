@@ -344,6 +344,19 @@ const normalizeDailyHistoryEntry = (value: unknown): DailySalesHistoryEntry | nu
 
   const saleCountRaw = Number(source.saleCount);
   const saleCount = Number.isFinite(saleCountRaw) && saleCountRaw >= 0 ? Math.floor(saleCountRaw) : 0;
+  const totalRevenue = roundMoney(Math.max(0, Number(source.totalRevenue) || 0));
+  const rawTotalPurchases = Number(source.totalPurchases);
+  const rawTotalProfit = Number(source.totalProfit);
+  const fallbackTotalPurchases =
+    Number.isFinite(rawTotalProfit) && rawTotalProfit <= totalRevenue
+      ? Math.max(0, totalRevenue - rawTotalProfit)
+      : 0;
+  const totalPurchases = roundMoney(
+    Number.isFinite(rawTotalPurchases) && rawTotalPurchases >= 0
+      ? rawTotalPurchases
+      : fallbackTotalPurchases
+  );
+  const totalProfit = roundMoney(totalRevenue - totalPurchases);
 
   return {
     id:
@@ -352,9 +365,9 @@ const normalizeDailyHistoryEntry = (value: unknown): DailySalesHistoryEntry | nu
         : `day-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
     closedAt,
     openingCash: roundMoney(Math.max(0, Number(source.openingCash) || 0)),
-    totalRevenue: roundMoney(Math.max(0, Number(source.totalRevenue) || 0)),
-    totalPurchases: roundMoney(Math.max(0, Number(source.totalPurchases) || 0)),
-    totalProfit: roundMoney(Number(source.totalProfit) || 0),
+    totalRevenue,
+    totalPurchases,
+    totalProfit,
     saleCount,
     cashExpenses: roundMoney(Math.max(0, Number(source.cashExpenses) || 0)),
   };

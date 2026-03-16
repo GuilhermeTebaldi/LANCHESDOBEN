@@ -357,19 +357,34 @@ const cloneSale = (sale: FrontSale): FrontSale => ({
 
 const cloneDailySalesHistoryEntry = (
   entry: FrontDailySalesHistoryEntry
-): FrontDailySalesHistoryEntry => ({
-  ...entry,
-  closedAt:
-    entry.closedAt instanceof Date || typeof entry.closedAt === 'string'
-      ? entry.closedAt
-      : toTimestampIso(),
-  openingCash: toNonNegativeMoney(entry.openingCash),
-  totalRevenue: toNonNegativeMoney(entry.totalRevenue),
-  totalPurchases: toNonNegativeMoney(entry.totalPurchases),
-  totalProfit: roundMoney(Number(entry.totalProfit) || 0),
-  saleCount: Number.isFinite(Number(entry.saleCount)) ? Math.max(0, Math.floor(Number(entry.saleCount))) : 0,
-  cashExpenses: toNonNegativeMoney(entry.cashExpenses),
-});
+): FrontDailySalesHistoryEntry => {
+  const totalRevenue = toNonNegativeMoney(entry.totalRevenue);
+  const rawTotalPurchases = Number(entry.totalPurchases);
+  const rawTotalProfit = Number(entry.totalProfit);
+  const fallbackTotalPurchases =
+    Number.isFinite(rawTotalProfit) && rawTotalProfit <= totalRevenue
+      ? Math.max(0, totalRevenue - rawTotalProfit)
+      : 0;
+  const totalPurchases = roundMoney(
+    Number.isFinite(rawTotalPurchases) && rawTotalPurchases >= 0
+      ? rawTotalPurchases
+      : fallbackTotalPurchases
+  );
+
+  return {
+    ...entry,
+    closedAt:
+      entry.closedAt instanceof Date || typeof entry.closedAt === 'string'
+        ? entry.closedAt
+        : toTimestampIso(),
+    openingCash: toNonNegativeMoney(entry.openingCash),
+    totalRevenue,
+    totalPurchases,
+    totalProfit: roundMoney(totalRevenue - totalPurchases),
+    saleCount: Number.isFinite(Number(entry.saleCount)) ? Math.max(0, Math.floor(Number(entry.saleCount))) : 0,
+    cashExpenses: toNonNegativeMoney(entry.cashExpenses),
+  };
+};
 
 const ensureDailySalesHistory = (state: FrontAppState): FrontDailySalesHistoryEntry[] => {
   if (!state.dailySalesHistory) {
