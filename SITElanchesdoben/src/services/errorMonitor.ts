@@ -24,6 +24,15 @@ export interface ErrorMonitorEntry {
   } | null;
 }
 
+export interface ClearErrorEventsResult {
+  ok: boolean;
+  deletedCount: number;
+  clearAll: boolean;
+  olderThanDays: number | null;
+  olderThanDate: string | null;
+  source: string | null;
+}
+
 interface ReportErrorInput {
   source: string;
   level: 'error' | 'warn' | 'info';
@@ -275,4 +284,55 @@ export const fetchErrorEvents = async (
       typeof candidate.action === 'string'
     );
   });
+};
+
+export const clearErrorEvents = async (
+  password: string,
+  options: { olderThanDays?: number; source?: string; clearAll?: boolean } = {}
+): Promise<ClearErrorEventsResult> => {
+  const normalizedPassword = password.trim();
+  if (!normalizedPassword) {
+    throw new Error('Senha obrigatória.');
+  }
+
+  const response = await fetch(resolveEventsUrl(), {
+    method: 'DELETE',
+    cache: 'no-store',
+    headers: {
+      Accept: 'application/json',
+      'Content-Type': 'application/json',
+      'x-monitor-password': normalizedPassword,
+    },
+    body: JSON.stringify({
+      olderThanDays:
+        typeof options.olderThanDays === 'number' && Number.isFinite(options.olderThanDays)
+          ? Math.min(Math.max(Math.floor(options.olderThanDays), 1), 3650)
+          : undefined,
+      source: options.source?.trim() || undefined,
+      clearAll: options.clearAll === true,
+    }),
+  });
+
+  if (!response.ok) {
+    if (response.status === 401) {
+      throw new Error('Senha inválida.');
+    }
+    throw new Error(`Falha ao limpar eventos (${response.status}).`);
+  }
+
+  const payload = (await response.json()) as Partial<ClearErrorEventsResult>;
+  return {
+    ok: payload.ok === true,
+    deletedCount:
+      typeof payload.deletedCount === 'number' && Number.isFinite(payload.deletedCount)
+        ? Math.max(0, Math.floor(payload.deletedCount))
+        : 0,
+    clearAll: payload.clearAll === true,
+    olderThanDays:
+      typeof payload.olderThanDays === 'number' && Number.isFinite(payload.olderThanDays)
+        ? payload.olderThanDays
+        : null,
+    olderThanDate: typeof payload.olderThanDate === 'string' ? payload.olderThanDate : null,
+    source: typeof payload.source === 'string' ? payload.source : null,
+  };
 };

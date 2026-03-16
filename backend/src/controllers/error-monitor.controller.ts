@@ -18,6 +18,12 @@ const errorMonitorEventSchema = z.object({
   context: z.record(z.unknown()).optional(),
 });
 
+const clearMonitorEventsSchema = z.object({
+  source: z.string().trim().min(1).max(120).optional(),
+  olderThanDays: z.coerce.number().int().min(1).max(3650).optional(),
+  clearAll: z.coerce.boolean().optional(),
+});
+
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX_EVENTS = 180;
 const reportRateByIp = new Map<string, { windowStartedAt: number; count: number }>();
@@ -109,5 +115,38 @@ export const errorMonitorController = {
         metadata: row.metadata,
       }))
     );
+  },
+
+  clear: async (req: Request, res: Response) => {
+    requireMonitorPassword(req);
+
+    const payload = clearMonitorEventsSchema.parse(req.body ?? {});
+    const shouldClearAll = payload.clearAll === true;
+    const olderThanDays = payload.olderThanDays ?? 30;
+
+    const where: Prisma.AuditLogWhereInput = {
+      entityName: 'error_monitor',
+    };
+
+    if (payload.source) {
+      where.entityId = payload.source;
+    }
+
+    let olderThanDate: Date | null = null;
+    if (!shouldClearAll) {
+      olderThanDate = new Date(Date.now() - olderThanDays * 24 * 60 * 60 * 1000);
+      where.createdAt = { lt: olderThanDate };
+    }
+
+    const deleted = await prisma.auditLog.deleteMany({ where });
+
+    res.status(200).json({
+      ok: true,
+      deletedCount: deleted.count,
+      clearAll: shouldClearAll,
+      olderThanDays: shouldClearAll ? null : olderThanDays,
+      olderThanDate: shouldClearAll ? null : olderThanDate?.toISOString() ?? null,
+      source: payload.source ?? null,
+    });
   },
 };

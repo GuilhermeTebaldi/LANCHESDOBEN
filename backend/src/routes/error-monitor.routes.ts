@@ -7,3 +7,4 @@ export const errorMonitorRouter = Router();
 
 errorMonitorRouter.get('/events', asyncHandler(errorMonitorController.list));
 errorMonitorRouter.post('/events', asyncHandler(errorMonitorController.report));
+errorMonitorRouter.delete('/events', asyncHandler(errorMonitorController.clear));

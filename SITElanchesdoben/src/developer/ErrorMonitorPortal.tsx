@@ -1,6 +1,7 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import {
+  clearErrorEvents,
   fetchErrorEvents,
   reportErrorEvent,
   type ErrorMonitorEntry,
@@ -9,6 +10,7 @@ import {
 const PASSWORD_STORAGE_KEY = 'lanchesdoben_error_monitor_password_v1';
 const SOURCE_FILTER_ALL = '__all__';
 const AUTO_REFRESH_INTERVAL_MS = 12_000;
+const DEFAULT_CLEAR_OLDER_THAN_DAYS = 7;
 
 const formatDateTime = (value: string): string => {
   const parsed = new Date(value);
@@ -55,10 +57,18 @@ export default function ErrorMonitorPortal() {
   const [passwordInput, setPasswordInput] = useState(readStoredPassword);
   const [password, setPassword] = useState(readStoredPassword);
   const [events, setEvents] = useState<ErrorMonitorEntry[]>([]);
+  const [newEventIds, setNewEventIds] = useState<string[]>([]);
   const [sourceFilter, setSourceFilter] = useState(SOURCE_FILTER_ALL);
   const [isLoading, setIsLoading] = useState(false);
+  const [isClearing, setIsClearing] = useState(false);
+  const [clearOlderThanDaysInput, setClearOlderThanDaysInput] = useState(
+    String(DEFAULT_CLEAR_OLDER_THAN_DAYS)
+  );
   const [fetchError, setFetchError] = useState('');
+  const [clearMessage, setClearMessage] = useState('');
   const [lastUpdatedAt, setLastUpdatedAt] = useState<string | null>(null);
+  const seenEventIdsRef = useRef<Set<string>>(new Set());
+  const hasInitializedSeenIdsRef = useRef(false);
 
   const loadEvents = useCallback(
     async (options: { silent?: boolean } = {}) => {
@@ -68,6 +78,24 @@ export default function ErrorMonitorPortal() {
       }
       try {
         const loadedEvents = await fetchErrorEvents(password, { limit: 300 });
+        const loadedEventIds = loadedEvents.map((entry) => entry.id);
+        if (!hasInitializedSeenIdsRef.current) {
+          seenEventIdsRef.current = new Set(loadedEventIds);
+          hasInitializedSeenIdsRef.current = true;
+          setNewEventIds([]);
+        } else {
+          const justArrivedEventIds = loadedEventIds.filter(
+            (entryId) => !seenEventIdsRef.current.has(entryId)
+          );
+          setNewEventIds(justArrivedEventIds);
+
+          loadedEventIds.forEach((entryId) => {
+            seenEventIdsRef.current.add(entryId);
+          });
+          if (seenEventIdsRef.current.size > 2000) {
+            seenEventIdsRef.current = new Set(loadedEventIds);
+          }
+        }
         setEvents(loadedEvents);
         setFetchError('');
         setLastUpdatedAt(new Date().toISOString());
@@ -118,6 +146,8 @@ export default function ErrorMonitorPortal() {
     return events.filter((event) => event.source === sourceFilter);
   }, [events, sourceFilter]);
 
+  const newEventIdSet = useMemo(() => new Set(newEventIds), [newEventIds]);
+
   const summary = useMemo(() => {
     let errors = 0;
     let warns = 0;
@@ -137,10 +167,65 @@ export default function ErrorMonitorPortal() {
     return { errors, warns, infos };
   }, [filteredEvents]);
 
+  const handleClearEvents = useCallback(
+    async (clearAll: boolean) => {
+      if (!password.trim()) return;
+      const source = sourceFilter === SOURCE_FILTER_ALL ? undefined : sourceFilter;
+      const parsedDays = Number(clearOlderThanDaysInput);
+      const olderThanDays =
+        Number.isFinite(parsedDays) && parsedDays >= 1
+          ? Math.min(Math.floor(parsedDays), 3650)
+          : DEFAULT_CLEAR_OLDER_THAN_DAYS;
+
+      const confirmationMessage = clearAll
+        ? 'Confirma remover todos os eventos do monitor?'
+        : `Confirma remover eventos com mais de ${olderThanDays} dia(s)?`;
+      if (!window.confirm(confirmationMessage)) return;
+
+      setIsClearing(true);
+      setClearMessage('');
+      setFetchError('');
+      try {
+        const result = await clearErrorEvents(password, {
+          clearAll,
+          olderThanDays: clearAll ? undefined : olderThanDays,
+          source,
+        });
+        setClearMessage(
+          result.deletedCount > 0
+            ? `${result.deletedCount} evento(s) removido(s) com sucesso.`
+            : 'Nenhum evento removido com esse filtro.'
+        );
+        await loadEvents();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : 'Falha ao limpar eventos.';
+        setFetchError(message);
+        reportErrorEvent({
+          source: 'site:monitor-page',
+          level: 'warn',
+          message: `Falha ao limpar monitor: ${message}`,
+          context: {
+            route: '/rede',
+            clearAll,
+            olderThanDays: clearAll ? null : olderThanDays,
+            source: source || null,
+          },
+        });
+      } finally {
+        setIsClearing(false);
+      }
+    },
+    [clearOlderThanDaysInput, loadEvents, password, sourceFilter]
+  );
+
   const handleLogin = (event: React.FormEvent) => {
     event.preventDefault();
     const normalizedPassword = passwordInput.trim();
     setPassword(normalizedPassword);
+    seenEventIdsRef.current = new Set();
+    hasInitializedSeenIdsRef.current = false;
+    setNewEventIds([]);
+    setClearMessage('');
     writeStoredPassword(normalizedPassword);
     setFetchError('');
   };
@@ -149,7 +234,11 @@ export default function ErrorMonitorPortal() {
     setPassword('');
     setPasswordInput('');
     setEvents([]);
+    setNewEventIds([]);
     setFetchError('');
+    setClearMessage('');
+    seenEventIdsRef.current = new Set();
+    hasInitializedSeenIdsRef.current = false;
     writeStoredPassword('');
   };
 
@@ -242,8 +331,43 @@ export default function ErrorMonitorPortal() {
             <span className="rounded-md bg-white/10 px-2 py-1 text-neutral-200">
               Última atualização: {lastUpdatedAt ? formatDateTime(lastUpdatedAt) : '-'}
             </span>
+            {newEventIds.length > 0 ? (
+              <span className="rounded-md bg-emerald-500/20 px-2 py-1 text-emerald-200">
+                Novos: {newEventIds.length}
+              </span>
+            ) : null}
           </div>
 
+          <div className="mt-4 flex flex-wrap items-center gap-2 text-xs">
+            <label className="text-neutral-300">Limpar eventos com mais de</label>
+            <input
+              type="number"
+              min={1}
+              max={3650}
+              value={clearOlderThanDaysInput}
+              onChange={(event) => setClearOlderThanDaysInput(event.target.value)}
+              className="w-24 rounded-lg border border-white/20 bg-neutral-800 px-2 py-1.5 text-neutral-100"
+            />
+            <span className="text-neutral-300">dia(s)</span>
+            <button
+              type="button"
+              onClick={() => void handleClearEvents(false)}
+              disabled={isClearing}
+              className="rounded-lg border border-amber-400/60 bg-amber-950/40 px-3 py-1.5 text-amber-100 hover:bg-amber-900/50 disabled:opacity-50"
+            >
+              {isClearing ? 'Limpando...' : 'Limpar antigos'}
+            </button>
+            <button
+              type="button"
+              onClick={() => void handleClearEvents(true)}
+              disabled={isClearing}
+              className="rounded-lg border border-red-400/70 bg-red-950/40 px-3 py-1.5 text-red-100 hover:bg-red-900/50 disabled:opacity-50"
+            >
+              {isClearing ? 'Limpando...' : 'Limpar tudo'}
+            </button>
+          </div>
+
+          {clearMessage ? <p className="mt-3 text-sm text-emerald-300">{clearMessage}</p> : null}
           {fetchError ? <p className="mt-3 text-sm text-red-300">{fetchError}</p> : null}
           {isLoading ? <p className="mt-3 text-sm text-neutral-300">Carregando eventos...</p> : null}
         </div>
@@ -262,6 +386,7 @@ export default function ErrorMonitorPortal() {
             const statusCode = entry.metadata?.statusCode;
             const stack = entry.metadata?.stack;
             const context = entry.metadata?.context;
+            const isNew = newEventIdSet.has(entry.id);
 
             const levelClass =
               level === 'warn'
@@ -271,10 +396,28 @@ export default function ErrorMonitorPortal() {
                   : 'bg-red-500/20 text-red-200';
 
             return (
-              <article key={entry.id} className="rounded-2xl border border-white/10 bg-neutral-900 p-4">
+              <article
+                key={entry.id}
+                className={`relative rounded-2xl border bg-neutral-900 p-4 pl-5 ${
+                  isNew
+                    ? 'border-emerald-400/50 shadow-[0_0_0_1px_rgba(52,211,153,0.35)]'
+                    : 'border-white/10'
+                }`}
+              >
+                {isNew ? (
+                  <span
+                    aria-hidden
+                    className="absolute left-0 top-0 h-full w-1.5 rounded-l-2xl bg-emerald-400"
+                  />
+                ) : null}
                 <div className="flex flex-wrap items-center gap-2 text-xs">
                   <span className={`rounded px-2 py-1 uppercase ${levelClass}`}>{level}</span>
                   <span className="rounded bg-white/10 px-2 py-1 text-neutral-200">{entry.source}</span>
+                  {isNew ? (
+                    <span className="rounded bg-emerald-500/20 px-2 py-1 font-semibold uppercase text-emerald-200">
+                      Novo
+                    </span>
+                  ) : null}
                   <span className="rounded bg-white/10 px-2 py-1 text-neutral-200">
                     {formatDateTime(entry.createdAt)}
                   </span>

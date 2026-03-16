@@ -24,6 +24,14 @@ const isExpectedStateVersionConflict = (req: Request, statusCode: number, messag
   return normalizedMessage.includes('conflito de versão') || normalizedMessage.includes('token de estado');
 };
 
+const isExpectedErrorMonitorAuthFailure = (req: Request, statusCode: number, message: string): boolean => {
+  if (statusCode !== 401) return false;
+  const path = (req.originalUrl || req.url || '').toLowerCase();
+  if (!path.includes('/api/v1/errors/events')) return false;
+  const normalizedMessage = (message || '').toLowerCase();
+  return normalizedMessage.includes('senha inválida para monitor de erros');
+};
+
 const reportBackendErrorEvent = (req: Request, input: BackendErrorMonitorInput): void => {
   const requestPath = `${req.method.toUpperCase()} ${req.originalUrl || req.url || ''}`.trim();
   void new AuditService(prisma)
@@ -156,7 +164,9 @@ export const errorMiddleware = (error: unknown, req: Request, res: Response, _ne
   }
 
   reportBackendErrorEvent(req, {
-    level: isExpectedStateVersionConflict(req, httpError.statusCode, httpError.message)
+    level:
+      isExpectedErrorMonitorAuthFailure(req, httpError.statusCode, httpError.message) ||
+      isExpectedStateVersionConflict(req, httpError.statusCode, httpError.message)
       ? 'info'
       : httpError.statusCode >= 500
         ? 'error'

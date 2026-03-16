@@ -74,6 +74,14 @@
       "destination": "/sistema/index.html"
     },
     {
+      "source": "/rede",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/rede/:path*",
+      "destination": "/index.html"
+    },
+    {
       "source": "/:path*",
       "destination": "/index.html"
     }

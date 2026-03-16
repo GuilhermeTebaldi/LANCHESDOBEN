@@ -1,0 +1,39 @@
+{
+  "installCommand": "npm ci",
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "rewrites": [
+    {
+      "source": "/assets/:path*",
+      "destination": "/assets/:path*"
+    },
+    {
+      "source": "/favicon.ico",
+      "destination": "/favicon.ico"
+    },
+    {
+      "source": "/robots.txt",
+      "destination": "/robots.txt"
+    },
+    {
+      "source": "/rede",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/rede/:path*",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/desenvolvedor",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/desenvolvedor/:path*",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/:path*",
+      "destination": "/index.html"
+    }
+  ]
+}
