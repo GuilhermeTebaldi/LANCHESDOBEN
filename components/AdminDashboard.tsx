@@ -27,7 +27,7 @@ import {
 } from '../types';
 import { APP_ORIGINS, buildAppChannelSummary } from '../utils/appChannelSummary';
 import { DASHBOARD_CHART_COLORS, DASHBOARD_TOOLTIP_STYLE } from '../utils/chartTheme';
-import { formatIngredientStockQuantity, formatStockQuantityByUnit } from '../utils/recipe';
+import { calculateRecipeCost, formatIngredientStockQuantity, formatStockQuantityByUnit } from '../utils/recipe';
 import AdminSalesAnalyticsTab from './AdminSalesAnalyticsTab';
 
 interface AdminDashboardProps {
@@ -234,6 +234,15 @@ interface IngredientCostConsumerEntry {
   share: number;
 }
 
+interface ProductCostConsumerEntry {
+  id: string;
+  name: string;
+  totalCost: number;
+  saleCount: number;
+  avgCostPerSale: number;
+  share: number;
+}
+
 const isAppOrigin = (origin: SaleOrigin): boolean =>
   origin === 'IFOOD' || origin === 'APP99' || origin === 'KEETA';
 
@@ -330,6 +339,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [selectedEstoqueYear, setSelectedEstoqueYear] = useState<string | null>(null);
   const [selectedMateriaisYear, setSelectedMateriaisYear] = useState<string | null>(null);
   const [isStockCostPopoverOpen, setIsStockCostPopoverOpen] = useState(false);
+  const [stockCostPopoverMode, setStockCostPopoverMode] = useState<'products' | 'ingredients'>('ingredients');
   const stockCostPopoverRef = useRef<HTMLDivElement | null>(null);
   const stockCostPopoverButtonRef = useRef<HTMLButtonElement | null>(null);
 
@@ -427,6 +437,109 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const stockOutCost = stockOutCostBreakdown.total;
   const cleaningStockOutCost = cleaningStockCostBreakdown.total;
   const operationalExtraCost = roundMoney(stockOutCost + cleaningStockOutCost);
+  const productById = useMemo(() => {
+    const map = new Map<string, Product>();
+    allProducts.forEach((product) => {
+      map.set(product.id, product);
+    });
+    return map;
+  }, [allProducts]);
+  const productBaseCostById = useMemo(() => {
+    const map = new Map<string, number>();
+    allProducts.forEach((product) => {
+      const baseCost = roundMoney(calculateRecipeCost(allIngredients, product.recipe || []).totalCost);
+      map.set(product.id, baseCost);
+    });
+    return map;
+  }, [allProducts, allIngredients]);
+  const productCostConsumerBreakdown = useMemo(() => {
+    const grouped = new Map<string, { id: string; name: string; totalCost: number; saleCount: number }>();
+    let total = 0;
+
+    const addProductCost = (productId: string, productName: string, cost: number) => {
+      if (!Number.isFinite(cost) || cost <= 0) return;
+      const current = grouped.get(productId) || {
+        id: productId,
+        name: productName,
+        totalCost: 0,
+        saleCount: 0,
+      };
+      current.totalCost = roundMoney(current.totalCost + cost);
+      current.saleCount += 1;
+      grouped.set(productId, current);
+    };
+
+    sales.forEach((sale) => {
+      const saleName = (sale.productName || '').trim();
+      const saleRevenueReference = Math.max(0, Number(sale.total) || 0);
+      const saleCost = normalizeLegacySaleCost(Number(sale.totalCost) || 0, saleRevenueReference);
+      if (!Number.isFinite(saleCost) || saleCost <= 0) return;
+      total = roundMoney(total + saleCost);
+
+      const saleProduct = sale.productId ? productById.get(sale.productId) : undefined;
+      const hasComboItems = Boolean(saleProduct?.comboItems && saleProduct.comboItems.length > 0);
+      const isComboByCatalog = Boolean(
+        saleProduct && (saleProduct.category === 'Combo' || hasComboItems)
+      );
+      const isComboByName = saleName.toLocaleLowerCase('pt-BR').includes('combo');
+      const isComboSale = isComboByCatalog || isComboByName;
+
+      if (isComboSale && hasComboItems && saleProduct) {
+        const expanded = saleProduct.comboItems
+          .map((item) => {
+            const qty = Number(item.quantity);
+            if (!Number.isFinite(qty) || qty <= 0) return null;
+            const child = productById.get(item.productId);
+            const childName = (child?.name || item.productId || 'Produto').trim();
+            const childKey = item.productId || `product:${childName.toLocaleLowerCase('pt-BR')}`;
+            const childBaseCost = Math.max(0, Number(productBaseCostById.get(item.productId) || 0));
+            const weight = childBaseCost > 0 ? childBaseCost * qty : qty;
+            if (!Number.isFinite(weight) || weight <= 0) return null;
+            return { key: childKey, name: childName || 'Produto', weight };
+          })
+          .filter((item): item is { key: string; name: string; weight: number } => item !== null);
+
+        if (expanded.length > 0) {
+          const totalWeight = expanded.reduce((sum, item) => sum + item.weight, 0);
+          if (totalWeight > 0) {
+            let allocated = 0;
+            expanded.forEach((item, index) => {
+              const isLast = index === expanded.length - 1;
+              const proportional = roundMoney((saleCost * item.weight) / totalWeight);
+              const allocatedCost = isLast
+                ? roundMoney(Math.max(0, saleCost - allocated))
+                : proportional;
+              if (allocatedCost <= 0) return;
+              allocated = roundMoney(allocated + allocatedCost);
+              addProductCost(item.key, item.name, allocatedCost);
+            });
+            return;
+          }
+        }
+      }
+
+      const productName = saleName || 'Produto sem nome';
+      const productId = sale.productId || `product:${productName.toLocaleLowerCase('pt-BR')}`;
+      addProductCost(productId, productName, saleCost);
+    });
+
+    const entries: ProductCostConsumerEntry[] = [...grouped.values()]
+      .sort((a, b) => b.totalCost - a.totalCost)
+      .slice(0, 5)
+      .map((entry) => ({
+        id: entry.id,
+        name: entry.name,
+        totalCost: entry.totalCost,
+        saleCount: entry.saleCount,
+        avgCostPerSale: entry.saleCount > 0 ? roundMoney(entry.totalCost / entry.saleCount) : 0,
+        share: total > 0 ? entry.totalCost / total : 0,
+      }));
+
+    return {
+      totalCost: total,
+      entries,
+    };
+  }, [sales, productById, productBaseCostById]);
   const ingredientCostConsumerBreakdown = useMemo(() => {
     const grouped = new Map<
       string,
@@ -1011,22 +1124,54 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     ref={stockCostPopoverRef}
                     className="absolute bottom-2 right-2 w-[260px] max-w-[calc(100%-16px)] rounded-2xl border border-slate-200 bg-white/95 backdrop-blur px-3 py-3 shadow-xl"
                   >
-                    <p className="text-[9px] font-black text-slate-500 uppercase tracking-widest">
-                      Ingredientes que mais consomem custo
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setStockCostPopoverMode('products')}
+                        className={`rounded-lg border px-2 py-1 text-[9px] font-black uppercase tracking-widest transition ${
+                          stockCostPopoverMode === 'products'
+                            ? 'border-slate-700 bg-slate-800 text-white'
+                            : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                        }`}
+                      >
+                        Produtos
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setStockCostPopoverMode('ingredients')}
+                        className={`rounded-lg border px-2 py-1 text-[9px] font-black uppercase tracking-widest transition ${
+                          stockCostPopoverMode === 'ingredients'
+                            ? 'border-slate-700 bg-slate-800 text-white'
+                            : 'border-slate-200 bg-white text-slate-600 hover:bg-slate-50'
+                        }`}
+                      >
+                        Ingredientes
+                      </button>
+                    </div>
+                    <p className="text-[9px] font-black text-slate-500 uppercase tracking-widest mt-2">
+                      {stockCostPopoverMode === 'products'
+                        ? 'Produtos que mais consomem custo'
+                        : 'Ingredientes que mais consomem custo'}
                     </p>
                     <p className="text-[10px] font-black text-slate-700 uppercase mt-1">
-                      Top ingredientes de venda • R$ {ingredientCostConsumerBreakdown.totalCost.toFixed(2)}
+                      {stockCostPopoverMode === 'products'
+                        ? `Top produtos • R$ ${productCostConsumerBreakdown.totalCost.toFixed(2)}`
+                        : `Top ingredientes • R$ ${ingredientCostConsumerBreakdown.totalCost.toFixed(2)}`}
                     </p>
                     <p className="text-[9px] font-black text-slate-500 uppercase mt-1">
                       Custo total e media por venda
                     </p>
-                  {ingredientCostConsumerBreakdown.entries.length === 0 ? (
+                  {(stockCostPopoverMode === 'products'
+                    ? productCostConsumerBreakdown.entries.length === 0
+                    : ingredientCostConsumerBreakdown.entries.length === 0) ? (
                       <p className="mt-2 text-[10px] font-bold uppercase tracking-widest text-slate-400">
                         Sem vendas registradas
                       </p>
                     ) : (
                       <div className="mt-2 space-y-2">
-                      {ingredientCostConsumerBreakdown.entries.map((item, index) => (
+                      {(stockCostPopoverMode === 'products'
+                        ? productCostConsumerBreakdown.entries
+                        : ingredientCostConsumerBreakdown.entries).map((item, index) => (
                           <div key={item.id}>
                             <div className="flex items-center justify-between gap-2">
                               <p className="text-[10px] font-black text-slate-700 truncate">
