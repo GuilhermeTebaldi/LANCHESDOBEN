@@ -15,6 +15,9 @@ import type {
 import { DEFAULT_APP_STATE, type AppState } from './appStorage';
 
 const API_TIMEOUT_MS = 12000;
+const COMMAND_MAX_ATTEMPTS = 4;
+const COMMAND_RETRY_BASE_DELAY_MS = 450;
+const COMMAND_RETRY_MAX_DELAY_MS = 4000;
 const DEFAULT_API_BASE_URL = 'https://xburger-backend.onrender.com';
 
 type BaseCommand = {
@@ -174,6 +177,17 @@ const isRetryableHttpStatus = (statusCode: number): boolean =>
   statusCode === 428 ||
   statusCode === 429 ||
   statusCode >= 500;
+
+const wait = (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    globalThis.setTimeout(resolve, Math.max(0, ms));
+  });
+
+const getRetryDelayMs = (attempt: number): number => {
+  const safeAttempt = Math.max(0, Math.floor(attempt));
+  const exponential = COMMAND_RETRY_BASE_DELAY_MS * 2 ** safeAttempt;
+  return Math.min(COMMAND_RETRY_MAX_DELAY_MS, exponential);
+};
 
 const asRetryableNetworkError = (error: unknown): StateCommandSyncError => {
   if (error instanceof StateCommandSyncError) return error;
@@ -367,6 +381,7 @@ const normalizeAppState = (payload: unknown): AppState => {
 interface ApiErrorPayload {
   error?: string;
   message?: string;
+  requestId?: string;
   details?: {
     fieldErrors?: Record<string, string[] | undefined>;
     formErrors?: string[];
@@ -393,11 +408,15 @@ const readApiErrorMessage = async (response: Response): Promise<string> => {
   try {
     const payload = (await response.json()) as ApiErrorPayload;
     const base = payload.error || payload.message || `Falha na API (${response.status}).`;
+    const requestIdSuffix =
+      typeof payload.requestId === 'string' && payload.requestId.trim()
+        ? ` [req:${payload.requestId.trim()}]`
+        : '';
     if (base === 'Payload inválido') {
       const detail = extractValidationDetail(payload);
-      if (detail) return `${base}: ${detail}`;
+      if (detail) return `${base}: ${detail}${requestIdSuffix}`;
     }
-    return base;
+    return `${base}${requestIdSuffix}`;
   } catch {
     return `Falha na API (${response.status}).`;
   }
@@ -475,7 +494,7 @@ export const warmupStateWriteContext = async (): Promise<void> => {
 export const runStateCommand = async (command: StateCommand): Promise<AppState> => {
   const payloadCommand = withCommandId(command);
 
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  for (let attempt = 0; attempt < COMMAND_MAX_ATTEMPTS; attempt += 1) {
     await ensureWriteContext();
 
     const context = writeContext;
@@ -485,16 +504,26 @@ export const runStateCommand = async (command: StateCommand): Promise<AppState> 
       });
     }
 
-    const response = await fetchWithTimeout(getStateCommandsApiUrl(), {
-      method: 'POST',
-      headers: {
-        Accept: 'application/json',
-        'Content-Type': 'application/json',
-        'If-Match': `"${context.version}"`,
-        'X-State-Token': context.token,
-      },
-      body: JSON.stringify(payloadCommand),
-    });
+    let response: Response;
+    try {
+      response = await fetchWithTimeout(getStateCommandsApiUrl(), {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          'If-Match': `"${context.version}"`,
+          'X-State-Token': context.token,
+        },
+        body: JSON.stringify(payloadCommand),
+      });
+    } catch (error) {
+      const syncError = asRetryableNetworkError(error);
+      if (syncError.retryable && attempt < COMMAND_MAX_ATTEMPTS - 1) {
+        await wait(getRetryDelayMs(attempt));
+        continue;
+      }
+      throw syncError;
+    }
 
     if (response.ok) {
       writeContext = readContextFromResponse(response);
@@ -502,12 +531,20 @@ export const runStateCommand = async (command: StateCommand): Promise<AppState> 
       return normalizeAppState(payload);
     }
 
-    if ((response.status === 401 || response.status === 412 || response.status === 428) && attempt === 0) {
+    if (response.status === 401 || response.status === 412 || response.status === 428) {
       writeContext = null;
-      continue;
+      if (attempt < COMMAND_MAX_ATTEMPTS - 1) {
+        await wait(getRetryDelayMs(attempt));
+        continue;
+      }
     }
 
-    throw await toApiError(response);
+    const apiError = await toApiError(response);
+    if (apiError.retryable && attempt < COMMAND_MAX_ATTEMPTS - 1) {
+      await wait(getRetryDelayMs(attempt));
+      continue;
+    }
+    throw apiError;
   }
 
   throw new StateCommandSyncError('Não foi possível sincronizar o comando de estado.', {

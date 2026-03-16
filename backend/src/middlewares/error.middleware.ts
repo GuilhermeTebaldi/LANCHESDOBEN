@@ -33,6 +33,28 @@ export const errorMiddleware = (error: unknown, req: Request, res: Response, _ne
       });
       return;
     }
+
+    if (error.code === 'P2024' || error.code === 'P2034') {
+      res.status(503).json({
+        error: 'Banco temporariamente ocupado. Tente novamente em instantes.',
+        requestId: req.context?.requestId,
+      });
+      return;
+    }
+  }
+
+  if (error instanceof Prisma.PrismaClientInitializationError) {
+    const errorCode =
+      typeof (error as { errorCode?: unknown }).errorCode === 'string'
+        ? (error as { errorCode: string }).errorCode
+        : null;
+    if (errorCode === 'P1001' || errorCode === 'P1002' || errorCode === 'P1017') {
+      res.status(503).json({
+        error: 'Banco temporariamente indisponível. Tente novamente em instantes.',
+        requestId: req.context?.requestId,
+      });
+      return;
+    }
   }
 
   const httpError = isHttpError(error) ? error : new HttpError(500, 'Erro interno do servidor.');

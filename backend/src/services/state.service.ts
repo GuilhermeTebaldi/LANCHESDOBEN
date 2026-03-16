@@ -87,6 +87,20 @@ const normalizeStatePayloadSafe = (value: unknown): FrontAppState => {
 };
 
 const toVersionTag = (value: Date): string => value.toISOString();
+const APPLY_COMMAND_MAX_ATTEMPTS = 3;
+const APPLY_COMMAND_RETRY_BASE_DELAY_MS = 120;
+const APPLY_COMMAND_RETRY_MAX_DELAY_MS = 900;
+
+const wait = (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    setTimeout(resolve, Math.max(0, ms));
+  });
+
+const getApplyCommandRetryDelayMs = (attempt: number): number => {
+  const safeAttempt = Math.max(0, Math.floor(attempt));
+  const exponential = APPLY_COMMAND_RETRY_BASE_DELAY_MS * 2 ** safeAttempt;
+  return Math.min(APPLY_COMMAND_RETRY_MAX_DELAY_MS, exponential);
+};
 
 interface HotStatePatch {
   ingredients: FrontAppState['ingredients'];
@@ -189,16 +203,25 @@ export class StateService {
     expectedVersion: string,
     context?: RequestContext
   ): Promise<AppStateSnapshot> {
-    try {
-      return await this.applyCommandSnapshot(command, expectedVersion, context);
-    } catch (error) {
-      if (!this.isMissingAppStateTableError(error)) {
-        throw error;
-      }
+    for (let attempt = 0; attempt < APPLY_COMMAND_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        return await this.applyCommandSnapshot(command, expectedVersion, context);
+      } catch (error) {
+        if (this.isMissingAppStateTableError(error)) {
+          await this.bootstrapAppStateTables();
+          continue;
+        }
 
-      await this.bootstrapAppStateTables();
-      return this.applyCommandSnapshot(command, expectedVersion, context);
+        const isLastAttempt = attempt >= APPLY_COMMAND_MAX_ATTEMPTS - 1;
+        if (!this.isRetryableApplyCommandError(error) || isLastAttempt) {
+          throw error;
+        }
+
+        await wait(getApplyCommandRetryDelayMs(attempt));
+      }
     }
+
+    throw new HttpError(503, 'Banco temporariamente indisponível para salvar estado.');
   }
 
   async runDailyBackup(context?: RequestContext): Promise<DailyBackupResult> {
@@ -217,6 +240,22 @@ export class StateService {
 
   private isMissingAppStateTableError(error: unknown): boolean {
     return error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2021';
+  }
+
+  private isRetryableApplyCommandError(error: unknown): boolean {
+    if (error instanceof Prisma.PrismaClientKnownRequestError) {
+      return error.code === 'P2024' || error.code === 'P2034';
+    }
+
+    if (error instanceof Prisma.PrismaClientInitializationError) {
+      const errorCode =
+        typeof (error as { errorCode?: unknown }).errorCode === 'string'
+          ? (error as { errorCode: string }).errorCode
+          : null;
+      return errorCode === 'P1001' || errorCode === 'P1002' || errorCode === 'P1017';
+    }
+
+    return false;
   }
 
   private async bootstrapAppStateTables(): Promise<void> {
@@ -416,7 +455,8 @@ export class StateService {
         tx,
         saved.stateJson as Prisma.JsonValue,
         toVersionTag(saved.updatedAt),
-        operationNow
+        operationNow,
+        { refreshExisting: false }
       );
 
       await new AuditService(tx).log(
@@ -535,8 +575,10 @@ export class StateService {
     tx: Prisma.TransactionClient,
     stateJson: Prisma.JsonValue,
     sourceVersion: string,
-    referenceDate: Date
+    referenceDate: Date,
+    options: { refreshExisting?: boolean } = {}
   ): Promise<boolean> {
+    const shouldRefreshExisting = options.refreshExisting !== false;
     const backupDay = toBackupDay(referenceDate, env.DEFAULT_TIMEZONE);
     const created = await tx.appStateBackup.createMany({
       data: {
@@ -550,6 +592,10 @@ export class StateService {
 
     if (created.count > 0) {
       return true;
+    }
+
+    if (!shouldRefreshExisting) {
+      return false;
     }
 
     await tx.appStateBackup.update({
