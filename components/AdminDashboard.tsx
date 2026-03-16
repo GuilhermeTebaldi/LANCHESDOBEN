@@ -225,6 +225,14 @@ interface ConsolidatedArchiveFinance {
   profit: number;
 }
 
+interface StockCostConsumerEntry {
+  id: string;
+  name: string;
+  totalCost: number;
+  movements: number;
+  share: number;
+}
+
 const isAppOrigin = (origin: SaleOrigin): boolean =>
   origin === 'IFOOD' || origin === 'APP99' || origin === 'KEETA';
 
@@ -415,6 +423,50 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const stockOutCost = stockOutCostBreakdown.total;
   const cleaningStockOutCost = cleaningStockCostBreakdown.total;
   const operationalExtraCost = roundMoney(stockOutCost + cleaningStockOutCost);
+  const stockCostConsumerBreakdown = useMemo(() => {
+    const grouped = new Map<string, { id: string; name: string; totalCost: number; movements: number }>();
+    let total = 0;
+
+    stockEntries.forEach((entry) => {
+      const quantity = Number(entry.quantity);
+      if (!Number.isFinite(quantity) || quantity >= 0) return;
+
+      const ingredient = allIngredients.find((item) => item.id === entry.ingredientId);
+      const rawUnitCost = Number(entry.unitCost ?? ingredient?.cost ?? 0);
+      if (!Number.isFinite(rawUnitCost) || rawUnitCost <= 0) return;
+
+      const normalizedUnitCost = normalizeIngredientCostForReport(ingredient, rawUnitCost);
+      const impact = roundMoney(Math.abs(quantity) * normalizedUnitCost);
+      if (!Number.isFinite(impact) || impact <= 0) return;
+
+      const ingredientId = entry.ingredientId || `unknown-${entry.ingredientName || entry.id}`;
+      const ingredientName = ingredient?.name || entry.ingredientName || 'Insumo sem nome';
+      const current = grouped.get(ingredientId) || {
+        id: ingredientId,
+        name: ingredientName,
+        totalCost: 0,
+        movements: 0,
+      };
+
+      current.totalCost = roundMoney(current.totalCost + impact);
+      current.movements += 1;
+      grouped.set(ingredientId, current);
+      total = roundMoney(total + impact);
+    });
+
+    const entries: StockCostConsumerEntry[] = [...grouped.values()]
+      .sort((a, b) => b.totalCost - a.totalCost)
+      .slice(0, 5)
+      .map((entry) => ({
+        ...entry,
+        share: total > 0 ? entry.totalCost / total : 0,
+      }));
+
+    return {
+      totalCost: total,
+      entries,
+    };
+  }, [stockEntries, allIngredients]);
   const appChannelSummary = useMemo(() => buildAppChannelSummary(sales), [sales]);
   // KPI principal da aba GERAL: custo e lucro das vendas (COGS), sem misturar saídas operacionais.
   const totalCost = salesCost;
@@ -873,7 +925,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   Comparativo entre entradas, custos e lucro
                 </p>
               </div>
-              <div className="h-[280px]">
+              <div className="h-[280px] relative">
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={flowFinanceData}>
                     <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={DASHBOARD_CHART_COLORS.grid} />
@@ -893,6 +945,40 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     </Bar>
                   </BarChart>
                 </ResponsiveContainer>
+                <div className="absolute bottom-2 right-2 w-[260px] max-w-[calc(100%-16px)] rounded-2xl border border-slate-200 bg-white/95 backdrop-blur px-3 py-3 shadow-xl">
+                  <p className="text-[9px] font-black text-slate-500 uppercase tracking-widest">
+                    Itens que mais consomem custo
+                  </p>
+                  <p className="text-[10px] font-black text-slate-700 uppercase mt-1">
+                    Top estoque • R$ {stockCostConsumerBreakdown.totalCost.toFixed(2)}
+                  </p>
+                  {stockCostConsumerBreakdown.entries.length === 0 ? (
+                    <p className="mt-2 text-[10px] font-bold uppercase tracking-widest text-slate-400">
+                      Sem baixas de estoque
+                    </p>
+                  ) : (
+                    <div className="mt-2 space-y-2">
+                      {stockCostConsumerBreakdown.entries.map((item, index) => (
+                        <div key={item.id}>
+                          <div className="flex items-center justify-between gap-2">
+                            <p className="text-[10px] font-black text-slate-700 truncate">
+                              {index + 1}. {item.name}
+                            </p>
+                            <p className="text-[10px] font-black text-red-600 whitespace-nowrap">
+                              R$ {item.totalCost.toFixed(2)}
+                            </p>
+                          </div>
+                          <div className="h-1.5 rounded-full bg-slate-200 overflow-hidden mt-1">
+                            <div
+                              className="h-full rounded-full bg-gradient-to-r from-red-500 via-orange-500 to-amber-400"
+                              style={{ width: `${Math.max(8, Math.min(100, item.share * 100))}%` }}
+                            />
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
 
