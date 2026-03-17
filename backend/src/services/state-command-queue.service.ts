@@ -3,6 +3,10 @@ import { Prisma } from '@prisma/client';
 import { env } from '../config/env.js';
 import { prisma } from '../db/prisma.js';
 import type { RequestContext } from '../types/request-context.js';
+import {
+  classifyDatabaseUnavailableError,
+  isDatabaseUnavailableError,
+} from '../utils/database-unavailable.js';
 import { HttpError, isHttpError } from '../utils/http-error.js';
 import { stateCommandSchema, type StateCommandInput } from '../validators/state-command.validator.js';
 import { StateService } from './state.service.js';
@@ -19,16 +23,6 @@ export type StateCommandJobStatus =
   (typeof STATE_COMMAND_JOB_STATUS)[keyof typeof STATE_COMMAND_JOB_STATUS];
 
 const RETRYABLE_HTTP_STATUS = new Set([408, 412, 425, 429, 500, 502, 503, 504]);
-const DATABASE_UNAVAILABLE_PRISMA_CODES = new Set(['P1001', 'P1002', 'P1017']);
-const DATABASE_UNAVAILABLE_MESSAGE_PATTERNS = [
-  "can't reach database server",
-  'database system is not yet accepting connections',
-  'consistent recovery state has not been yet reached',
-  'the database system is starting up',
-  'server has closed the connection',
-  'connection terminated unexpectedly',
-  'connection reset by peer',
-];
 const QUEUEABLE_COMMAND_TYPES = new Set<StateCommandInput['type']>(['SALE_DRAFT_CONFIRM_PAID']);
 if (env.STATE_COMMAND_QUEUE_ENABLE_FINALIZE) {
   QUEUEABLE_COMMAND_TYPES.add('SALE_DRAFT_FINALIZE');
@@ -129,33 +123,7 @@ const truncateErrorMessage = (message: string): string =>
   message.length <= 1200 ? message : message.slice(0, 1197).concat('...');
 
 export const isDatabaseUnavailableQueueError = (error: unknown): boolean => {
-  if (error instanceof HttpError) {
-    return error.statusCode === 503;
-  }
-
-  if (error instanceof Prisma.PrismaClientKnownRequestError) {
-    if (DATABASE_UNAVAILABLE_PRISMA_CODES.has(error.code)) return true;
-  }
-
-  if (error instanceof Prisma.PrismaClientInitializationError) {
-    const code =
-      typeof (error as { errorCode?: unknown }).errorCode === 'string'
-        ? (error as { errorCode: string }).errorCode
-        : null;
-    if (code && DATABASE_UNAVAILABLE_PRISMA_CODES.has(code)) return true;
-  }
-
-  if (
-    error instanceof Prisma.PrismaClientUnknownRequestError ||
-    error instanceof Error
-  ) {
-    const normalized = error.message.toLowerCase();
-    return DATABASE_UNAVAILABLE_MESSAGE_PATTERNS.some((pattern) =>
-      normalized.includes(pattern)
-    );
-  }
-
-  return false;
+  return isDatabaseUnavailableError(error);
 };
 
 const isRetryableWorkerError = (error: unknown): boolean => {
@@ -176,14 +144,6 @@ const isRetryableWorkerError = (error: unknown): boolean => {
 
   if (error instanceof Prisma.PrismaClientUnknownRequestError) {
     return error.message.includes('Transaction API error');
-  }
-
-  if (error instanceof Prisma.PrismaClientInitializationError) {
-    const code =
-      typeof (error as { errorCode?: unknown }).errorCode === 'string'
-        ? (error as { errorCode: string }).errorCode
-        : null;
-    return code === 'P1001' || code === 'P1002' || code === 'P1017';
   }
 
   return false;
@@ -353,6 +313,7 @@ export class StateCommandQueueService {
     },
     workerId: string
   ): Promise<void> {
+    let needsProcessingFallback = true;
     try {
       const parsedCommand = stateCommandSchema.parse(job.payloadJson);
       if (!parsedCommand.commandId || parsedCommand.commandId !== job.commandId) {
@@ -379,7 +340,13 @@ export class StateCommandQueueService {
           resultVersion: snapshot.version,
         },
       });
+      needsProcessingFallback = false;
     } catch (error) {
+      const databaseUnavailable = classifyDatabaseUnavailableError(error);
+      if (databaseUnavailable) {
+        throw error;
+      }
+
       const retryable = isRetryableWorkerError(error);
       const errorMessage = truncateErrorMessage(normalizeErrorMessage(error));
       const canRetry = retryable && job.attempts < job.maxAttempts;
@@ -396,6 +363,7 @@ export class StateCommandQueueService {
             lastError: errorMessage,
           },
         });
+        needsProcessingFallback = false;
         return;
       }
 
@@ -409,7 +377,9 @@ export class StateCommandQueueService {
           lastError: errorMessage,
         },
       });
+      needsProcessingFallback = false;
     } finally {
+      if (!needsProcessingFallback) return;
       await prisma.stateCommandJob.updateMany({
         where: {
           id: job.id,
