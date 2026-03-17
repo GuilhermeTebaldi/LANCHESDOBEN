@@ -817,6 +817,9 @@ const isStockRelatedErrorMessage = (message: string): boolean => {
   );
 };
 
+const isDraftEmptyErrorMessage = (message: string): boolean =>
+  message.toLowerCase().includes('carrinho está vazio');
+
 const isRetryableSyncError = (error: unknown): boolean => {
   if (error instanceof StateCommandSyncError) {
     return error.retryable;
@@ -1324,6 +1327,8 @@ const saveFailedPaidSyncQueue = (queue: PendingPaidSyncJob[]): void => {
 const PENDING_PAID_SYNC_RETRY_BASE_MS = 5000;
 const PENDING_PAID_SYNC_RETRY_MAX_MS = 15 * 60 * 1000;
 const PENDING_PAID_SYNC_RETRY_JITTER = 0.2;
+const PENDING_PAID_SYNC_EMPTY_DRAFT_RECOVERY_DELAY_MS = 600;
+const PENDING_PAID_SYNC_EMPTY_DRAFT_RECOVERY_MAX_ATTEMPTS = 2;
 const PAID_SYNC_QUEUE_PREVIEW_LIMIT = 6;
 const PENDING_DRAFT_BACKGROUND_SYNC_DEBOUNCE_MS = 650;
 const PENDING_DRAFT_BACKGROUND_SYNC_SWEEP_MS = 10000;
@@ -3816,6 +3821,77 @@ const App: React.FC = () => {
     [hydrateFailedPaidSyncQueue, replaceFailedPaidSyncQueue]
   );
 
+  const restorePendingDraftAddsFromSnapshot = useCallback(
+    (job: PendingPaidSyncJob): boolean => {
+      hydratePendingDraftAdds();
+
+      const normalizedDraftId = job.draftId.trim();
+      if (!normalizedDraftId) return false;
+
+      const snapshotItems = Array.isArray(job.snapshot.draft.items)
+        ? job.snapshot.draft.items
+        : [];
+      if (snapshotItems.length === 0) return false;
+
+      const serverDraft = saleDraftsRef.current.find((draft) => draft.id === normalizedDraftId);
+      if (serverDraft && (serverDraft.status === 'PAID' || serverDraft.status === 'CANCELLED')) {
+        return false;
+      }
+      if (serverDraft && serverDraft.items.length > 0) {
+        return true;
+      }
+
+      const currentPending = pendingDraftAddsRef.current[normalizedDraftId] || [];
+      if (currentPending.length > 0) {
+        return true;
+      }
+
+      const rebuiltPendingAdds = snapshotItems
+        .map((item) => {
+          const productId = typeof item.productId === 'string' ? item.productId.trim() : '';
+          if (!productId) return null;
+
+          const quantityRaw = Number(item.qty);
+          const quantity =
+            Number.isFinite(quantityRaw) && quantityRaw > 0
+              ? Math.max(1, Math.round(quantityRaw))
+              : 0;
+          if (quantity <= 0) return null;
+
+          const recipeOverride = normalizeRecipeOverride(item.recipe);
+          const unitPriceRaw = Number(item.unitPriceSnapshot);
+          const priceOverride =
+            Number.isFinite(unitPriceRaw) && unitPriceRaw >= 0
+              ? roundMoney(unitPriceRaw)
+              : undefined;
+          const note = typeof item.note === 'string' && item.note.trim() ? item.note.trim() : undefined;
+
+          return {
+            draftId: normalizedDraftId,
+            localItemId: createClientId('draft-item-local'),
+            commandId: createClientId('cmd'),
+            productId,
+            quantity,
+            recipeOverride,
+            priceOverride,
+            note,
+            queuedAt: new Date().toISOString(),
+          } satisfies PendingDraftAdd;
+        })
+        .filter((entry): entry is PendingDraftAdd => entry !== null);
+
+      if (rebuiltPendingAdds.length === 0) return false;
+
+      const nextPendingByDraft: PendingDraftAddsByDraftId = {
+        ...pendingDraftAddsRef.current,
+        [normalizedDraftId]: rebuiltPendingAdds,
+      };
+      replacePendingDraftAdds(nextPendingByDraft);
+      return true;
+    },
+    [hydratePendingDraftAdds, replacePendingDraftAdds]
+  );
+
   const processPendingPaidSyncQueue = useCallback(async (): Promise<void> => {
     hydratePendingPaidSyncQueue();
     if (isStateHydrating) return;
@@ -3867,6 +3943,44 @@ const App: React.FC = () => {
           const message = errorSink?.message || fallbackMessage;
           const retryable = errorSink?.retryable ?? true;
           const statusCode = errorSink?.statusCode;
+          const isEmptyDraftFailure =
+            statusCode === 422 && isDraftEmptyErrorMessage(message);
+
+          if (
+            isEmptyDraftFailure &&
+            currentJob.attempts < PENDING_PAID_SYNC_EMPTY_DRAFT_RECOVERY_MAX_ATTEMPTS
+          ) {
+            const restored = restorePendingDraftAddsFromSnapshot(currentJob);
+            if (restored) {
+              const retryAt = new Date(
+                Date.now() + PENDING_PAID_SYNC_EMPTY_DRAFT_RECOVERY_DELAY_MS
+              ).toISOString();
+              const recoveredJob: PendingPaidSyncJob = {
+                ...currentJob,
+                finalizeCommandId: createClientId('cmd'),
+                confirmCommandId: createClientId('cmd'),
+                attempts: currentJob.attempts + 1,
+                nextAttemptAt: retryAt,
+                lastError: statusCode ? `${message} (HTTP ${statusCode})` : message,
+              };
+              replacePendingPaidSyncQueue([
+                recoveredJob,
+                ...pendingPaidSyncQueueRef.current.slice(1),
+              ]);
+              showCornerSync(
+                'syncing',
+                'Carrinho recomposto. Reenviando pedido...',
+                2200
+              );
+              showNotification(
+                'A fila detectou carrinho vazio no servidor e vai tentar reconstruir o pedido automaticamente.'
+              );
+              pendingPaidSyncRetryTimerRef.current = window.setTimeout(() => {
+                void processPendingPaidSyncQueue();
+              }, PENDING_PAID_SYNC_EMPTY_DRAFT_RECOVERY_DELAY_MS);
+              return;
+            }
+          }
 
           if (!retryable) {
             const failedJob: PendingPaidSyncJob = {
@@ -4043,6 +4157,7 @@ const App: React.FC = () => {
     isRetryableSyncError,
     isStateHydrating,
     replacePendingPaidSyncQueue,
+    restorePendingDraftAddsFromSnapshot,
     runCommandWithSync,
     setDraftSyncInProgress,
     showCornerSync,
@@ -4102,11 +4217,24 @@ const App: React.FC = () => {
         return;
       }
 
+      const isEmptyDraftFailure = isDraftEmptyErrorMessage(failedJob.lastError || '');
+      if (isEmptyDraftFailure) {
+        const restored = restorePendingDraftAddsFromSnapshot(failedJob);
+        if (!restored) {
+          showNotification(
+            'Não foi possível reconstruir este carrinho automaticamente. Reabra o carrinho e confirme novamente.'
+          );
+          return;
+        }
+      }
+
       replaceFailedPaidSyncQueue(
         failedPaidSyncQueueRef.current.filter((entry) => entry.id !== normalizedJobId)
       );
       enqueuePendingPaidSyncJob({
         ...failedJob,
+        finalizeCommandId: createClientId('cmd'),
+        confirmCommandId: createClientId('cmd'),
         attempts: 0,
         nextAttemptAt: undefined,
         lastError: undefined,
@@ -4120,6 +4248,7 @@ const App: React.FC = () => {
       hydrateFailedPaidSyncQueue,
       processPendingPaidSyncQueue,
       replaceFailedPaidSyncQueue,
+      restorePendingDraftAddsFromSnapshot,
       showCornerSync,
       showNotification,
     ]
