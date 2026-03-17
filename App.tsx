@@ -45,6 +45,9 @@ import {
 import { buildReceiptPrintRoutePath } from './utils/printRoutes';
 import { clampReceiptPaperWidthMm } from './utils/receiptPaper';
 import {
+  aggregateRecipe,
+  formatIngredientStockQuantity,
+  getStockQuantityFromRecipeQuantity,
   normalizeStockMovementByUnit,
   normalizeStockQuantityByUnit,
 } from './utils/recipe';
@@ -2290,6 +2293,109 @@ const App: React.FC = () => {
     return [...mergedServerDrafts, ...pendingOnlyDrafts];
   }, [globalCancelledSales, globalSales, pendingDraftAddsByDraft, products, saleDrafts, sales]);
 
+  const reservedDraftStockByIngredient = useMemo(() => {
+    const reservedByIngredient = new Map<string, number>();
+    const ingredientById = new Map(ingredients.map((ingredient) => [ingredient.id, ingredient]));
+
+    saleDraftsWithPendingAdds.forEach((draft) => {
+      if (draft.status !== 'DRAFT' && draft.status !== 'PENDING_PAYMENT') return;
+
+      draft.items.forEach((item) => {
+        const itemQty = Number(item.qty);
+        if (!Number.isFinite(itemQty) || itemQty <= 0) return;
+
+        const recipeTotals = aggregateRecipe(item.recipe || []);
+        Object.entries(recipeTotals).forEach(([ingredientId, recipeQuantity]) => {
+          const ingredient = ingredientById.get(ingredientId);
+          if (!ingredient) return;
+
+          const stockPerUnit = getStockQuantityFromRecipeQuantity(ingredient, recipeQuantity);
+          if (!Number.isFinite(stockPerUnit) || stockPerUnit <= 0) return;
+
+          const stockRequired = Number((stockPerUnit * itemQty).toFixed(6));
+          if (!Number.isFinite(stockRequired) || stockRequired <= 0) return;
+
+          const currentReserved = reservedByIngredient.get(ingredientId) || 0;
+          reservedByIngredient.set(ingredientId, Number((currentReserved + stockRequired).toFixed(6)));
+        });
+      });
+    });
+
+    return reservedByIngredient;
+  }, [ingredients, saleDraftsWithPendingAdds]);
+
+  const ingredientsForSale = useMemo(
+    () =>
+      ingredients.map((ingredient) => {
+        const reservedQuantity = reservedDraftStockByIngredient.get(ingredient.id) || 0;
+        if (reservedQuantity <= 0) return ingredient;
+
+        const effectiveCurrentStock = Number(
+          (Number(ingredient.currentStock || 0) - reservedQuantity).toFixed(6)
+        );
+        return {
+          ...ingredient,
+          currentStock: effectiveCurrentStock > 0 ? effectiveCurrentStock : 0,
+        };
+      }),
+    [ingredients, reservedDraftStockByIngredient]
+  );
+
+  const saleIngredientById = useMemo(
+    () => new Map(ingredientsForSale.map((ingredient) => [ingredient.id, ingredient])),
+    [ingredientsForSale]
+  );
+
+  const resolveDraftItemStockIssue = useCallback(
+    (
+      recipe: RecipeItem[] | undefined,
+      quantityDelta: number
+    ): { ingredient: Ingredient; required: number; available: number } | null => {
+      const normalizedDelta = Math.max(0, Math.round(Number(quantityDelta) || 0));
+      if (normalizedDelta <= 0) return null;
+
+      const recipeTotals = aggregateRecipe(recipe || []);
+      for (const [ingredientId, recipeQuantity] of Object.entries(recipeTotals)) {
+        const ingredient = saleIngredientById.get(ingredientId);
+        if (!ingredient) continue;
+
+        const stockPerUnit = getStockQuantityFromRecipeQuantity(ingredient, recipeQuantity);
+        if (!Number.isFinite(stockPerUnit) || stockPerUnit <= 0) continue;
+
+        const required = Number((stockPerUnit * normalizedDelta).toFixed(6));
+        const available = Number(ingredient.currentStock) || 0;
+        if (available + Number.EPSILON >= required) continue;
+
+        return {
+          ingredient,
+          required,
+          available,
+        };
+      }
+
+      return null;
+    },
+    [saleIngredientById]
+  );
+
+  const notifyDraftItemStockIssue = useCallback(
+    (
+      productName: string,
+      issue: { ingredient: Ingredient; required: number; available: number }
+    ): void => {
+      const requiredLabel = `${formatIngredientStockQuantity(issue.ingredient, issue.required)} ${
+        issue.ingredient.unit
+      }`;
+      const availableLabel = `${formatIngredientStockQuantity(issue.ingredient, issue.available)} ${
+        issue.ingredient.unit
+      }`;
+      showNotification(
+        `Estoque insuficiente em ${issue.ingredient.name}. ${productName} precisa ${requiredLabel} e há ${availableLabel}.`
+      );
+    },
+    [showNotification]
+  );
+
   const openSaleDrafts = useMemo(
     () => {
       const syncingDraftIds = syncingPaidDraftIdsRef.current;
@@ -2491,7 +2597,7 @@ const App: React.FC = () => {
       recipeOverride?: RecipeItem[],
       priceOverride?: number
     ): boolean => {
-      const ingredientIdSet = new Set(ingredients.map((ingredient) => ingredient.id));
+      const ingredientIdSet = new Set(ingredientsForSale.map((ingredient) => ingredient.id));
       const recipeValidation = validateDraftItemRecipe(
         product,
         recipeOverride ?? product.recipe,
@@ -2503,6 +2609,12 @@ const App: React.FC = () => {
       }
 
       const normalizedRecipe = recipeValidation.recipe;
+      const stockIssue = resolveDraftItemStockIssue(normalizedRecipe, 1);
+      if (stockIssue) {
+        notifyDraftItemStockIssue(product.name, stockIssue);
+        return false;
+      }
+
       const normalizedPriceOverrideRaw = Number(priceOverride);
       const normalizedPriceOverride =
         Number.isFinite(normalizedPriceOverrideRaw) && normalizedPriceOverrideRaw >= 0
@@ -2546,7 +2658,13 @@ const App: React.FC = () => {
 
       return true;
     },
-    [ingredients, showNotification, updatePendingDraftAddsForDraft]
+    [
+      ingredientsForSale,
+      notifyDraftItemStockIssue,
+      resolveDraftItemStockIssue,
+      showNotification,
+      updatePendingDraftAddsForDraft,
+    ]
   );
 
   const updatePendingDraftAddByItemId = useCallback(
@@ -2623,18 +2741,30 @@ const App: React.FC = () => {
       return;
     }
 
+    const targetQty = Math.max(0, Math.round(nextQty));
+    const currentItem = activeDraft.items.find((entry) => entry.id === itemId);
+    if (!currentItem) return;
+
+    if (targetQty > currentItem.qty) {
+      const stockIssue = resolveDraftItemStockIssue(currentItem.recipe, targetQty - currentItem.qty);
+      if (stockIssue) {
+        notifyDraftItemStockIssue(currentItem.nameSnapshot || currentItem.productId, stockIssue);
+        return;
+      }
+    }
+
     const handledPending = updatePendingDraftAddByItemId(activeDraft.id, itemId, (entry) => {
-      if (nextQty <= 0) return null;
+      if (targetQty <= 0) return null;
       return {
         ...entry,
-        quantity: Math.max(1, Math.round(nextQty)),
+        quantity: Math.max(1, targetQty),
       };
     });
     if (handledPending) {
       return;
     }
 
-    if (nextQty <= 0) {
+    if (targetQty <= 0) {
       void runCommandWithSync(
         {
           type: 'SALE_DRAFT_REMOVE_ITEM',
@@ -2652,7 +2782,7 @@ const App: React.FC = () => {
         type: 'SALE_DRAFT_UPDATE_ITEM',
         draftId: activeDraft.id,
         itemId,
-        quantity: nextQty,
+        quantity: targetQty,
       },
       undefined,
       { silentSuccessNotification: true }
@@ -5192,7 +5322,7 @@ const App: React.FC = () => {
                   key={product.id}
                   product={product} 
                   onSale={handleSale} 
-                  allIngredients={ingredients}
+                  allIngredients={ingredientsForSale}
                   onDelete={handleDeleteProduct}
                   onEdit={handleEditProduct}
                 />
@@ -5281,7 +5411,7 @@ const App: React.FC = () => {
               <div>
                 <h3 className="text-xl font-black uppercase tracking-tight">Carrinho</h3>
                 <p className="text-[10px] uppercase tracking-widest text-red-100">
-                  DRAFT não baixa estoque. Baixa só em PAID.
+                  DRAFT reserva estoque localmente. Baixa oficial só em PAID.
                 </p>
               </div>
               <button
@@ -5381,6 +5511,8 @@ const App: React.FC = () => {
                     const subtotal = (item.unitPriceSnapshot || 0) * item.qty;
                     const canEditItems = activeDraft.status === 'DRAFT';
                     const isPendingLocalItem = isLocalPendingDraftItemId(item.id);
+                    const canIncreaseItemQty =
+                      canEditItems && !resolveDraftItemStockIssue(item.recipe, 1);
                     return (
                       <div
                         key={item.id}
@@ -5411,8 +5543,9 @@ const App: React.FC = () => {
                             <span className="w-10 text-center font-black text-sm text-slate-800">{item.qty}</span>
                             <button
                               onClick={() => handleUpdateDraftItemQuantity(item.id, item.qty + 1)}
-                              disabled={!canEditItems}
+                              disabled={!canIncreaseItemQty}
                               className="qb-btn-touch w-9 h-9 rounded-xl bg-yellow-400 text-red-800 font-black disabled:opacity-40"
+                              title={canIncreaseItemQty ? 'Aumentar quantidade' : 'Estoque insuficiente'}
                             >
                               +
                             </button>
