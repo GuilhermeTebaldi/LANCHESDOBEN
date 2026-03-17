@@ -71,6 +71,14 @@ const shouldSkipPersistingErrorMonitorEvent = (input: BackendErrorMonitorInput):
   );
 };
 
+const isDatabaseUnavailableMonitorWriteError = (error: unknown): boolean => {
+  if (!(error instanceof Error)) return false;
+  const normalized = (error.message || '').toLowerCase();
+  return DATABASE_UNAVAILABLE_MESSAGE_PATTERNS.some((pattern) =>
+    normalized.includes(pattern)
+  );
+};
+
 const reportBackendErrorEvent = (req: Request, input: BackendErrorMonitorInput): void => {
   if (shouldSkipPersistingErrorMonitorEvent(input)) {
     return;
@@ -102,6 +110,9 @@ const reportBackendErrorEvent = (req: Request, input: BackendErrorMonitorInput):
       req.context
     )
     .catch((auditError: unknown) => {
+      if (isDatabaseUnavailableMonitorWriteError(auditError)) {
+        return;
+      }
       if (env.NODE_ENV === 'test') return;
       // eslint-disable-next-line no-console
       console.error('[error-monitor]', {
