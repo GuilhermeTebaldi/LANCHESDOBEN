@@ -837,6 +837,8 @@ const isAutoRecoverableFailedQueueMessage = (message: string): boolean => {
   return (
     normalized.includes('conflito de versao') ||
     normalized.includes('token de estado desatualizado') ||
+    normalized.includes('nao e possivel finalizar esta venda') ||
+    normalized.includes('venda ainda nao foi finalizada para pagamento') ||
     normalized.includes('failed to fetch') ||
     normalized.includes('falha de conexao') ||
     normalized.includes('tempo limite') ||
@@ -1363,6 +1365,16 @@ const PENDING_DRAFT_BACKGROUND_SYNC_SWEEP_MS = 10000;
 const PENDING_DRAFT_BACKGROUND_SYNC_RETRY_BASE_MS = 1800;
 const PENDING_DRAFT_BACKGROUND_SYNC_RETRY_MAX_MS = 45000;
 const PENDING_DRAFT_BACKGROUND_SYNC_RETRY_JITTER = 0.2;
+
+const getPendingPaidSyncJobNextAttemptAtMs = (job: PendingPaidSyncJob): number => {
+  if (!job.nextAttemptAt) return Number.NaN;
+  return Date.parse(job.nextAttemptAt);
+};
+
+const isPendingPaidSyncJobReady = (job: PendingPaidSyncJob, nowMs = Date.now()): boolean => {
+  const retryAtMs = getPendingPaidSyncJobNextAttemptAtMs(job);
+  return !Number.isFinite(retryAtMs) || retryAtMs <= nowMs;
+};
 
 const getPendingPaidSyncRetryDelayMs = (attempts: number): number => {
   const safeAttempts = Math.max(1, Math.floor(attempts));
@@ -4095,7 +4107,7 @@ const App: React.FC = () => {
       );
       clearFailedPaidSyncAutoRetryState(normalizedJobId);
       clearFailedPaidSyncAutoRecoverDraftState(failedJob.draftId);
-      const shouldRequeueAfterRestore = options.requeueAfterRestore === true;
+      const shouldRequeueAfterRestore = options.requeueAfterRestore !== false;
       if (shouldRequeueAfterRestore) {
         enqueuePendingPaidSyncJob({
           ...failedJob,
@@ -4114,17 +4126,22 @@ const App: React.FC = () => {
 
       setDraftSyncInProgress(failedJob.draftId, false);
 
-      if (options.openCart ?? true) {
+      if (options.openCart === true) {
         activeDraftIdRef.current = failedJob.draftId;
         setActiveDraftId(failedJob.draftId);
         setIsCartOpen(true);
+        showCornerSync('error', 'Pedido enviado ao carrinho para revisão manual.', 2600);
+        if (!options.silentNotification) {
+          showNotification('Pedido enviado ao carrinho para ajuste manual.');
+        }
+        return true;
       }
 
-      showCornerSync('error', 'Pedido devolvido ao carrinho para revisão.', 2600);
+      showCornerSync('error', 'Pedido recuperado, mas não foi reenfileirado.', 2600);
       if (!options.silentNotification) {
-        showNotification('Pedido devolvido ao carrinho para ajuste manual.');
+        showNotification('Pedido recuperado, mas a fila não conseguiu reenfileirar agora.');
       }
-      return true;
+      return false;
     },
     [
       clearFailedPaidSyncAutoRecoverDraftState,
@@ -4157,18 +4174,40 @@ const App: React.FC = () => {
         const currentJob = pendingPaidSyncQueueRef.current[0];
         if (!currentJob) return;
 
-        const nextAttemptAtMs = currentJob.nextAttemptAt
-          ? Date.parse(currentJob.nextAttemptAt)
-          : Number.NaN;
-        if (Number.isFinite(nextAttemptAtMs) && nextAttemptAtMs > Date.now()) {
-          const delayMs = Math.max(250, nextAttemptAtMs - Date.now());
+        const nowMs = Date.now();
+        if (!isPendingPaidSyncJobReady(currentJob, nowMs)) {
+          const hasReadyBehind = pendingPaidSyncQueueRef.current
+            .slice(1)
+            .some((job) => isPendingPaidSyncJobReady(job, nowMs));
+          if (hasReadyBehind) {
+            replacePendingPaidSyncQueue([
+              ...pendingPaidSyncQueueRef.current.slice(1),
+              currentJob,
+            ]);
+            continue;
+          }
+
+          const earliestRetryAtMs = pendingPaidSyncQueueRef.current.reduce((earliest, job) => {
+            const retryAtMs = getPendingPaidSyncJobNextAttemptAtMs(job);
+            if (!Number.isFinite(retryAtMs) || retryAtMs <= nowMs) {
+              return earliest;
+            }
+            return Math.min(earliest, retryAtMs);
+          }, Number.POSITIVE_INFINITY);
+          const fallbackDelayMs = Math.max(
+            250,
+            getPendingPaidSyncJobNextAttemptAtMs(currentJob) - nowMs
+          );
+          const delayMs = Number.isFinite(earliestRetryAtMs)
+            ? Math.max(250, earliestRetryAtMs - nowMs)
+            : fallbackDelayMs;
           pendingPaidSyncRetryTimerRef.current = window.setTimeout(() => {
             void processPendingPaidSyncQueue();
           }, delayMs);
           return;
         }
 
-        const currentServerDraft = saleDraftsRef.current.find(
+        let currentServerDraft = saleDraftsRef.current.find(
           (draft) => draft.id === currentJob.draftId
         );
         if (
@@ -4178,6 +4217,14 @@ const App: React.FC = () => {
           replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
           setDraftSyncInProgress(currentJob.draftId, false);
           continue;
+        }
+
+        if (currentServerDraft?.status === 'PENDING_PAYMENT') {
+          const nextPendingByDraft = { ...pendingDraftAddsRef.current };
+          if ((nextPendingByDraft[currentJob.draftId] || []).length > 0) {
+            delete nextPendingByDraft[currentJob.draftId];
+            replacePendingDraftAdds(nextPendingByDraft);
+          }
         }
 
         setDraftSyncInProgress(currentJob.draftId, true);
@@ -4281,52 +4328,94 @@ const App: React.FC = () => {
           }, 180);
         };
 
-        const draftAddsErrorSink: RunCommandErrorSink = {};
-        const flushed = await flushPendingDraftAdds(
-          currentJob.draftId,
-          (currentJob.snapshot.draft.customerType || 'BALCAO') as SaleCustomerType,
-          {
-            silentErrorNotification: true,
-            errorSink: draftAddsErrorSink,
-            failFastOnVersionConflict: true,
+        const shouldFlushDraftAdds =
+          !currentServerDraft || currentServerDraft.status === 'DRAFT';
+        if (shouldFlushDraftAdds) {
+          const draftAddsErrorSink: RunCommandErrorSink = {};
+          const flushed = await flushPendingDraftAdds(
+            currentJob.draftId,
+            (currentJob.snapshot.draft.customerType || 'BALCAO') as SaleCustomerType,
+            {
+              silentErrorNotification: true,
+              errorSink: draftAddsErrorSink,
+              failFastOnVersionConflict: false,
+            }
+          );
+          if (!flushed) {
+            markJobAsFailed('Falha ao enviar itens pendentes.', draftAddsErrorSink);
+            return;
           }
-        );
-        if (!flushed) {
-          markJobAsFailed('Falha ao enviar itens pendentes.', draftAddsErrorSink);
-          return;
+          currentServerDraft = saleDraftsRef.current.find((entry) => entry.id === currentJob.draftId);
+          if (
+            currentServerDraft &&
+            (currentServerDraft.status === 'PAID' || currentServerDraft.status === 'CANCELLED')
+          ) {
+            replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
+            setDraftSyncInProgress(currentJob.draftId, false);
+            showCornerSync('success', 'Pedido já estava concluído no banco.', 1800);
+            continue;
+          }
         }
 
-        const finalizeErrorSink: RunCommandErrorSink = {};
-        const finalized = await handleSavePaymentMethod(currentJob.snapshot, {
-          trackPendingState: false,
-          silentSavedNotification: true,
-          silentErrorNotification: true,
-          errorSink: finalizeErrorSink,
-          preferAsyncFinalize: false,
-          failFastOnVersionConflict: true,
-        });
+        let finalized = currentServerDraft?.status === 'PENDING_PAYMENT';
         if (!finalized) {
-          const finalizeMessage = finalizeErrorSink.message || 'Falha ao salvar forma de pagamento.';
-          const isFinalizeConflict =
-            finalizeErrorSink.statusCode === 409 &&
-            isFinalizeStateConflictErrorMessage(finalizeMessage);
-          if (isFinalizeConflict) {
-            try {
-              const refreshedState = await fetchStateSnapshot();
-              applyStateSnapshot(refreshedState);
-            } catch {
-              // best-effort: if refresh fails we still evaluate local snapshot below
-            }
-            const latestDraft = saleDraftsRef.current.find((entry) => entry.id === currentJob.draftId);
-            if (!latestDraft || latestDraft.status === 'PAID' || latestDraft.status === 'CANCELLED') {
-              replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
-              setDraftSyncInProgress(currentJob.draftId, false);
-              showCornerSync('success', 'Pedido já estava concluído no banco.', 1800);
-              continue;
+          const finalizeErrorSink: RunCommandErrorSink = {};
+          finalized = await handleSavePaymentMethod(currentJob.snapshot, {
+            trackPendingState: false,
+            silentSavedNotification: true,
+            silentErrorNotification: true,
+            errorSink: finalizeErrorSink,
+            preferAsyncFinalize: false,
+            failFastOnVersionConflict: false,
+          });
+          if (!finalized) {
+            const finalizeMessage =
+              finalizeErrorSink.message || 'Falha ao salvar forma de pagamento.';
+            const isFinalizeConflict =
+              finalizeErrorSink.statusCode === 409 &&
+              isFinalizeStateConflictErrorMessage(finalizeMessage);
+            if (isFinalizeConflict) {
+              let stateRefreshed = false;
+              try {
+                const refreshedState = await fetchStateSnapshot();
+                applyStateSnapshot(refreshedState);
+                stateRefreshed = true;
+              } catch {
+                // best-effort: if refresh fails we still evaluate local snapshot below
+              }
+              const latestDraft = saleDraftsRef.current.find(
+                (entry) => entry.id === currentJob.draftId
+              );
+              if (
+                !latestDraft ||
+                latestDraft.status === 'PAID' ||
+                latestDraft.status === 'CANCELLED'
+              ) {
+                replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
+                setDraftSyncInProgress(currentJob.draftId, false);
+                showCornerSync('success', 'Pedido já estava concluído no banco.', 1800);
+                continue;
+              }
+              if (latestDraft.status === 'PENDING_PAYMENT') {
+                finalized = true;
+                showCornerSync('syncing', 'Pagamento já preparado. Confirmando...', 1600);
+              } else {
+                markJobAsFailed(
+                  stateRefreshed
+                    ? 'Conflito ao finalizar pagamento.'
+                    : 'Conflito ao finalizar pagamento. Reagendando com atualização de estado.',
+                  {
+                    ...finalizeErrorSink,
+                    retryable: true,
+                  }
+                );
+                return;
+              }
+            } else {
+              markJobAsFailed('Falha ao salvar forma de pagamento.', finalizeErrorSink);
+              return;
             }
           }
-          markJobAsFailed('Falha ao salvar forma de pagamento.', finalizeErrorSink);
-          return;
         }
 
         const confirmCommand: StateCommand = {
@@ -4358,7 +4447,7 @@ const App: React.FC = () => {
                 silentSuccessNotification: true,
                 silentErrorNotification: true,
                 errorSink: confirmErrorSink,
-                failFastOnVersionConflict: true,
+                failFastOnVersionConflict: false,
               }
             );
             if (!confirmed) {
@@ -4404,7 +4493,7 @@ const App: React.FC = () => {
                 silentSuccessNotification: true,
                 silentErrorNotification: true,
                 errorSink: confirmErrorSink,
-                failFastOnVersionConflict: true,
+                failFastOnVersionConflict: false,
               }
             );
             if (!confirmed) {
@@ -4427,7 +4516,7 @@ const App: React.FC = () => {
                 silentSuccessNotification: true,
                 silentErrorNotification: true,
                 errorSink: confirmErrorSink,
-                failFastOnVersionConflict: true,
+                failFastOnVersionConflict: false,
               }
             );
             if (!confirmed) {
@@ -4707,7 +4796,7 @@ const App: React.FC = () => {
           if (!recovered) {
             showCornerSync(
               'error',
-              'Auto recuperação não concluiu. Use "Resolver no Carrinho".',
+              'Auto recuperação não concluiu. A fila seguirá tentando.',
               2400
             );
           }
@@ -5823,7 +5912,7 @@ const App: React.FC = () => {
                         onClick={() => handleRecoverFailedPaidSyncJobToCart(card.id)}
                         className="mt-2 w-full rounded-lg border border-current/30 bg-white px-2 py-1 text-[9px] font-black uppercase tracking-widest transition hover:bg-white/80"
                       >
-                        Resolver no Carrinho
+                        Reconstruir e Reenfileirar
                       </button>
                     )}
                   </div>
