@@ -2577,17 +2577,37 @@ const App: React.FC = () => {
 
   const openSaleDrafts = useMemo(
     () => {
-      const syncingDraftIds = syncingPaidDraftIdsRef.current;
+      const queuedDraftIds = new Set<string>();
+      syncingPaidDraftIds.forEach((draftId) => {
+        if (typeof draftId === 'string' && draftId.trim()) {
+          queuedDraftIds.add(draftId.trim());
+        }
+      });
+      pendingPaidSyncQueueSnapshot.forEach((job) => {
+        if (typeof job.draftId === 'string' && job.draftId.trim()) {
+          queuedDraftIds.add(job.draftId.trim());
+        }
+      });
+      failedPaidSyncQueue.forEach((job) => {
+        if (typeof job.draftId === 'string' && job.draftId.trim()) {
+          queuedDraftIds.add(job.draftId.trim());
+        }
+      });
+
       return saleDraftsWithPendingAdds.filter((draft) => {
-        const isSyncingNow =
-          syncingDraftIds.has(draft.id) || syncingPaidDraftIds.includes(draft.id);
-        if (isSyncingNow) return false;
+        if (queuedDraftIds.has(draft.id)) return false;
         if (draft.status !== 'DRAFT' && draft.status !== 'PENDING_PAYMENT') return false;
         const pendingLocalItemsCount = (pendingDraftAddsByDraft[draft.id] || []).length;
         return draft.items.length > 0 || pendingLocalItemsCount > 0;
       });
     },
-    [pendingDraftAddsByDraft, saleDraftsWithPendingAdds, syncingPaidDraftIds]
+    [
+      failedPaidSyncQueue,
+      pendingDraftAddsByDraft,
+      pendingPaidSyncQueueSnapshot,
+      saleDraftsWithPendingAdds,
+      syncingPaidDraftIds,
+    ]
   );
   useEffect(() => {
     activeDraftIdRef.current = activeDraftId;
@@ -2626,15 +2646,21 @@ const App: React.FC = () => {
   }, [activeDraft, activeDraftId]);
 
   const resolveEditableDraftId = useCallback((): string | null => {
-    const syncingDraftIds = syncingPaidDraftIdsRef.current;
+    const isDraftQueuedForPaidSync = (draftId: string): boolean => {
+      if (syncingPaidDraftIdsRef.current.has(draftId)) return true;
+      if (pendingPaidSyncQueueRef.current.some((job) => job.draftId === draftId)) return true;
+      if (failedPaidSyncQueueRef.current.some((job) => job.draftId === draftId)) return true;
+      return false;
+    };
+
     const serverOpenDrafts = saleDraftsRef.current.filter(
       (draft) =>
         (draft.status === 'DRAFT' || draft.status === 'PENDING_PAYMENT') &&
         draft.items.length > 0 &&
-        !syncingDraftIds.has(draft.id)
+        !isDraftQueuedForPaidSync(draft.id)
     );
     const pendingLocalDraftIds = Object.keys(pendingDraftAddsRef.current).filter((draftId) => {
-      if (syncingDraftIds.has(draftId)) return false;
+      if (isDraftQueuedForPaidSync(draftId)) return false;
       const hasPendingEntries = (pendingDraftAddsRef.current[draftId] || []).length > 0;
       if (!hasPendingEntries) return false;
       return !serverOpenDrafts.some((draft) => draft.id === draftId);
