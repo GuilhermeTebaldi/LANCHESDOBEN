@@ -4616,6 +4616,42 @@ const App: React.FC = () => {
           }
         }
 
+        // Guard rail: never call FINALIZE while server draft is still empty.
+        // If server is lagging/stale, force recovery path instead of producing hard 422 finalize noise.
+        if (!currentServerDraft || currentServerDraft.status === 'DRAFT') {
+          if (!currentServerDraft || (currentServerDraft.items || []).length === 0) {
+            try {
+              const refreshedState = await fetchStateSnapshot();
+              applyStateSnapshot(refreshedState);
+            } catch {
+              // best-effort refresh; fallback to local view below
+            }
+            currentServerDraft = saleDraftsRef.current.find((entry) => entry.id === currentJob.draftId);
+          }
+
+          if (
+            currentServerDraft &&
+            (currentServerDraft.status === 'PAID' || currentServerDraft.status === 'CANCELLED')
+          ) {
+            replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
+            setDraftSyncInProgress(currentJob.draftId, false);
+            showCornerSync('success', 'Pedido já estava concluído no banco.', 1800);
+            continue;
+          }
+
+          const serverItemsCount = Array.isArray(currentServerDraft?.items)
+            ? currentServerDraft.items.length
+            : 0;
+          if (serverItemsCount === 0) {
+            await markJobAsFailed('O carrinho está vazio.', {
+              message: 'O carrinho está vazio.',
+              statusCode: 422,
+              retryable: true,
+            });
+            return;
+          }
+        }
+
         let finalized = currentServerDraft?.status === 'PENDING_PAYMENT';
         if (!finalized) {
           const finalizeErrorSink: RunCommandErrorSink = {};
