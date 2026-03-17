@@ -202,7 +202,6 @@ export interface StateCommandAsyncJob {
 
 const isRetryableHttpStatus = (statusCode: number): boolean =>
   statusCode === 408 ||
-  statusCode === 409 ||
   statusCode === 412 ||
   statusCode === 425 ||
   statusCode === 428 ||

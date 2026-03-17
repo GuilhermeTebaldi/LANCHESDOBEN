@@ -885,6 +885,9 @@ const applySaleDraftFinalize = (
   command: Extract<StateCommandInput, { type: 'SALE_DRAFT_FINALIZE' }>
 ) => {
   const draft = requireSaleDraft(state, command.draftId);
+  if (draft.status === 'PAID') {
+    return;
+  }
   ensureDraftStatus(draft, ['DRAFT', 'PENDING_PAYMENT'], 'Não é possível finalizar esta venda.');
   if (draft.items.length === 0) {
     throw new HttpError(422, 'O carrinho está vazio.');

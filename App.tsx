@@ -820,6 +820,14 @@ const isStockRelatedErrorMessage = (message: string): boolean => {
 const isDraftEmptyErrorMessage = (message: string): boolean =>
   message.toLowerCase().includes('carrinho está vazio');
 
+const isFinalizeStateConflictErrorMessage = (message: string): boolean => {
+  const normalized = message
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+  return normalized.includes('nao e possivel finalizar esta venda');
+};
+
 const isRetryableSyncError = (error: unknown): boolean => {
   if (error instanceof StateCommandSyncError) {
     return error.retryable;
@@ -2954,8 +2962,8 @@ const App: React.FC = () => {
 
   const handleClearLocalPendingDraftItems = useCallback(() => {
     if (!activeDraft) return;
-    if (activeDraft.status !== 'DRAFT') {
-      showNotification('Limpeza disponível apenas com a venda em DRAFT.');
+    if (activeDraft.status !== 'DRAFT' && activeDraft.status !== 'PENDING_PAYMENT') {
+      showNotification('Limpeza disponível apenas com a venda em DRAFT ou PENDING_PAYMENT.');
       return;
     }
 
@@ -4152,6 +4160,9 @@ const App: React.FC = () => {
               showNotification('Alerta de estoque: item sem insumo suficiente para concluir pedido.');
             }
             showNotification(`Erro ao enviar pedido: ${message}`);
+            window.setTimeout(() => {
+              void processPendingPaidSyncQueue();
+            }, 60);
             return;
           }
 
@@ -4195,6 +4206,25 @@ const App: React.FC = () => {
           asyncFinalizeCommandId: currentJob.finalizeCommandId,
         });
         if (!finalized) {
+          const finalizeMessage = finalizeErrorSink.message || 'Falha ao salvar forma de pagamento.';
+          const isFinalizeConflict =
+            finalizeErrorSink.statusCode === 409 &&
+            isFinalizeStateConflictErrorMessage(finalizeMessage);
+          if (isFinalizeConflict) {
+            try {
+              const refreshedState = await fetchStateSnapshot();
+              applyStateSnapshot(refreshedState);
+            } catch {
+              // best-effort: if refresh fails we still evaluate local snapshot below
+            }
+            const latestDraft = saleDraftsRef.current.find((entry) => entry.id === currentJob.draftId);
+            if (!latestDraft || latestDraft.status === 'PAID' || latestDraft.status === 'CANCELLED') {
+              replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
+              setDraftSyncInProgress(currentJob.draftId, false);
+              showCornerSync('success', 'Pedido já estava concluído no banco.', 1800);
+              continue;
+            }
+          }
           markJobAsFailed('Falha ao salvar forma de pagamento.', finalizeErrorSink);
           return;
         }
@@ -5981,7 +6011,8 @@ const App: React.FC = () => {
                         Limpar do Banco ({activeDraftApiLinkedItemCount})
                       </button>
                     )}
-                    {activeDraft.status === 'DRAFT' && activeDraftLocalPendingItemCount > 0 && (
+                    {(activeDraft.status === 'DRAFT' || activeDraft.status === 'PENDING_PAYMENT') &&
+                      activeDraftLocalPendingItemCount > 0 && (
                       <button
                         onClick={handleClearLocalPendingDraftItems}
                         disabled={isCancellingDraft || isStateHydrating || pendingStateOps > 0}

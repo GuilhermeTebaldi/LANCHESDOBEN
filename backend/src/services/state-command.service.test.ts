@@ -215,6 +215,37 @@ test('draft confirm paid is idempotent and does not double debit stock', () => {
   assert.equal(retriedPaid.stockEntries.length, 3);
 });
 
+test('draft finalize is idempotent after payment and does not reopen paid draft', () => {
+  const base = createBaseState();
+  const withDraft = applyStateCommand(base, { type: 'SALE_DRAFT_CREATE', draftId: 'draft-finalize-idem' });
+  const withItem = applyStateCommand(withDraft, {
+    type: 'SALE_DRAFT_ADD_ITEM',
+    draftId: 'draft-finalize-idem',
+    productId: 'p-burger',
+  });
+  const pending = applyStateCommand(withItem, {
+    type: 'SALE_DRAFT_FINALIZE',
+    draftId: 'draft-finalize-idem',
+    paymentMethod: 'PIX',
+  });
+  const paid = applyStateCommand(pending, {
+    type: 'SALE_DRAFT_CONFIRM_PAID',
+    draftId: 'draft-finalize-idem',
+  });
+  const retriedFinalize = applyStateCommand(paid, {
+    type: 'SALE_DRAFT_FINALIZE',
+    draftId: 'draft-finalize-idem',
+    paymentMethod: 'PIX',
+  });
+
+  assert.equal(retriedFinalize.saleDrafts?.[0]?.status, 'PAID');
+  assert.equal(retriedFinalize.sales.length, 1);
+  assert.equal(retriedFinalize.stockEntries.length, 3);
+  assert.equal(retriedFinalize.ingredients.find((entry) => entry.id === 'i-bread')?.currentStock, 49);
+  assert.equal(retriedFinalize.ingredients.find((entry) => entry.id === 'i-meat')?.currentStock, 39);
+  assert.equal(retriedFinalize.ingredients.find((entry) => entry.id === 'i-sauce')?.currentStock, 180);
+});
+
 test('legacy draft without payment does not crash command pipeline', () => {
   const base = createBaseState();
   const legacyState = {

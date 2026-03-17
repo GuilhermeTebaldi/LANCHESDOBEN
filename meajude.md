@@ -1,354 +1,302 @@
-# ME AJUDE - Replica SaaS (100% do que foi feito neste chat)
+# MEAJUDE - DOCUMENTACAO COMPLETA DO SISTEMA
+
+Atualizado em: 2026-03-17
+Branch: main
 
-## 1) Objetivo final alcançado
+## 1) Objetivo deste documento
 
-Implementamos no sistema de caixa uma mudança estrutural:
+Este arquivo registra como o sistema ficou depois das melhorias de fila assincrona, anti-trava e resiliencia de carrinho/pagamento.
 
-- Antes: a cada clique em produto, já enviava para API/banco (`SALE_DRAFT_ADD_ITEM`), deixando o operador lento.
-- Depois: clique de produto fica local (rápido), e o envio para banco acontece em lote no `CONFIRMAR PAGO`.
-- O operador pode continuar vendendo enquanto o banco processa em background.
-- O status de sincronização ficou discreto no canto (quase imperceptível), sem overlay intrusivo no topo.
-- A impressão do cupom passou a abrir imediatamente com dados do front, sem esperar persistência do banco.
-- Ajustamos ainda:
-1. feedback imediato no `DESFAZER ÚLTIMA`;
-2. contagem de `PEDIDOS` no relatório por pedido (carrinho), não por item.
+Foco:
+- explicar o fluxo real ponta a ponta
+- explicar o que e local (front) e o que e oficial (backend/banco)
+- explicar como o sistema se recupera de erro
+- dar guia pratico para operacao em producao
 
----
+## 2) Resumo executivo (estado atual)
 
-## 2) Arquivos alterados/criados
+- O sistema agora trabalha em modelo hibrido com fila real no backend e fila de resiliencia no frontend.
+- Confirmar pagamento nao depende mais de terminar tudo no mesmo request sincrono.
+- Existe fila duravel no banco para comandos assincronos de estado.
+- O frontend tem monitor visual de fila (cards empilhados), tentativas automaticas e botoes de recuperacao.
+- O carrinho reserva estoque localmente para evitar "falso disponivel" sem depender da API em cada clique.
+- A baixa oficial de estoque continua no backend somente em `PAID` (nao em `DRAFT`).
+- Em erro, o sistema tenta se auto recuperar antes de exigir acao manual do operador.
 
-- `App.tsx`
-- `components/PrintReceipt.tsx`
-- `utils/receiptPrintPayload.ts` (novo)
-- `components/SalesSummary.tsx`
-- `index.css`
+## 3) Arquitetura atual (visao ampla)
+
+### Frontend (App.tsx)
 
----
+Camadas principais:
+- fila local de itens pendentes de draft
+- fila local de sincronizacao de pagamento
+- fila local de falhas de pagamento
+- monitor visual de fila no canto
+- fallback para devolver pedido ao carrinho quando necessario
 
-## 3) Mudanças detalhadas no Caixa (envio só no CONFIRMAR PAGO)
+Persistencias locais (localStorage):
+- `qb_pending_draft_adds_v1`
+- `qb_pending_paid_sync_queue_v1`
+- `qb_failed_paid_sync_queue_v1`
 
-### 3.1 Fila local de itens pendentes (novo fluxo de venda)
+### Backend (API + Prisma)
+
+Fila assincrona real:
+- tabela: `state_command_jobs`
+- worker dedicado: `state-command-queue.worker.ts`
+- service de fila: `state-command-queue.service.ts`
+- endpoints:
+  - `POST /api/v1/state/commands/async`
+  - `GET /api/v1/state/commands/jobs/:jobId`
 
-Criado mecanismo local para segurar itens do carrinho antes de enviar ao banco:
+Status de job:
+- `PENDING`
+- `PROCESSING`
+- `RETRY`
+- `COMPLETED`
+- `FAILED`
 
-- chave localStorage: `qb_pending_draft_adds_v1`
-- tipos:
-1. `PendingDraftAdd`
-2. `PendingDraftAddsByDraftId`
-- funções:
-1. `normalizePendingDraftAdd`
-2. `loadPendingDraftAdds`
-3. `savePendingDraftAdds`
-4. `replacePendingDraftAdds`
-5. `hydratePendingDraftAdds`
+## 4) Fluxo completo atual do pedido
 
-Objetivo:
+### 4.1 Adicionar produto no carrinho
 
-- operador clica produto -> item entra no estado local imediatamente;
-- zero espera de rede no clique;
-- persistência local evita perda em refresh/instabilidade curta.
+1. Operador clica no produto.
+2. Front nao manda imediatamente toda carga pesada para banco.
+3. Item entra em pendencia local (`pendingDraftAdds`) e aparece no carrinho.
+4. Sync de background envia `SALE_DRAFT_ADD_ITEM` com controle de fila por draft.
+5. Enquanto isso, a tela continua responsiva.
 
-### 3.2 Clique de produto não chama API
+### 4.2 Finalizar pagamento
 
-No `handleSale`:
+1. Operador clica em confirmar pagamento.
+2. Front cria um `PendingPaidSyncJob` com snapshot completo do pedido.
+3. Job entra na fila local de pagamento.
+4. Processador da fila executa:
+   - flush dos itens pendentes do draft
+   - finalize da forma de pagamento
+   - confirmacao de pago (`SALE_DRAFT_CONFIRM_PAID`)
+5. Em backend, o comando e processado com idempotencia e versao de estado.
 
-- removido envio imediato para backend;
-- agora apenas:
-1. resolve/cria draft local;
-2. chama `queuePendingDraftAdd(...)`;
-3. atualiza UI e notificação do carrinho.
+### 4.3 Quando a fila backend e usada
 
-### 3.3 Clique no carrinho não chama API
+- Comando assincrono e aceito por `POST /commands/async`.
+- Backend grava job em `state_command_jobs`.
+- Worker faz claim, processa, atualiza status, e aplica retry quando cabivel.
+- Front consulta status do job e atualiza estado local por snapshot.
 
-No `handleOpenCart`:
+## 5) Separacao oficial: local vs banco
 
-- passou a somente abrir carrinho e selecionar draft editável local;
-- não chama mais criação/sincronização remota ao abrir carrinho.
+### Local (front)
 
-### 3.4 Cancelar venda sem payload remoto não chama API
+- Reserva visual de estoque em draft.
+- Itens pendentes locais no carrinho.
+- UI de monitor da fila de pedidos.
+- Auto tentativas de reenvio em falha.
 
-No `handleCancelActiveDraft`:
+### Oficial (backend/banco)
 
-- se draft só local (ainda não existe no servidor) -> cancela local, limpa fila pendente, sem API.
-- se draft existe no servidor, mas sem itens persistidos (`items.length === 0`) -> também cancela local sem API.
-- só chama `SALE_DRAFT_CANCEL` quando há de fato dados persistidos no servidor.
+- Estado real do pedido.
+- Status final da venda.
+- Baixa oficial de estoque em `PAID`.
+- Auditoria e versao de estado.
 
-### 3.5 Edição de item pendente local
+## 6) Melhorias implementadas (detalhado por fase)
 
-`handleUpdateDraftItemQuantity` e atualização de observação foram adaptados:
+### Fase A - Fila assincrona real no backend
 
-- primeiro tenta atualizar/remover item na fila pendente local;
-- se não for item local pendente, aí sim usa comando remoto de update/remove.
+Implementado:
+- tabela `state_command_jobs` com indices e constraints
+- deduplicacao por `command_id`
+- worker com lock, stale lock recovery e retry com backoff
+- status terminal e consulta de job
+- rollout conservador: fila habilitada primeiro para `SALE_DRAFT_CONFIRM_PAID`
+- `SALE_DRAFT_FINALIZE` opcional via flag de ambiente
 
-### 3.6 Flush em lote no `CONFIRMAR PAGO`
+Beneficio:
+- request principal desacoplado do processamento completo
+- menor chance de travar front por operacao longa
+- rastreabilidade de cada comando assincrono
 
-Criada função `flushPendingDraftAdds(draftId, customerType)`:
+### Fase B - Fila de pagamento no frontend + anti-stall
 
-- garante que draft exista no servidor (cria com `SALE_DRAFT_CREATE` se necessário);
-- envia itens pendentes um a um com `SALE_DRAFT_ADD_ITEM`, somente nessa etapa;
-- limpa fila local conforme cada item é confirmado;
-- usa `trackPendingState: false` para não poluir overlay principal.
+Implementado:
+- fila local de pagamento pendente
+- processamento em loop seguro com timers
+- fallback sync quando endpoint async nao suportado
+- refresh de snapshot apos terminal status
+- fila de falhas separada da fila ativa
 
-### 3.7 Drafts visíveis incluem itens pendentes locais
+Beneficio:
+- operacao continua mesmo com lentidao/intermitencia
+- pedido nao bloqueia todo resto da fila
 
-Criado `saleDraftsWithPendingAdds`:
+### Fase C - Monitor visual de fila + retry por card
 
-- faz merge entre `saleDrafts` do servidor + pendências locais;
-- permite visualizar no carrinho os itens ainda não enviados;
-- cria draft virtual local quando existe pendência sem draft remoto.
+Implementado:
+- painel "Fila de Pedidos" no canto
+- cards por pedido com status e erro resumido
+- botao `Tentar de Novo` por card
+- feedback de retry/sucesso/erro no canto
 
-### 3.8 Escolha de draft editável corrigida
+Beneficio:
+- operador ve exatamente o que esta pendente/falhou
+- acao pontual sem perder contexto
 
-Ajustada `resolveEditableDraftId`:
+### Fase D - Alerta de estoque em falha
 
-- ignora drafts em sincronização de pagamento;
-- considera drafts locais pendentes;
-- evita cair em draft inválido/sincronizando.
+Implementado:
+- parser de mensagem de erro para detectar falta de estoque/insumo
+- notificacao dedicada de alerta de estoque
 
----
+Beneficio:
+- erro fica claro para operacao e suporte
 
-## 4) Estado de sincronização discreto (canto da tela)
+### Fase E - Reserva local de estoque no carrinho
 
-### 4.1 Overlay topo deixou de ser usado para operações de caixa
+Implementado:
+- calculo de estoque reservado por itens em drafts abertos
+- disponibilidade dos cards usa estoque efetivo local
+- bloqueio de incremento (`+`) quando nao ha saldo local
+- alerta imediato ao tentar adicionar sem estoque
 
-`isSyncIndicatorVisible` foi reduzido para hidratação inicial (`isStateHydrating`), evitando barra carregando no topo durante operação normal do operador.
+Beneficio:
+- evita vender acima do possivel enquanto ainda nao sincronizou tudo no backend
+- reduz surpresa de erro tardio no pagamento
 
-### 4.2 Indicador discreto no canto
+### Fase F - Auto recuperacao para erro "carrinho vazio"
 
-Criado estado `cornerSyncState` com `showCornerSync(...)`:
+Implementado:
+- deteccao especifica de `HTTP 422: O carrinho esta vazio`
+- reconstrucao automatica do draft a partir do snapshot do job
+- regeneracao de commandIds de finalize/confirm
+- reexecucao automatica com limite seguro
 
-- `syncing`: processando banco
-- `success`: concluído
-- `error`: falha
+Beneficio:
+- reduz erro falso de fila quando draft server ficou sem itens temporariamente
 
-Usado em:
+### Fase G - Auto click "Tentar de Novo" (2x) + resolucao manual assistida
 
-1. confirmação de pagamento;
-2. desfazer última venda.
+Implementado:
+- cada card em falha tenta automaticamente ate 2 vezes
+- indicador visual de auto tentativa no card
+- apos esgotar tentativas automaticas, aparece `Resolver no Carrinho`
+- botao manual continua disponivel
 
-### 4.3 CSS de animação discreta
+Beneficio:
+- menos trabalho manual no caixa
+- evita deixar o operador preso em tentativa repetitiva
 
-No `index.css`:
+### Fase H - Limpeza de itens locais pendentes no carrinho
 
-- `@keyframes qb-corner-sync-pulse`
-- classe `.qb-corner-sync-pulse`
+Problema tratado:
+- item podia voltar como pendente local (nao vinculado ao banco), logo "Limpar do Banco" nao aparecia.
 
----
+Implementado:
+- botao novo `Limpar Pendentes`
+- remove apenas itens locais pendentes daquele draft
+- mantem separado do `Limpar do Banco`
 
-## 5) Correções no `CONFIRMAR PAGO` (estabilidade + sem corrida de estado)
+Beneficio:
+- operador consegue limpar "item fantasma local" sem afetar itens ja sincronizados
 
-### 5.1 Snapshot de pagamento (correção crítica)
+## 7) Como o sistema evita duplicidade de baixa de estoque
 
-Bug visto:
+Regra oficial:
+- `DRAFT` nao faz baixa oficial no backend.
+- `PAID` faz baixa oficial no backend.
 
-- ao fechar modal/carrinho cedo, estado UI mudava e a confirmação podia falhar/impressão quebrar.
+Protecoes:
+- backend checa `draft.status === PAID` ou `draft.stockDebited` e retorna sem debitar de novo.
+- `SALE_DRAFT_CONFIRM_PAID` e idempotente.
+- commandId e deduplicacao de job ajudam a evitar processamento repetido indevido.
 
-Correção:
+## 8) Comportamento de falha (o que acontece na pratica)
 
-- criado `PaymentCommitSnapshot` e `handleSavePaymentMethod(snapshot, options)`;
-- `handleConfirmPaid` monta snapshot no clique e usa sempre esse snapshot, não estado mutável da UI.
+### Falha temporaria (rede/lentidao/backend 5xx)
 
-### 5.2 Sequência segura de confirmação
+- entra em retry com backoff
+- job permanece em fila sem travar interface
 
-`handleConfirmPaid` passou a executar:
+### Falha nao retryable
 
-1. flush dos itens pendentes;
-2. finalize da forma de pagamento;
-3. `SALE_DRAFT_CONFIRM_PAID`;
-4. feedback de sucesso/erro no canto.
+- vai para fila de falhas
+- card mostra erro
+- agora tenta auto retry 2x
+- se nao resolver: fica com acao manual (`Resolver no Carrinho`)
 
-### 5.3 Validações defensivas mantidas
+### Erro "carrinho vazio" (422)
 
-No finalize:
+- sistema tenta reconstruir draft do snapshot
+- reenfileira automaticamente
+- se ainda falhar e esgotar: operador resolve no carrinho
 
-- valida carrinho vazio;
-- valida total de app (`IFOOD/99/KEETA`);
-- valida dinheiro recebido;
-- valida divisão (`DIVIDIDO`) completa e consistente;
-- valida persistência de origem/valor app no backend antes de concluir.
+## 9) Operacao recomendada para o caixa
 
----
+### Fluxo normal
 
-## 6) Impressão do cupom: de “esperar banco” para “gerar no front”
+1. Adicionar itens normalmente.
+2. Confirmar pagamento.
+3. Se houver fila, aguardar status do card.
 
-## 6.1 Problema original
+### Se um card falhar
 
-Mesmo após ajustes, o cupom ainda podia:
+1. Aguardar auto tentativas (max 2).
+2. Se resolver, nao precisa fazer nada.
+3. Se nao resolver, usar `Resolver no Carrinho`.
+4. No carrinho:
+   - usar `Limpar do Banco` para itens ja sincronizados no servidor
+   - usar `Limpar Pendentes` para itens locais ainda nao enviados
+5. Ajustar e confirmar novamente.
 
-1. abrir “Carregando cupom...”;
-2. esperar leitura persistida;
-3. falhar com “Pedido não encontrado para impressão”.
+## 10) Variaveis de ambiente relevantes
 
-Causa principal:
+### Estado/transacao
 
-- dependência da leitura de estado persistido (backend/mirror) em uma etapa sujeita a latência.
+- `APP_STATE_TX_MAX_WAIT_MS`
+- `APP_STATE_TX_TIMEOUT_MS`
 
-## 6.2 Solução implementada
+### Fila backend
 
-Criado pipeline de impressão local imediata no clique de `CONFIRMAR PAGO`.
+- `STATE_COMMAND_QUEUE_WORKER_ENABLED`
+- `STATE_COMMAND_QUEUE_ENABLE_FINALIZE`
+- `STATE_COMMAND_QUEUE_POLL_INTERVAL_MS`
+- `STATE_COMMAND_QUEUE_BATCH_SIZE`
+- `STATE_COMMAND_QUEUE_STALE_LOCK_MS`
+- `STATE_COMMAND_QUEUE_MAX_ATTEMPTS`
+- `STATE_COMMAND_QUEUE_RETRY_BASE_MS`
+- `STATE_COMMAND_QUEUE_RETRY_MAX_MS`
 
-### 6.2.1 Novo módulo: `utils/receiptPrintPayload.ts`
+## 11) Validacao executada neste ciclo
 
-Responsabilidades:
+Comandos executados repetidamente apos mudancas:
 
-1. criar payload sanitizado do cupom;
-2. salvar payload em localStorage (`qb_receipt_print_payload_v1:*`);
-3. fallback por `window.name` para atravessar janela/aba mesmo sem localStorage;
-4. consumir/remover payload;
-5. limpeza de payload expirado.
+- `npm run build:sistema`
+- `npm --prefix backend run build`
+- `DATABASE_URL=\"file:./prisma/dev.db\" npm --prefix backend test`
 
-### 6.2.2 Geração do payload no `App.tsx`
+Resultado:
+- build frontend OK
+- build backend OK
+- testes backend OK (63/63)
 
-Função `buildReceiptPrintPayloadFromSnapshot(...)`:
+## 12) Referencia de entregas (commits)
 
-- usa snapshot de pagamento + itens do draft local;
-- monta linhas, totais, forma de pagamento, troco, dividido, canal app, observações;
-- sem depender de retorno do banco.
+- `0264392` feat: fila assincrona duravel + anti-stall cart sync
+- `099ccf9` feat: limpar itens do banco no carrinho + flag de finalize async
+- `cd0fa28` feat: monitor de fila no canto + retry cards + alerta estoque
+- `59e168f` feat: reserva local de estoque no carrinho
+- `dd59a39` fix: auto recover para erro de draft vazio
+- `1b31727` feat: auto retry 2x em falhas + limpar pendentes locais
 
-### 6.2.3 Abertura imediata do cupom
+## 13) Limites conhecidos e proximo passo seguro
 
-No clique de `CONFIRMAR PAGO`:
+Limites:
+- O monitor de fila frontend depende de localStorage da maquina atual.
+- Se limpar storage/local do navegador manualmente, perde historico local de filas front.
+- Build front ainda mostra warning de chunk grande (nao quebra, mas pode ser otimizado depois).
 
-1. cria payload local;
-2. injeta payload na janela preparada (`setReceiptPrintPayloadOnWindow`);
-3. navega imediatamente para rota de impressão com `receiptPrintId` do payload;
-4. API/banco continua em background;
-5. não reabre impressão no fim.
+Proximo passo seguro:
+- deploy canario noturno
+- monitorar cards de fila por 1 noite
+- revisar logs de erro e ajustar thresholds de retry se necessario
 
-## 6.3 `PrintReceipt` com prioridade local + fallback remoto
-
-Fluxo novo em `components/PrintReceipt.tsx`:
-
-1. tenta `consumeReceiptPrintPayload(receiptId)` primeiro;
-2. se achar payload local válido, renderiza na hora e imprime;
-3. se não achar payload local, mantém fallback antigo (`loadAppState`) com retry.
-
-Ajustes importantes:
-
-- timeout de fallback aumentado para `15000ms`;
-- payload não é removido no primeiro render (evitou bug com dev/Strict mode);
-- limpeza final no `onafterprint`.
-
-## 6.4 Problemas pequenos corrigidos na impressão
-
-1. **Assinatura quebrada**: chamada antiga de `handleSavePaymentMethod` causava falha de confirmação/impressão.
-2. **Navegação precoce incorreta**: abrir rota de print antes da persistência causava “pedido não encontrado”.
-3. **Strict mode/re-render**: remoção antecipada do payload gerava fallback indevido.
-4. **Falha de localStorage**: `saveReceiptPrintPayload` passou a não abortar; fallback por `window.name` mantém impressão.
-
----
-
-## 7) `DESFAZER ÚLTIMA` com feedback imediato
-
-Problema:
-
-- primeiro clique parecia “não fazer nada”.
-
-Correção no `handleUndoLastSale`:
-
-1. seta `isUndoProcessing` imediatamente;
-2. mostra `showCornerSync('syncing', 'Desfazendo ... no banco')`;
-3. executa comando remoto;
-4. mostra sucesso/erro no canto;
-5. bloqueia duplo clique.
-
-UI:
-
-- botão muda para `Desfazendo...`;
-- botão `Histórico do Dia` também desabilita durante processamento.
-
----
-
-## 8) Relatório: `PEDIDOS` por pedido (não por item)
-
-Problema:
-
-- card `Pedidos` na aba de relatório contava `sales.length` (itens), não pedidos.
-- exemplo errado: 1 pedido com 2 itens aparecia como 2 pedidos.
-
-Correção:
-
-- criado agrupamento por pedido:
-1. se `saleDraftId` existe -> chave do pedido é `draft:{saleDraftId}`;
-2. sem `saleDraftId` -> chave é `sale:{sale.id}`.
-- funções:
-1. `countOrders` em `SalesSummary.tsx`
-2. `countSaleOrders` em `App.tsx`
-
-Pontos ajustados:
-
-1. card `Pedidos` na aba relatório;
-2. `currentDayReport.saleCount`;
-3. impressão de relatório (`Total de pedidos`/`Pedidos`);
-4. inferência histórica sem vínculo explícito.
-
----
-
-## 9) Checklist de replicação para o sistema SaaS (ordem recomendada)
-
-1. Implementar fila local de itens pendentes por draft.
-2. Remover envio imediato em clique de produto/carrinho.
-3. Ajustar cancelamento para não chamar API quando não existe persistência remota útil.
-4. Implementar flush dos pendentes apenas no `CONFIRMAR PAGO`.
-5. Separar indicador de hidratação global do indicador discreto de operações.
-6. Migrar confirmação para snapshot imutável de pagamento.
-7. Implementar payload local de impressão (`receiptPrintPayload`) + fallback `window.name`.
-8. Abrir cupom imediatamente no clique; manter sync remota em background sem reabrir cupom.
-9. Corrigir `DESFAZER ÚLTIMA` com estado visual imediato.
-10. Corrigir contagem de pedidos por agrupamento (`saleDraftId`/`sale.id`).
-
----
-
-## 10) Regressões evitadas (o que NÃO quebrar no SaaS)
-
-1. Não remover fallback remoto no `PrintReceipt` (necessário para segunda via/histórico).
-2. Não apagar payload local cedo demais (especialmente em ambiente com Strict Mode).
-3. Não voltar a usar `sales.length` para pedidos.
-4. Não recolocar overlay de sync no topo durante operações normais de caixa.
-5. Não chamar API em `handleSale` e `handleOpenCart`.
-6. Não chamar cancel remoto quando draft ainda está só local/sem itens persistidos.
-
----
-
-## 11) Testes mínimos obrigatórios no SaaS (copiar este bloco)
-
-1. Clique em 5 produtos rapidamente:
-- esperado: carrinho atualiza instantâneo, sem travar UI.
-
-2. Abrir carrinho:
-- esperado: sem chamada remota desnecessária.
-
-3. `Cancelar Venda` com itens só locais:
-- esperado: não chamar API.
-
-4. `CONFIRMAR PAGO`:
-- esperado: cupom abre na hora com dados do front;
-- esperado: banco sincroniza em background;
-- esperado: não abre cupom novamente após retorno do banco.
-
-5. Falha de banco no confirmar:
-- esperado: status de erro no canto;
-- esperado: operador continua usando sistema.
-
-6. `DESFAZER ÚLTIMA`:
-- esperado: no primeiro clique já mostra “Desfazendo...”;
-- esperado: botão bloqueia repetição;
-- esperado: status final de sucesso/erro no canto.
-
-7. Relatório -> card `Pedidos`:
-- cenário: 1 pedido com 2 itens no mesmo carrinho;
-- esperado: contar 1 pedido (não 2).
-
----
-
-## 12) Resumo executivo para copiar no outro time
-
-O principal foi transformar o caixa em **UI-first com sync assíncrona segura**:
-
-1. venda local instantânea;
-2. persistência remota concentrada no confirmar;
-3. impressão desacoplada do banco;
-4. feedback visual discreto e imediato;
-5. contagem de pedidos corrigida por agrupamento real.
-
-Esse conjunto elimina sensação de lentidão para operador sem perder consistência no backend.
