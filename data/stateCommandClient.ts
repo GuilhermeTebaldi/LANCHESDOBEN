@@ -18,6 +18,7 @@ const API_TIMEOUT_MS = 12000;
 const COMMAND_MAX_ATTEMPTS = 8;
 const COMMAND_RETRY_BASE_DELAY_MS = 500;
 const COMMAND_RETRY_MAX_DELAY_MS = 8000;
+const COMMAND_RETRY_BUDGET_MS = 35000;
 const COMMAND_RETRY_JITTER_MIN = 0.75;
 const COMMAND_RETRY_JITTER_MAX = 1.35;
 const COMMAND_VERSION_CONFLICT_RETRY_BASE_DELAY_MS = 140;
@@ -172,6 +173,32 @@ const getStateApiUrl = (): string => {
 };
 
 const getStateCommandsApiUrl = (): string => `${getStateApiUrl()}/commands`;
+const getStateCommandsAsyncApiUrl = (): string => `${getStateCommandsApiUrl()}/async`;
+const getStateCommandJobApiUrl = (jobId: string): string =>
+  `${getStateCommandsApiUrl()}/jobs/${encodeURIComponent(jobId)}`;
+
+export type StateCommandAsyncJobStatus =
+  | 'PENDING'
+  | 'PROCESSING'
+  | 'RETRY'
+  | 'COMPLETED'
+  | 'FAILED';
+
+export interface StateCommandAsyncJob {
+  id: string;
+  commandId: string;
+  commandType: string;
+  status: StateCommandAsyncJobStatus;
+  attempts: number;
+  maxAttempts: number;
+  nextAttemptAt: string;
+  createdAt: string;
+  updatedAt: string;
+  startedAt: string | null;
+  finishedAt: string | null;
+  lastError: string | null;
+  resultVersion: string | null;
+}
 
 const isRetryableHttpStatus = (statusCode: number): boolean =>
   statusCode === 408 ||
@@ -186,6 +213,19 @@ const wait = (ms: number): Promise<void> =>
   new Promise((resolve) => {
     globalThis.setTimeout(resolve, Math.max(0, ms));
   });
+
+const waitBeforeRetry = async (
+  startedAtMs: number,
+  attempt: number,
+  delayMs: number
+): Promise<boolean> => {
+  if (attempt >= COMMAND_MAX_ATTEMPTS - 1) return false;
+  const elapsed = Date.now() - startedAtMs;
+  const remainingBudgetMs = COMMAND_RETRY_BUDGET_MS - elapsed;
+  if (remainingBudgetMs <= 0) return false;
+  await wait(Math.min(delayMs, remainingBudgetMs));
+  return true;
+};
 
 const getRetryDelayMs = (attempt: number): number => {
   const safeAttempt = Math.max(0, Math.floor(attempt));
@@ -254,6 +294,77 @@ const normalizeVersionHeader = (value: string | null): string | null => {
   const trimmed = value.trim();
   if (!trimmed) return null;
   return trimmed.replace(/^W\//i, '').replace(/^"(.+)"$/, '$1') || null;
+};
+
+const isObjectRecord = (value: unknown): value is Record<string, unknown> =>
+  Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+
+const normalizeAsyncJobStatus = (value: unknown): StateCommandAsyncJobStatus => {
+  if (value === 'PENDING') return 'PENDING';
+  if (value === 'PROCESSING') return 'PROCESSING';
+  if (value === 'RETRY') return 'RETRY';
+  if (value === 'COMPLETED') return 'COMPLETED';
+  if (value === 'FAILED') return 'FAILED';
+  throw new Error('Status de job assíncrono inválido.');
+};
+
+const normalizeIsoDateString = (value: unknown, fieldName: string): string => {
+  if (typeof value !== 'string') {
+    throw new Error(`Campo ${fieldName} ausente no job assíncrono.`);
+  }
+  const parsed = Date.parse(value);
+  if (Number.isNaN(parsed)) {
+    throw new Error(`Campo ${fieldName} inválido no job assíncrono.`);
+  }
+  return new Date(parsed).toISOString();
+};
+
+const normalizeOptionalIsoDateString = (value: unknown): string | null => {
+  if (value === null || value === undefined) return null;
+  if (typeof value !== 'string') return null;
+  const parsed = Date.parse(value);
+  if (Number.isNaN(parsed)) return null;
+  return new Date(parsed).toISOString();
+};
+
+const normalizeAsyncJobPayload = (payload: unknown): StateCommandAsyncJob => {
+  if (!isObjectRecord(payload)) {
+    throw new Error('Resposta inválida ao enfileirar comando assíncrono.');
+  }
+
+  const jobRaw = isObjectRecord(payload.job) ? payload.job : null;
+  if (!jobRaw) {
+    throw new Error('Payload de job assíncrono ausente.');
+  }
+
+  const id = typeof jobRaw.id === 'string' ? jobRaw.id.trim() : '';
+  const commandId = typeof jobRaw.commandId === 'string' ? jobRaw.commandId.trim() : '';
+  const commandType = typeof jobRaw.commandType === 'string' ? jobRaw.commandType.trim() : '';
+  if (!id || !commandId || !commandType) {
+    throw new Error('Identificadores inválidos no job assíncrono.');
+  }
+
+  const attempts = Number(jobRaw.attempts);
+  const maxAttempts = Number(jobRaw.maxAttempts);
+  if (!Number.isFinite(attempts) || attempts < 0 || !Number.isFinite(maxAttempts) || maxAttempts <= 0) {
+    throw new Error('Tentativas inválidas no job assíncrono.');
+  }
+
+  return {
+    id,
+    commandId,
+    commandType,
+    status: normalizeAsyncJobStatus(jobRaw.status),
+    attempts: Math.floor(attempts),
+    maxAttempts: Math.floor(maxAttempts),
+    nextAttemptAt: normalizeIsoDateString(jobRaw.nextAttemptAt, 'nextAttemptAt'),
+    createdAt: normalizeIsoDateString(jobRaw.createdAt, 'createdAt'),
+    updatedAt: normalizeIsoDateString(jobRaw.updatedAt, 'updatedAt'),
+    startedAt: normalizeOptionalIsoDateString(jobRaw.startedAt),
+    finishedAt: normalizeOptionalIsoDateString(jobRaw.finishedAt),
+    lastError: typeof jobRaw.lastError === 'string' ? jobRaw.lastError : null,
+    resultVersion: typeof jobRaw.resultVersion === 'string' ? jobRaw.resultVersion : null,
+  };
 };
 
 const decodeBase64Url = (value: string): string | null => {
@@ -556,6 +667,7 @@ export const warmupStateWriteContext = async (): Promise<void> => {
 
 export const runStateCommand = async (command: StateCommand): Promise<AppState> => {
   const payloadCommand = withCommandId(command);
+  const startedAtMs = Date.now();
 
   for (let attempt = 0; attempt < COMMAND_MAX_ATTEMPTS; attempt += 1) {
     await ensureWriteContext();
@@ -581,8 +693,10 @@ export const runStateCommand = async (command: StateCommand): Promise<AppState> 
       });
     } catch (error) {
       const syncError = asRetryableNetworkError(error);
-      if (syncError.retryable && attempt < COMMAND_MAX_ATTEMPTS - 1) {
-        await wait(getRetryDelayMs(attempt));
+      if (
+        syncError.retryable &&
+        (await waitBeforeRetry(startedAtMs, attempt, getRetryDelayMs(attempt)))
+      ) {
         continue;
       }
       throw syncError;
@@ -597,25 +711,210 @@ export const runStateCommand = async (command: StateCommand): Promise<AppState> 
     const isVersionConflictStatus = response.status === 412 || response.status === 428;
     if (response.status === 401 || isVersionConflictStatus) {
       writeContext = null;
-      if (attempt < COMMAND_MAX_ATTEMPTS - 1) {
-        await wait(
+      if (
+        await waitBeforeRetry(
+          startedAtMs,
+          attempt,
           isVersionConflictStatus
             ? getVersionConflictRetryDelayMs(attempt)
             : getRetryDelayMs(attempt)
-        );
+        )
+      ) {
         continue;
       }
     }
 
     const apiError = await toApiError(response);
-    if (apiError.retryable && attempt < COMMAND_MAX_ATTEMPTS - 1) {
-      await wait(getRetryDelayMs(attempt));
+    if (
+      apiError.retryable &&
+      (await waitBeforeRetry(startedAtMs, attempt, getRetryDelayMs(attempt)))
+    ) {
       continue;
     }
     throw apiError;
   }
 
   throw new StateCommandSyncError('Não foi possível sincronizar o comando de estado.', {
+    retryable: true,
+  });
+};
+
+export const enqueueStateCommandAsync = async (
+  command: StateCommand
+): Promise<StateCommandAsyncJob> => {
+  const payloadCommand = withCommandId(command);
+  const startedAtMs = Date.now();
+
+  for (let attempt = 0; attempt < COMMAND_MAX_ATTEMPTS; attempt += 1) {
+    await ensureWriteContext();
+    const context = writeContext;
+    if (!context) {
+      throw new StateCommandSyncError('Contexto de escrita indisponível.', {
+        retryable: true,
+      });
+    }
+
+    let response: Response;
+    try {
+      response = await fetchWithTimeout(getStateCommandsAsyncApiUrl(), {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json',
+          'Content-Type': 'application/json',
+          'X-State-Token': context.token,
+        },
+        body: JSON.stringify(payloadCommand),
+      });
+    } catch (error) {
+      const syncError = asRetryableNetworkError(error);
+      if (
+        syncError.retryable &&
+        (await waitBeforeRetry(startedAtMs, attempt, getRetryDelayMs(attempt)))
+      ) {
+        continue;
+      }
+      throw syncError;
+    }
+
+    if (response.ok) {
+      const refreshedContext = tryReadContextFromResponse(response);
+      if (refreshedContext) {
+        writeContext = refreshedContext;
+      }
+      const payload = (await response.json()) as unknown;
+      return normalizeAsyncJobPayload(payload);
+    }
+
+    if (response.status === 401) {
+      writeContext = null;
+      if (await waitBeforeRetry(startedAtMs, attempt, getRetryDelayMs(attempt))) {
+        continue;
+      }
+    }
+
+    const apiError = await toApiError(response);
+    if (
+      apiError.retryable &&
+      (await waitBeforeRetry(startedAtMs, attempt, getRetryDelayMs(attempt)))
+    ) {
+      continue;
+    }
+    throw apiError;
+  }
+
+  throw new StateCommandSyncError('Não foi possível enfileirar o comando assíncrono.', {
+    retryable: true,
+  });
+};
+
+export const getStateCommandAsyncJob = async (jobId: string): Promise<StateCommandAsyncJob> => {
+  const normalizedJobId = jobId.trim();
+  if (!normalizedJobId) {
+    throw new StateCommandSyncError('Job assíncrono inválido para consulta.', {
+      retryable: false,
+    });
+  }
+  const startedAtMs = Date.now();
+
+  for (let attempt = 0; attempt < COMMAND_MAX_ATTEMPTS; attempt += 1) {
+    await ensureWriteContext();
+    const context = writeContext;
+    if (!context) {
+      throw new StateCommandSyncError('Contexto de escrita indisponível.', {
+        retryable: true,
+      });
+    }
+
+    let response: Response;
+    try {
+      response = await fetchWithTimeout(getStateCommandJobApiUrl(normalizedJobId), {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+          'X-State-Token': context.token,
+        },
+      });
+    } catch (error) {
+      const syncError = asRetryableNetworkError(error);
+      if (
+        syncError.retryable &&
+        (await waitBeforeRetry(startedAtMs, attempt, getRetryDelayMs(attempt)))
+      ) {
+        continue;
+      }
+      throw syncError;
+    }
+
+    if (response.ok) {
+      const refreshedContext = tryReadContextFromResponse(response);
+      if (refreshedContext) {
+        writeContext = refreshedContext;
+      }
+      const payload = (await response.json()) as unknown;
+      return normalizeAsyncJobPayload(payload);
+    }
+
+    if (response.status === 401) {
+      writeContext = null;
+      if (await waitBeforeRetry(startedAtMs, attempt, getRetryDelayMs(attempt))) {
+        continue;
+      }
+    }
+
+    const apiError = await toApiError(response);
+    if (
+      apiError.retryable &&
+      (await waitBeforeRetry(startedAtMs, attempt, getRetryDelayMs(attempt)))
+    ) {
+      continue;
+    }
+    throw apiError;
+  }
+
+  throw new StateCommandSyncError('Não foi possível consultar o job assíncrono.', {
+    retryable: true,
+  });
+};
+
+export const fetchStateSnapshot = async (): Promise<AppState> => {
+  const startedAtMs = Date.now();
+  for (let attempt = 0; attempt < COMMAND_MAX_ATTEMPTS; attempt += 1) {
+    let response: Response;
+    try {
+      response = await fetchWithTimeout(getStateApiUrl(), {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+        },
+      });
+    } catch (error) {
+      const syncError = asRetryableNetworkError(error);
+      if (
+        syncError.retryable &&
+        (await waitBeforeRetry(startedAtMs, attempt, getRetryDelayMs(attempt)))
+      ) {
+        continue;
+      }
+      throw syncError;
+    }
+
+    if (response.ok) {
+      writeContext = readContextFromResponse(response);
+      const payload = (await response.json()) as unknown;
+      return normalizeAppState(payload);
+    }
+
+    const apiError = await toApiError(response);
+    if (
+      apiError.retryable &&
+      (await waitBeforeRetry(startedAtMs, attempt, getRetryDelayMs(attempt)))
+    ) {
+      continue;
+    }
+    throw apiError;
+  }
+
+  throw new StateCommandSyncError('Não foi possível carregar o estado atualizado.', {
     retryable: true,
   });
 };

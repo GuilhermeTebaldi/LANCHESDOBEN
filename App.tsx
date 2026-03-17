@@ -33,9 +33,13 @@ import {
 } from './types';
 import { DEFAULT_APP_STATE, loadAppState, type AppState } from './data/appStorage';
 import {
+  enqueueStateCommandAsync,
+  fetchStateSnapshot,
+  getStateCommandAsyncJob,
   runStateCommand,
   StateCommandSyncError,
   warmupStateWriteContext,
+  type StateCommandAsyncJobStatus,
   type StateCommand,
 } from './data/stateCommandClient';
 import { buildReceiptPrintRoutePath } from './utils/printRoutes';
@@ -810,6 +814,39 @@ const isRetryableSyncError = (error: unknown): boolean => {
   return false;
 };
 
+const ASYNC_COMMAND_JOB_POLL_INTERVAL_MS = 850;
+const ASYNC_COMMAND_JOB_POLL_TIMEOUT_MS = 120000;
+
+const isAsyncCommandJobTerminalStatus = (status: StateCommandAsyncJobStatus): boolean =>
+  status === 'COMPLETED' || status === 'FAILED';
+
+const waitForAsyncCommandJobTerminalStatus = async (
+  jobId: string
+): Promise<{
+  status: StateCommandAsyncJobStatus;
+  lastError: string | null;
+}> => {
+  const startedAt = Date.now();
+
+  while (Date.now() - startedAt < ASYNC_COMMAND_JOB_POLL_TIMEOUT_MS) {
+    const job = await getStateCommandAsyncJob(jobId);
+    if (isAsyncCommandJobTerminalStatus(job.status)) {
+      return {
+        status: job.status,
+        lastError: job.lastError,
+      };
+    }
+
+    await new Promise<void>((resolve) => {
+      globalThis.setTimeout(resolve, ASYNC_COMMAND_JOB_POLL_INTERVAL_MS);
+    });
+  }
+
+  throw new StateCommandSyncError('Timeout aguardando processamento assíncrono no servidor.', {
+    retryable: true,
+  });
+};
+
 const toCommandSyncErrorContext = (command: StateCommand): Record<string, unknown> => {
   const context: Record<string, unknown> = {
     commandType: command.type,
@@ -1239,6 +1276,11 @@ const savePendingPaidSyncQueue = (queue: PendingPaidSyncJob[]): void => {
 const PENDING_PAID_SYNC_RETRY_BASE_MS = 5000;
 const PENDING_PAID_SYNC_RETRY_MAX_MS = 15 * 60 * 1000;
 const PENDING_PAID_SYNC_RETRY_JITTER = 0.2;
+const PENDING_DRAFT_BACKGROUND_SYNC_DEBOUNCE_MS = 650;
+const PENDING_DRAFT_BACKGROUND_SYNC_SWEEP_MS = 10000;
+const PENDING_DRAFT_BACKGROUND_SYNC_RETRY_BASE_MS = 1800;
+const PENDING_DRAFT_BACKGROUND_SYNC_RETRY_MAX_MS = 45000;
+const PENDING_DRAFT_BACKGROUND_SYNC_RETRY_JITTER = 0.2;
 
 const getPendingPaidSyncRetryDelayMs = (attempts: number): number => {
   const safeAttempts = Math.max(1, Math.floor(attempts));
@@ -1249,6 +1291,19 @@ const getPendingPaidSyncRetryDelayMs = (attempts: number): number => {
     1 + (Math.random() * 2 - 1) * PENDING_PAID_SYNC_RETRY_JITTER;
   return Math.max(
     PENDING_PAID_SYNC_RETRY_BASE_MS,
+    Math.round(cappedDelay * jitterFactor)
+  );
+};
+
+const getPendingDraftBackgroundSyncRetryDelayMs = (attempts: number): number => {
+  const safeAttempts = Math.max(1, Math.floor(attempts));
+  const exponentialDelay =
+    PENDING_DRAFT_BACKGROUND_SYNC_RETRY_BASE_MS * 2 ** Math.max(0, safeAttempts - 1);
+  const cappedDelay = Math.min(PENDING_DRAFT_BACKGROUND_SYNC_RETRY_MAX_MS, exponentialDelay);
+  const jitterFactor =
+    1 + (Math.random() * 2 - 1) * PENDING_DRAFT_BACKGROUND_SYNC_RETRY_JITTER;
+  return Math.max(
+    PENDING_DRAFT_BACKGROUND_SYNC_RETRY_BASE_MS,
     Math.round(cappedDelay * jitterFactor)
   );
 };
@@ -1280,6 +1335,10 @@ const App: React.FC = () => {
   const activeDraftIdRef = useRef<string | null>(null);
   const saleDraftsRef = useRef<SaleDraft[]>(DEFAULT_APP_STATE.saleDrafts);
   const pendingDraftCreationRef = useRef<Promise<string | null> | null>(null);
+  const pendingDraftFlushQueueRef = useRef<Map<string, Promise<boolean>>>(new Map());
+  const pendingDraftBackgroundSyncTimerRef = useRef<Map<string, number>>(new Map());
+  const pendingDraftBackgroundSyncRunningRef = useRef<Set<string>>(new Set());
+  const pendingDraftBackgroundRetryAttemptsRef = useRef<Map<string, number>>(new Map());
   
   const [ingredients, setIngredients] = useState<Ingredient[]>(DEFAULT_APP_STATE.ingredients);
   const [products, setProducts] = useState<Product[]>(DEFAULT_APP_STATE.products);
@@ -1699,6 +1758,13 @@ const App: React.FC = () => {
       if (pendingPaidSyncRetryTimerRef.current !== null) {
         window.clearTimeout(pendingPaidSyncRetryTimerRef.current);
       }
+      pendingDraftBackgroundSyncTimerRef.current.forEach((timerId) => {
+        window.clearTimeout(timerId);
+      });
+      pendingDraftBackgroundSyncTimerRef.current.clear();
+      pendingDraftBackgroundRetryAttemptsRef.current.clear();
+      pendingDraftBackgroundSyncRunningRef.current.clear();
+      pendingDraftFlushQueueRef.current.clear();
     };
   }, []);
 
@@ -2858,7 +2924,7 @@ const App: React.FC = () => {
     }
   };
 
-  const flushPendingDraftAdds = useCallback(
+  const flushPendingDraftAddsCore = useCallback(
     async (
       draftId: string,
       customerType: SaleCustomerType = 'BALCAO',
@@ -2948,6 +3014,192 @@ const App: React.FC = () => {
       showNotification,
     ]
   );
+
+  const flushPendingDraftAdds = useCallback(
+    async (
+      draftId: string,
+      customerType: SaleCustomerType = 'BALCAO',
+      options: { silentErrorNotification?: boolean; errorSink?: RunCommandErrorSink } = {}
+    ): Promise<boolean> => {
+      const normalizedDraftId = draftId.trim();
+      if (!normalizedDraftId) {
+        return false;
+      }
+
+      const queue = pendingDraftFlushQueueRef.current;
+      const previous = queue.get(normalizedDraftId) ?? Promise.resolve(true);
+      const execute = () => flushPendingDraftAddsCore(normalizedDraftId, customerType, options);
+      const next = previous.then(execute, execute);
+      queue.set(normalizedDraftId, next);
+
+      try {
+        return await next;
+      } finally {
+        if (queue.get(normalizedDraftId) === next) {
+          queue.delete(normalizedDraftId);
+        }
+      }
+    },
+    [flushPendingDraftAddsCore]
+  );
+
+  const resolveDraftCustomerType = useCallback((draftId: string): SaleCustomerType => {
+    const serverDraft = saleDraftsRef.current.find((entry) => entry.id === draftId);
+    return (serverDraft?.customerType || 'BALCAO') as SaleCustomerType;
+  }, []);
+
+  const runPendingDraftBackgroundSync = useCallback(
+    async (draftId: string): Promise<void> => {
+      const normalizedDraftId = draftId.trim();
+      if (!normalizedDraftId) return;
+      if (!isAccessVerified || isStateHydrating) return;
+      if (!isPendingDraftAddsHydratedRef.current) return;
+      if (syncingPaidDraftIdsRef.current.has(normalizedDraftId)) return;
+
+      const pendingEntries = pendingDraftAddsRef.current[normalizedDraftId] || [];
+      if (pendingEntries.length === 0) {
+        pendingDraftBackgroundRetryAttemptsRef.current.delete(normalizedDraftId);
+        return;
+      }
+
+      const runningSet = pendingDraftBackgroundSyncRunningRef.current;
+      if (runningSet.has(normalizedDraftId)) return;
+      runningSet.add(normalizedDraftId);
+
+      try {
+        const errorSink: RunCommandErrorSink = {};
+        const ok = await flushPendingDraftAdds(
+          normalizedDraftId,
+          resolveDraftCustomerType(normalizedDraftId),
+          {
+            silentErrorNotification: true,
+            errorSink,
+          }
+        );
+        if (ok) {
+          pendingDraftBackgroundRetryAttemptsRef.current.delete(normalizedDraftId);
+          return;
+        }
+
+        const retryable = errorSink.retryable ?? true;
+        if (!retryable) {
+          pendingDraftBackgroundRetryAttemptsRef.current.delete(normalizedDraftId);
+          reportErrorMonitorEvent({
+            source: 'sistema:draft-background-sync',
+            level: 'error',
+            message: errorSink.message || 'Falha permanente ao sincronizar itens do carrinho.',
+            statusCode: errorSink.statusCode,
+            stack: errorSink.error instanceof Error ? errorSink.error.stack : undefined,
+            context: {
+              draftId: normalizedDraftId,
+              pendingItems: pendingEntries.length,
+            },
+          });
+          return;
+        }
+
+        const attemptsMap = pendingDraftBackgroundRetryAttemptsRef.current;
+        const nextAttempts = (attemptsMap.get(normalizedDraftId) || 0) + 1;
+        attemptsMap.set(normalizedDraftId, nextAttempts);
+
+        const retryDelayMs = getPendingDraftBackgroundSyncRetryDelayMs(nextAttempts);
+        const timers = pendingDraftBackgroundSyncTimerRef.current;
+        const existingTimer = timers.get(normalizedDraftId);
+        if (existingTimer !== undefined) {
+          window.clearTimeout(existingTimer);
+        }
+        const timerId = window.setTimeout(() => {
+          const activeTimer = pendingDraftBackgroundSyncTimerRef.current.get(normalizedDraftId);
+          if (activeTimer !== timerId) return;
+          pendingDraftBackgroundSyncTimerRef.current.delete(normalizedDraftId);
+          void runPendingDraftBackgroundSync(normalizedDraftId);
+        }, retryDelayMs);
+        timers.set(normalizedDraftId, timerId);
+      } finally {
+        runningSet.delete(normalizedDraftId);
+      }
+    },
+    [flushPendingDraftAdds, isAccessVerified, isStateHydrating, resolveDraftCustomerType]
+  );
+
+  const schedulePendingDraftBackgroundSync = useCallback(
+    (draftId: string, delayMs = PENDING_DRAFT_BACKGROUND_SYNC_DEBOUNCE_MS): void => {
+      const normalizedDraftId = draftId.trim();
+      if (!normalizedDraftId) return;
+      if (!isAccessVerified || isStateHydrating) return;
+      if (!isPendingDraftAddsHydratedRef.current) return;
+      if (syncingPaidDraftIdsRef.current.has(normalizedDraftId)) return;
+
+      const pendingEntries = pendingDraftAddsRef.current[normalizedDraftId] || [];
+      if (pendingEntries.length === 0) return;
+
+      const timers = pendingDraftBackgroundSyncTimerRef.current;
+      const existingTimer = timers.get(normalizedDraftId);
+      if (existingTimer !== undefined) {
+        window.clearTimeout(existingTimer);
+      }
+
+      const safeDelayMs = Math.max(120, Math.round(delayMs));
+      const timerId = window.setTimeout(() => {
+        const activeTimer = pendingDraftBackgroundSyncTimerRef.current.get(normalizedDraftId);
+        if (activeTimer !== timerId) return;
+        pendingDraftBackgroundSyncTimerRef.current.delete(normalizedDraftId);
+        void runPendingDraftBackgroundSync(normalizedDraftId);
+      }, safeDelayMs);
+      timers.set(normalizedDraftId, timerId);
+    },
+    [isAccessVerified, isStateHydrating, runPendingDraftBackgroundSync]
+  );
+
+  useEffect(() => {
+    if (!isAccessVerified || isStateHydrating) return;
+
+    const pendingDraftIds = new Set(Object.keys(pendingDraftAddsByDraft));
+    pendingDraftBackgroundSyncTimerRef.current.forEach((timerId, draftId) => {
+      if (pendingDraftIds.has(draftId)) return;
+      window.clearTimeout(timerId);
+      pendingDraftBackgroundSyncTimerRef.current.delete(draftId);
+      pendingDraftBackgroundRetryAttemptsRef.current.delete(draftId);
+    });
+
+    Object.entries(pendingDraftAddsByDraft).forEach(([draftId, entries]) => {
+      if (!Array.isArray(entries) || entries.length === 0) return;
+      schedulePendingDraftBackgroundSync(draftId);
+    });
+  }, [
+    isAccessVerified,
+    isStateHydrating,
+    pendingDraftAddsByDraft,
+    schedulePendingDraftBackgroundSync,
+  ]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const syncAllPendingDrafts = () => {
+      if (!isAccessVerified || isStateHydrating) return;
+      Object.entries(pendingDraftAddsRef.current).forEach(([draftId, entries]) => {
+        if (!Array.isArray(entries) || entries.length === 0) return;
+        schedulePendingDraftBackgroundSync(draftId, 120);
+      });
+    };
+
+    const handleOnline = () => {
+      syncAllPendingDrafts();
+    };
+
+    window.addEventListener('online', handleOnline);
+    const intervalId = window.setInterval(
+      syncAllPendingDrafts,
+      PENDING_DRAFT_BACKGROUND_SYNC_SWEEP_MS
+    );
+    syncAllPendingDrafts();
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.clearInterval(intervalId);
+    };
+  }, [isAccessVerified, isStateHydrating, schedulePendingDraftBackgroundSync]);
 
   const handleSavePaymentMethod = async (
     snapshot: PaymentCommitSnapshot | null,
@@ -3264,24 +3516,91 @@ const App: React.FC = () => {
           return;
         }
 
-        const confirmErrorSink: RunCommandErrorSink = {};
-        const confirmed = await runCommandWithSync(
-          {
-            type: 'SALE_DRAFT_CONFIRM_PAID',
-            draftId: currentJob.draftId,
-            commandId: currentJob.confirmCommandId,
-          },
-          undefined,
-          {
-            trackPendingState: false,
-            silentSuccessNotification: true,
-            silentErrorNotification: true,
-            errorSink: confirmErrorSink,
+        const confirmCommand: StateCommand = {
+          type: 'SALE_DRAFT_CONFIRM_PAID',
+          draftId: currentJob.draftId,
+          commandId: currentJob.confirmCommandId,
+        };
+
+        let asyncJobId: string | null = null;
+        try {
+          const queuedAsyncJob = await enqueueStateCommandAsync(confirmCommand);
+          asyncJobId = queuedAsyncJob.id;
+        } catch (error) {
+          const statusCode =
+            error instanceof StateCommandSyncError ? error.statusCode : undefined;
+          const shouldFallbackToSync =
+            statusCode === 404 ||
+            statusCode === 405 ||
+            statusCode === 422 ||
+            statusCode === 501;
+
+          if (shouldFallbackToSync) {
+            const confirmErrorSink: RunCommandErrorSink = {};
+            const confirmed = await runCommandWithSync(
+              confirmCommand,
+              undefined,
+              {
+                trackPendingState: false,
+                silentSuccessNotification: true,
+                silentErrorNotification: true,
+                errorSink: confirmErrorSink,
+              }
+            );
+            if (!confirmed) {
+              markJobAsFailed('Falha ao confirmar pagamento.', confirmErrorSink);
+              return;
+            }
+          } else {
+            markJobAsFailed('Falha ao enfileirar confirmação assíncrona.', {
+              error,
+              message: getStateSyncErrorMessage(error),
+              retryable: isRetryableSyncError(error),
+              statusCode,
+            });
+            return;
           }
-        );
-        if (!confirmed) {
-          markJobAsFailed('Falha ao confirmar pagamento.', confirmErrorSink);
-          return;
+        }
+
+        if (asyncJobId) {
+          let terminalStatus: { status: StateCommandAsyncJobStatus; lastError: string | null } | null = null;
+          try {
+            terminalStatus = await waitForAsyncCommandJobTerminalStatus(asyncJobId);
+          } catch (error) {
+            markJobAsFailed('Falha ao aguardar processamento assíncrono.', {
+              error,
+              message: getStateSyncErrorMessage(error),
+              retryable: isRetryableSyncError(error),
+              statusCode: error instanceof StateCommandSyncError ? error.statusCode : undefined,
+            });
+            return;
+          }
+
+          if (!terminalStatus || terminalStatus.status !== 'COMPLETED') {
+            markJobAsFailed(
+              terminalStatus?.lastError || 'Falha no processamento assíncrono do pedido.',
+              {
+                message:
+                  terminalStatus?.lastError ||
+                  'Falha no processamento assíncrono do pedido.',
+                retryable: false,
+              }
+            );
+            return;
+          }
+
+          try {
+            const refreshedState = await fetchStateSnapshot();
+            applyStateSnapshot(refreshedState);
+          } catch (error) {
+            markJobAsFailed('Pedido confirmado, mas falhou ao atualizar estado local.', {
+              error,
+              message: getStateSyncErrorMessage(error),
+              retryable: isRetryableSyncError(error),
+              statusCode: error instanceof StateCommandSyncError ? error.statusCode : undefined,
+            });
+            return;
+          }
         }
 
         replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
@@ -3292,14 +3611,20 @@ const App: React.FC = () => {
       isPendingPaidSyncQueueRunningRef.current = false;
     }
   }, [
+    applyStateSnapshot,
+    enqueueStateCommandAsync,
+    fetchStateSnapshot,
     flushPendingDraftAdds,
+    getStateCommandAsyncJob,
     handleSavePaymentMethod,
     hydratePendingPaidSyncQueue,
+    isRetryableSyncError,
     isStateHydrating,
     replacePendingPaidSyncQueue,
     runCommandWithSync,
     setDraftSyncInProgress,
     showCornerSync,
+    waitForAsyncCommandJobTerminalStatus,
     showNotification,
   ]);
 

@@ -90,6 +90,9 @@ const toVersionTag = (value: Date): string => value.toISOString();
 const APPLY_COMMAND_MAX_ATTEMPTS = 3;
 const APPLY_COMMAND_RETRY_BASE_DELAY_MS = 120;
 const APPLY_COMMAND_RETRY_MAX_DELAY_MS = 900;
+const APPLY_COMMAND_LATEST_MAX_ATTEMPTS = 8;
+const APPLY_COMMAND_LATEST_RETRY_BASE_DELAY_MS = 80;
+const APPLY_COMMAND_LATEST_RETRY_MAX_DELAY_MS = 1200;
 
 const wait = (ms: number): Promise<void> =>
   new Promise((resolve) => {
@@ -100,6 +103,12 @@ const getApplyCommandRetryDelayMs = (attempt: number): number => {
   const safeAttempt = Math.max(0, Math.floor(attempt));
   const exponential = APPLY_COMMAND_RETRY_BASE_DELAY_MS * 2 ** safeAttempt;
   return Math.min(APPLY_COMMAND_RETRY_MAX_DELAY_MS, exponential);
+};
+
+const getApplyCommandLatestRetryDelayMs = (attempt: number): number => {
+  const safeAttempt = Math.max(0, Math.floor(attempt));
+  const exponential = APPLY_COMMAND_LATEST_RETRY_BASE_DELAY_MS * 2 ** safeAttempt;
+  return Math.min(APPLY_COMMAND_LATEST_RETRY_MAX_DELAY_MS, exponential);
 };
 
 interface HotStatePatch {
@@ -143,6 +152,9 @@ export interface DailyBackupResult {
 
 export class StateService {
   private readonly sessionService = new SessionService();
+  private static bestEffortDailyBackupInFlight: Promise<void> | null = null;
+  private static bestEffortDailyBackupLastAttemptAt = 0;
+  private static bestEffortDailyBackupLastDayKey: string | null = null;
 
   async getAppState(): Promise<AppStateSnapshot> {
     try {
@@ -224,6 +236,32 @@ export class StateService {
     throw new HttpError(503, 'Banco temporariamente indisponível para salvar estado.');
   }
 
+  async applyCommandAgainstLatest(
+    command: StateCommandInput,
+    context?: RequestContext
+  ): Promise<AppStateSnapshot> {
+    for (let attempt = 0; attempt < APPLY_COMMAND_LATEST_MAX_ATTEMPTS; attempt += 1) {
+      const currentVersion = await this.getAppStateVersion();
+
+      try {
+        return await this.applyCommand(command, currentVersion, context);
+      } catch (error) {
+        const isVersionConflict =
+          error instanceof HttpError &&
+          (error.statusCode === 412 || error.statusCode === 428);
+
+        const isLastAttempt = attempt >= APPLY_COMMAND_LATEST_MAX_ATTEMPTS - 1;
+        if (!isVersionConflict || isLastAttempt) {
+          throw error;
+        }
+
+        await wait(getApplyCommandLatestRetryDelayMs(attempt));
+      }
+    }
+
+    throw new HttpError(503, 'Não foi possível aplicar o comando devido a conflito de concorrência.');
+  }
+
   async runDailyBackup(context?: RequestContext): Promise<DailyBackupResult> {
     const now = new Date();
     try {
@@ -244,7 +282,11 @@ export class StateService {
 
   private isRetryableApplyCommandError(error: unknown): boolean {
     if (error instanceof Prisma.PrismaClientKnownRequestError) {
-      return error.code === 'P2024' || error.code === 'P2034';
+      return error.code === 'P2024' || error.code === 'P2028' || error.code === 'P2034';
+    }
+
+    if (error instanceof Prisma.PrismaClientUnknownRequestError) {
+      return error.message.includes('Transaction API error');
     }
 
     if (error instanceof Prisma.PrismaClientInitializationError) {
@@ -256,6 +298,59 @@ export class StateService {
     }
 
     return false;
+  }
+
+  private getStateTxOptions() {
+    return {
+      maxWait: env.APP_STATE_TX_MAX_WAIT_MS,
+      timeout: env.APP_STATE_TX_TIMEOUT_MS,
+    };
+  }
+
+  private runStateTransaction<T>(
+    operation: (tx: Prisma.TransactionClient) => Promise<T>
+  ): Promise<T> {
+    return prisma.$transaction((tx) => operation(tx), this.getStateTxOptions());
+  }
+
+  private queueBestEffortDailyBackup(
+    stateJson: Prisma.JsonValue,
+    sourceVersion: string,
+    referenceDate: Date
+  ): void {
+    const backupDay = toBackupDay(referenceDate, env.DEFAULT_TIMEZONE);
+    const backupDayKey = toDateOnlyKey(backupDay);
+    const nowMs = Date.now();
+    const isSameDayWithinCooldown =
+      StateService.bestEffortDailyBackupLastDayKey === backupDayKey &&
+      nowMs - StateService.bestEffortDailyBackupLastAttemptAt <
+        env.APP_STATE_BEST_EFFORT_BACKUP_MIN_INTERVAL_MS;
+
+    if (isSameDayWithinCooldown || StateService.bestEffortDailyBackupInFlight) {
+      return;
+    }
+
+    StateService.bestEffortDailyBackupLastDayKey = backupDayKey;
+    StateService.bestEffortDailyBackupLastAttemptAt = nowMs;
+
+    StateService.bestEffortDailyBackupInFlight = (async () => {
+      try {
+        await prisma.appStateBackup.createMany({
+          data: {
+            kind: AppStateBackupKind.DAILY,
+            backupDay,
+            sourceVersion,
+            stateJson: stateJson as unknown as Prisma.InputJsonValue,
+          },
+          skipDuplicates: true,
+        });
+      } catch (error) {
+        // eslint-disable-next-line no-console
+        console.error('[state-backup] best-effort backup failed', error);
+      } finally {
+        StateService.bestEffortDailyBackupInFlight = null;
+      }
+    })();
   }
 
   private async bootstrapAppStateTables(): Promise<void> {
@@ -336,7 +431,7 @@ export class StateService {
     context?: RequestContext,
     expectedVersion?: string
   ): Promise<AppStateSnapshot> {
-    return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    const committed = await this.runStateTransaction(async (tx: Prisma.TransactionClient) => {
       const current = await tx.appState.findUnique({ where: { id: 1 } });
       const currentVersion = current ? toVersionTag(current.updatedAt) : null;
       const operationNow = new Date();
@@ -371,13 +466,7 @@ export class StateService {
               stateJson: state as unknown as Prisma.InputJsonValue,
             },
           });
-
-      await this.ensureDailyBackupTx(
-        tx,
-        saved.stateJson as Prisma.JsonValue,
-        toVersionTag(saved.updatedAt),
-        operationNow
-      );
+      const savedVersion = toVersionTag(saved.updatedAt);
 
       await new AuditService(tx).log(
         {
@@ -389,10 +478,23 @@ export class StateService {
       );
 
       return {
+        stateJson: saved.stateJson as Prisma.JsonValue,
         state,
-        version: toVersionTag(saved.updatedAt),
+        version: savedVersion,
+        operationNow,
       };
     });
+
+    this.queueBestEffortDailyBackup(
+      committed.stateJson,
+      committed.version,
+      committed.operationNow
+    );
+
+    return {
+      state: committed.state,
+      version: committed.version,
+    };
   }
 
   private assertExpectedVersion(
@@ -421,7 +523,7 @@ export class StateService {
     expectedVersion: string,
     context?: RequestContext
   ): Promise<AppStateSnapshot> {
-    return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    const committed = await this.runStateTransaction(async (tx: Prisma.TransactionClient) => {
       const current = await tx.appState.findUnique({ where: { id: 1 } });
       const currentVersion = current ? toVersionTag(current.updatedAt) : null;
       const operationNow = new Date();
@@ -450,14 +552,7 @@ export class StateService {
               stateJson: nextState as unknown as Prisma.InputJsonValue,
             },
           });
-
-      await this.ensureDailyBackupTx(
-        tx,
-        saved.stateJson as Prisma.JsonValue,
-        toVersionTag(saved.updatedAt),
-        operationNow,
-        { refreshExisting: false }
-      );
+      const savedVersion = toVersionTag(saved.updatedAt);
 
       await new AuditService(tx).log(
         {
@@ -473,10 +568,23 @@ export class StateService {
       );
 
       return {
+        stateJson: saved.stateJson as Prisma.JsonValue,
         state: nextState,
-        version: toVersionTag(saved.updatedAt),
+        version: savedVersion,
+        operationNow,
       };
     });
+
+    this.queueBestEffortDailyBackup(
+      committed.stateJson,
+      committed.version,
+      committed.operationNow
+    );
+
+    return {
+      state: committed.state,
+      version: committed.version,
+    };
   }
 
   private async updateHotStateTx(
@@ -513,7 +621,7 @@ export class StateService {
     const backupDay = toBackupDay(referenceDate, env.DEFAULT_TIMEZONE);
     const backupDayKey = toDateOnlyKey(backupDay);
 
-    return prisma.$transaction(async (tx: Prisma.TransactionClient) => {
+    return this.runStateTransaction(async (tx: Prisma.TransactionClient) => {
       const liveState = await tx.appState.findUnique({ where: { id: 1 } });
       const sourceVersion = liveState ? toVersionTag(liveState.updatedAt) : snapshot.version;
       const stateJson = (liveState?.stateJson ?? snapshot.state) as Prisma.JsonValue;

@@ -410,3 +410,29 @@ model AppStateBackup {
   @@index([sourceVersion])
   @@map("app_state_backups")
 }
+
+model StateCommandJob {
+  id          String   @id @default(uuid()) @db.Uuid
+  commandId   String   @unique @map("command_id") @db.VarChar(200)
+  commandType String   @map("command_type") @db.VarChar(80)
+  payloadJson Json     @map("payload_json")
+  status      String   @db.VarChar(20)
+  attempts    Int      @default(0)
+  maxAttempts Int      @default(10) @map("max_attempts")
+  nextAttemptAt DateTime @default(now()) @map("next_attempt_at")
+  lockedAt    DateTime? @map("locked_at")
+  lockedBy    String?   @map("locked_by") @db.VarChar(120)
+  startedAt   DateTime? @map("started_at")
+  finishedAt  DateTime? @map("finished_at")
+  lastError   String?   @map("last_error") @db.VarChar(1200)
+  actorUserId String?   @map("actor_user_id") @db.Uuid
+  requestId   String?   @map("request_id") @db.VarChar(120)
+  resultVersion String? @map("result_version") @db.VarChar(80)
+  createdAt   DateTime  @default(now()) @map("created_at")
+  updatedAt   DateTime  @updatedAt @map("updated_at")
+
+  @@index([status, nextAttemptAt, createdAt], map: "state_command_jobs_status_next_attempt_created_idx")
+  @@index([lockedAt], map: "state_command_jobs_locked_at_idx")
+  @@index([commandType, createdAt], map: "state_command_jobs_type_created_idx")
+  @@map("state_command_jobs")
+}
