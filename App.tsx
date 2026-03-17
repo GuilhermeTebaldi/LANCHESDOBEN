@@ -854,7 +854,28 @@ const isFinalizeStateConflictErrorMessage = (message: string): boolean => {
   return normalized.includes('nao e possivel finalizar esta venda');
 };
 
+const isDatabaseUnavailableErrorMessage = (message: string): boolean => {
+  const normalized = message
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+  return (
+    normalized.includes('banco temporariamente indisponivel') ||
+    normalized.includes('banco temporariamente ocupado') ||
+    normalized.includes('http 503') ||
+    normalized.includes('p1001') ||
+    normalized.includes('p1002') ||
+    normalized.includes('p1017') ||
+    normalized.includes('cant reach database server') ||
+    normalized.includes('server has closed the connection') ||
+    normalized.includes('connection reset by peer')
+  );
+};
+
 const isAutoRecoverableFailedQueueMessage = (message: string): boolean => {
+  if (isDatabaseUnavailableErrorMessage(message)) {
+    return false;
+  }
   const normalized = message
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
@@ -863,11 +884,7 @@ const isAutoRecoverableFailedQueueMessage = (message: string): boolean => {
     normalized.includes('conflito de versao') ||
     normalized.includes('token de estado desatualizado') ||
     normalized.includes('nao e possivel finalizar esta venda') ||
-    normalized.includes('venda ainda nao foi finalizada para pagamento') ||
-    normalized.includes('failed to fetch') ||
-    normalized.includes('falha de conexao') ||
-    normalized.includes('tempo limite') ||
-    normalized.includes('timeout')
+    normalized.includes('venda ainda nao foi finalizada para pagamento')
   );
 };
 
