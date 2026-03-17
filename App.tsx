@@ -59,6 +59,12 @@ import {
   type ReceiptPrintPayloadInput,
 } from './utils/receiptPrintPayload';
 import { reportErrorMonitorEvent } from './utils/errorMonitorClient';
+import {
+  describePaidSyncAssistantMode,
+  getPaidSyncAssistantRecoverDelayMs,
+  getPaidSyncAssistantRetryDelayMs,
+  shouldPaidSyncAssistantRunRecovery,
+} from './utils/paidSyncAssistant';
 
 const ADMIN_GATE_KEY = 'lanchesdoben_admin_gate';
 const ADMIN_SESSION_KEY = 'lanchesdoben_admin_session';
@@ -150,6 +156,17 @@ interface PendingPaidSyncJob {
   attempts: number;
   nextAttemptAt?: string;
   lastError?: string;
+}
+
+type PaidSyncAssistantMode = 'idle' | 'retrying' | 'recovering' | 'reconciling';
+
+interface PaidSyncAssistantState {
+  mode: PaidSyncAssistantMode;
+  message: string;
+  active: boolean;
+  draftId: string | null;
+  jobId: string | null;
+  updatedAt: number;
 }
 
 interface UndoSaleGroup {
@@ -1355,10 +1372,7 @@ const PENDING_PAID_SYNC_RETRY_MAX_MS = 15 * 60 * 1000;
 const PENDING_PAID_SYNC_RETRY_JITTER = 0.2;
 const PENDING_PAID_SYNC_EMPTY_DRAFT_RECOVERY_DELAY_MS = 600;
 const PENDING_PAID_SYNC_EMPTY_DRAFT_RECOVERY_MAX_ATTEMPTS = 2;
-const FAILED_PAID_SYNC_AUTO_RETRY_MAX_ATTEMPTS = 4;
-const FAILED_PAID_SYNC_AUTO_RETRY_BASE_DELAY_MS = 1200;
-const FAILED_PAID_SYNC_AUTO_RECOVER_MAX_ATTEMPTS = 4;
-const FAILED_PAID_SYNC_AUTO_RECOVER_DELAY_MS = 1400;
+const PAID_SYNC_ASSISTANT_STATUS_TTL_MS = 2800;
 const PAID_SYNC_QUEUE_PREVIEW_LIMIT = 6;
 const PENDING_DRAFT_BACKGROUND_SYNC_DEBOUNCE_MS = 650;
 const PENDING_DRAFT_BACKGROUND_SYNC_SWEEP_MS = 10000;
@@ -1431,7 +1445,7 @@ const App: React.FC = () => {
   const failedPaidSyncAutoRetryAttemptsRef = useRef<Map<string, number>>(new Map());
   const failedPaidSyncAutoRetryTimersRef = useRef<Map<string, number>>(new Map());
   const failedPaidSyncAutoRecoverTimersRef = useRef<Map<string, number>>(new Map());
-  const failedPaidSyncAutoRecoverDraftAttemptsRef = useRef<Map<string, number>>(new Map());
+  const paidSyncAssistantStatusTimeoutRef = useRef<number | null>(null);
   const activeDraftIdRef = useRef<string | null>(null);
   const saleDraftsRef = useRef<SaleDraft[]>(DEFAULT_APP_STATE.saleDrafts);
   const pendingDraftCreationRef = useRef<Promise<string | null> | null>(null);
@@ -1472,6 +1486,14 @@ const App: React.FC = () => {
   const [pendingPaidSyncQueueSnapshot, setPendingPaidSyncQueueSnapshot] = useState<PendingPaidSyncJob[]>([]);
   const [failedPaidSyncQueue, setFailedPaidSyncQueue] = useState<PendingPaidSyncJob[]>([]);
   const [failedPaidSyncAutoRetryRevision, setFailedPaidSyncAutoRetryRevision] = useState(0);
+  const [paidSyncAssistantState, setPaidSyncAssistantState] = useState<PaidSyncAssistantState>({
+    mode: 'idle',
+    message: '',
+    active: false,
+    draftId: null,
+    jobId: null,
+    updatedAt: Date.now(),
+  });
   
   const [isAddProductModalOpen, setIsAddProductModalOpen] = useState(false);
   const [isAddIngredientModalOpen, setIsAddIngredientModalOpen] = useState(false);
@@ -1839,6 +1861,41 @@ const App: React.FC = () => {
     []
   );
 
+  const setPaidSyncAssistantActivity = useCallback(
+    (
+      mode: Exclude<PaidSyncAssistantMode, 'idle'>,
+      message: string,
+      context?: {
+        draftId?: string | null;
+        jobId?: string | null;
+      }
+    ): void => {
+      if (paidSyncAssistantStatusTimeoutRef.current !== null) {
+        window.clearTimeout(paidSyncAssistantStatusTimeoutRef.current);
+        paidSyncAssistantStatusTimeoutRef.current = null;
+      }
+      setPaidSyncAssistantState({
+        mode,
+        message,
+        active: true,
+        draftId: context?.draftId ?? null,
+        jobId: context?.jobId ?? null,
+        updatedAt: Date.now(),
+      });
+      paidSyncAssistantStatusTimeoutRef.current = window.setTimeout(() => {
+        setPaidSyncAssistantState((current) => ({
+          ...current,
+          mode: 'idle',
+          active: false,
+          message: '',
+          updatedAt: Date.now(),
+        }));
+        paidSyncAssistantStatusTimeoutRef.current = null;
+      }, PAID_SYNC_ASSISTANT_STATUS_TTL_MS);
+    },
+    []
+  );
+
   const setDraftSyncInProgress = useCallback((draftId: string, isSyncing: boolean) => {
     const nextSet = new Set(syncingPaidDraftIdsRef.current);
     if (isSyncing) {
@@ -1861,10 +1918,17 @@ const App: React.FC = () => {
       if (pendingPaidSyncRetryTimerRef.current !== null) {
         window.clearTimeout(pendingPaidSyncRetryTimerRef.current);
       }
+      if (paidSyncAssistantStatusTimeoutRef.current !== null) {
+        window.clearTimeout(paidSyncAssistantStatusTimeoutRef.current);
+      }
       failedPaidSyncAutoRetryTimersRef.current.forEach((timerId) => {
         window.clearTimeout(timerId);
       });
+      failedPaidSyncAutoRecoverTimersRef.current.forEach((timerId) => {
+        window.clearTimeout(timerId);
+      });
       failedPaidSyncAutoRetryTimersRef.current.clear();
+      failedPaidSyncAutoRecoverTimersRef.current.clear();
       failedPaidSyncAutoRetryAttemptsRef.current.clear();
       pendingDraftBackgroundSyncTimerRef.current.forEach((timerId) => {
         window.clearTimeout(timerId);
@@ -3943,7 +4007,14 @@ const App: React.FC = () => {
   );
 
   const restorePendingDraftAddsFromSnapshot = useCallback(
-    (job: PendingPaidSyncJob): boolean => {
+    (
+      job: PendingPaidSyncJob,
+      options: {
+        trigger?: 'queue-empty-draft' | 'failed-retry' | 'manual-recover' | 'auto-recover';
+        failureMessage?: string;
+        statusCode?: number;
+      } = {}
+    ): boolean => {
       hydratePendingDraftAdds();
 
       const normalizedDraftId = job.draftId.trim();
@@ -4015,6 +4086,20 @@ const App: React.FC = () => {
         [normalizedDraftId]: rebuiltPendingAdds,
       };
       replacePendingDraftAdds(nextPendingByDraft);
+      reportErrorMonitorEvent({
+        source: 'sistema:paid-sync:cart-restored',
+        level: 'warn',
+        message: 'Pedido reconstruído no carrinho local para auto-recuperação da fila.',
+        statusCode: options.statusCode,
+        context: {
+          trigger: options.trigger || 'unknown',
+          draftId: normalizedDraftId,
+          jobId: job.id,
+          rebuiltItems: rebuiltPendingAdds.length,
+          failedAttempts: job.attempts,
+          lastError: options.failureMessage || job.lastError || null,
+        },
+      });
       return true;
     },
     [hydratePendingDraftAdds, replacePendingDraftAdds]
@@ -4052,12 +4137,6 @@ const App: React.FC = () => {
     setFailedPaidSyncAutoRetryAttempts(normalizedJobId, 0);
   }, [setFailedPaidSyncAutoRetryAttempts]);
 
-  const clearFailedPaidSyncAutoRecoverDraftState = useCallback((draftId: string): void => {
-    const normalizedDraftId = draftId.trim();
-    if (!normalizedDraftId) return;
-    failedPaidSyncAutoRecoverDraftAttemptsRef.current.delete(normalizedDraftId);
-  }, []);
-
   const handleRecoverFailedPaidSyncJobToCart = useCallback(
     (
       jobId: string,
@@ -4085,15 +4164,36 @@ const App: React.FC = () => {
           failedPaidSyncQueueRef.current.filter((entry) => entry.id !== normalizedJobId)
         );
         clearFailedPaidSyncAutoRetryState(normalizedJobId);
-        clearFailedPaidSyncAutoRecoverDraftState(failedJob.draftId);
         if (!options.silentNotification) {
           showNotification('Pedido já resolvido no servidor. Item removido da fila de falhas.');
         }
         return true;
       }
 
-      const restored = restorePendingDraftAddsFromSnapshot(failedJob);
+      setPaidSyncAssistantActivity(
+        'recovering',
+        describePaidSyncAssistantMode('recovering', `pedido ${failedJob.draftId.slice(-8).toUpperCase()}`),
+        {
+          draftId: failedJob.draftId,
+          jobId: failedJob.id,
+        }
+      );
+      const restored = restorePendingDraftAddsFromSnapshot(failedJob, {
+        trigger: options.requeueAfterRestore === true ? 'auto-recover' : 'manual-recover',
+      });
       if (!restored) {
+        reportErrorMonitorEvent({
+          source: 'sistema:paid-sync:cart-restore-failed',
+          level: 'error',
+          message: 'Falha ao reconstruir pedido no carrinho a partir do snapshot da fila.',
+          context: {
+            trigger: options.requeueAfterRestore === true ? 'auto-recover' : 'manual-recover',
+            draftId: failedJob.draftId,
+            jobId: failedJob.id,
+            failedAttempts: failedJob.attempts,
+            lastError: failedJob.lastError || null,
+          },
+        });
         if (!options.silentNotification) {
           showNotification(
             'Não foi possível reconstruir este carrinho automaticamente. Reabra o carrinho e confirme novamente.'
@@ -4106,7 +4206,6 @@ const App: React.FC = () => {
         failedPaidSyncQueueRef.current.filter((entry) => entry.id !== normalizedJobId)
       );
       clearFailedPaidSyncAutoRetryState(normalizedJobId);
-      clearFailedPaidSyncAutoRecoverDraftState(failedJob.draftId);
       const shouldRequeueAfterRestore = options.requeueAfterRestore !== false;
       if (shouldRequeueAfterRestore) {
         enqueuePendingPaidSyncJob({
@@ -4124,19 +4223,6 @@ const App: React.FC = () => {
         return true;
       }
 
-      setDraftSyncInProgress(failedJob.draftId, false);
-
-      if (options.openCart === true) {
-        activeDraftIdRef.current = failedJob.draftId;
-        setActiveDraftId(failedJob.draftId);
-        setIsCartOpen(true);
-        showCornerSync('error', 'Pedido enviado ao carrinho para revisão manual.', 2600);
-        if (!options.silentNotification) {
-          showNotification('Pedido enviado ao carrinho para ajuste manual.');
-        }
-        return true;
-      }
-
       showCornerSync('error', 'Pedido recuperado, mas não foi reenfileirado.', 2600);
       if (!options.silentNotification) {
         showNotification('Pedido recuperado, mas a fila não conseguiu reenfileirar agora.');
@@ -4144,13 +4230,12 @@ const App: React.FC = () => {
       return false;
     },
     [
-      clearFailedPaidSyncAutoRecoverDraftState,
       clearFailedPaidSyncAutoRetryState,
+      setPaidSyncAssistantActivity,
       enqueuePendingPaidSyncJob,
       hydrateFailedPaidSyncQueue,
       replaceFailedPaidSyncQueue,
       restorePendingDraftAddsFromSnapshot,
-      setDraftSyncInProgress,
       showCornerSync,
       showNotification,
     ]
@@ -4228,6 +4313,17 @@ const App: React.FC = () => {
         }
 
         setDraftSyncInProgress(currentJob.draftId, true);
+        setPaidSyncAssistantActivity(
+          'reconciling',
+          describePaidSyncAssistantMode(
+            'reconciling',
+            `pedido ${currentJob.draftId.slice(-8).toUpperCase()}`
+          ),
+          {
+            draftId: currentJob.draftId,
+            jobId: currentJob.id,
+          }
+        );
         showCornerSync('syncing', 'Sincronizando venda no banco...');
 
         const markJobAsFailed = (
@@ -4244,7 +4340,11 @@ const App: React.FC = () => {
             isEmptyDraftFailure &&
             currentJob.attempts < PENDING_PAID_SYNC_EMPTY_DRAFT_RECOVERY_MAX_ATTEMPTS
           ) {
-            const restored = restorePendingDraftAddsFromSnapshot(currentJob);
+            const restored = restorePendingDraftAddsFromSnapshot(currentJob, {
+              trigger: 'queue-empty-draft',
+              failureMessage: message,
+              statusCode,
+            });
             if (restored) {
               const retryAt = new Date(
                 Date.now() + PENDING_PAID_SYNC_EMPTY_DRAFT_RECOVERY_DELAY_MS
@@ -4558,6 +4658,15 @@ const App: React.FC = () => {
       }
     } finally {
       isPendingPaidSyncQueueRunningRef.current = false;
+      if (pendingPaidSyncQueueRef.current.length === 0 && failedPaidSyncQueueRef.current.length === 0) {
+        setPaidSyncAssistantState((current) => ({
+          ...current,
+          mode: 'idle',
+          active: false,
+          message: '',
+          updatedAt: Date.now(),
+        }));
+      }
       if (pendingPaidSyncQueueRef.current.length > 0) {
         window.setTimeout(() => {
           void processPendingPaidSyncQueue();
@@ -4579,6 +4688,7 @@ const App: React.FC = () => {
     replacePendingPaidSyncQueue,
     restorePendingDraftAddsFromSnapshot,
     runCommandWithSync,
+    setPaidSyncAssistantActivity,
     setDraftSyncInProgress,
     showCornerSync,
     waitForAsyncCommandJobTerminalStatus,
@@ -4649,8 +4759,23 @@ const App: React.FC = () => {
 
       const isEmptyDraftFailure = isDraftEmptyErrorMessage(failedJob.lastError || '');
       if (isEmptyDraftFailure) {
-        const restored = restorePendingDraftAddsFromSnapshot(failedJob);
+        const restored = restorePendingDraftAddsFromSnapshot(failedJob, {
+          trigger: 'failed-retry',
+          failureMessage: failedJob.lastError,
+        });
         if (!restored) {
+          reportErrorMonitorEvent({
+            source: 'sistema:paid-sync:cart-restore-failed',
+            level: 'error',
+            message: 'Falha ao reconstruir pedido no carrinho durante tentativa de reenfileirar.',
+            context: {
+              trigger: 'failed-retry',
+              draftId: failedJob.draftId,
+              jobId: failedJob.id,
+              failedAttempts: failedJob.attempts,
+              lastError: failedJob.lastError || null,
+            },
+          });
           if (!isAutoRetry) {
             showNotification(
               'Não foi possível reconstruir este carrinho automaticamente. Reabra o carrinho e confirme novamente.'
@@ -4672,13 +4797,21 @@ const App: React.FC = () => {
         lastError: undefined,
       });
       const autoAttempt = failedPaidSyncAutoRetryAttemptsRef.current.get(normalizedJobId) || 0;
+      setPaidSyncAssistantActivity(
+        'retrying',
+        describePaidSyncAssistantMode(
+          'retrying',
+          `pedido ${failedJob.draftId.slice(-8).toUpperCase()} (tentativa ${autoAttempt + 1})`
+        ),
+        {
+          draftId: failedJob.draftId,
+          jobId: failedJob.id,
+        }
+      );
       showCornerSync(
         'syncing',
         isAutoRetry
-          ? `Tentativa automática ${Math.min(
-              autoAttempt,
-              FAILED_PAID_SYNC_AUTO_RETRY_MAX_ATTEMPTS
-            )}/${FAILED_PAID_SYNC_AUTO_RETRY_MAX_ATTEMPTS}...`
+          ? `Robô tentando novamente (${autoAttempt + 1})...`
           : 'Pedido reenviado para a fila.',
         1800
       );
@@ -4694,6 +4827,7 @@ const App: React.FC = () => {
       processPendingPaidSyncQueue,
       replaceFailedPaidSyncQueue,
       restorePendingDraftAddsFromSnapshot,
+      setPaidSyncAssistantActivity,
       showCornerSync,
       showNotification,
     ]
@@ -4734,7 +4868,6 @@ const App: React.FC = () => {
     if (!isFailedPaidSyncQueueHydratedRef.current) return;
 
     const activeFailedIds = new Set(failedPaidSyncQueue.map((job) => job.id));
-    const activeFailedDraftIds = new Set(failedPaidSyncQueue.map((job) => job.draftId));
     let shouldRefreshAutoRetryUi = false;
 
     failedPaidSyncAutoRetryTimersRef.current.forEach((timerId, jobId) => {
@@ -4753,24 +4886,19 @@ const App: React.FC = () => {
       failedPaidSyncAutoRetryAttemptsRef.current.delete(jobId);
       shouldRefreshAutoRetryUi = true;
     });
-    failedPaidSyncAutoRecoverDraftAttemptsRef.current.forEach((_attempts, draftId) => {
-      if (activeFailedDraftIds.has(draftId)) return;
-      failedPaidSyncAutoRecoverDraftAttemptsRef.current.delete(draftId);
-    });
 
     failedPaidSyncQueue.forEach((job) => {
       const autoAttempts = failedPaidSyncAutoRetryAttemptsRef.current.get(job.id) || 0;
-      if (autoAttempts >= FAILED_PAID_SYNC_AUTO_RETRY_MAX_ATTEMPTS) {
-        if (failedPaidSyncAutoRecoverTimersRef.current.has(job.id)) return;
-        const recoverableError =
-          isDraftEmptyErrorMessage(job.lastError || '') ||
-          isAutoRecoverableFailedQueueMessage(job.lastError || '');
-        if (!recoverableError) return;
+      const recoverableError =
+        isDraftEmptyErrorMessage(job.lastError || '') ||
+        isAutoRecoverableFailedQueueMessage(job.lastError || '');
+      const shouldRunRecovery = shouldPaidSyncAssistantRunRecovery(
+        autoAttempts,
+        recoverableError
+      );
 
-        const draftRecoverAttempts =
-          failedPaidSyncAutoRecoverDraftAttemptsRef.current.get(job.draftId) || 0;
-        if (draftRecoverAttempts >= FAILED_PAID_SYNC_AUTO_RECOVER_MAX_ATTEMPTS) return;
-
+      if (shouldRunRecovery && !failedPaidSyncAutoRecoverTimersRef.current.has(job.id)) {
+        const recoveryDelayMs = getPaidSyncAssistantRecoverDelayMs(autoAttempts);
         const recoveryTimerId = window.setTimeout(() => {
           const currentTimer = failedPaidSyncAutoRecoverTimersRef.current.get(job.id);
           if (currentTimer !== recoveryTimerId) return;
@@ -4779,37 +4907,42 @@ const App: React.FC = () => {
           const latestJob = failedPaidSyncQueueRef.current.find((entry) => entry.id === job.id);
           if (!latestJob) return;
 
-          const currentDraftRecoverAttempts =
-            failedPaidSyncAutoRecoverDraftAttemptsRef.current.get(latestJob.draftId) || 0;
-          if (currentDraftRecoverAttempts >= FAILED_PAID_SYNC_AUTO_RECOVER_MAX_ATTEMPTS) return;
-
-          failedPaidSyncAutoRecoverDraftAttemptsRef.current.set(
-            latestJob.draftId,
-            currentDraftRecoverAttempts + 1
+          setPaidSyncAssistantActivity(
+            'recovering',
+            describePaidSyncAssistantMode(
+              'recovering',
+              `pedido ${latestJob.draftId.slice(-8).toUpperCase()}`
+            ),
+            {
+              draftId: latestJob.draftId,
+              jobId: latestJob.id,
+            }
           );
-
           const recovered = handleRecoverFailedPaidSyncJobToCart(latestJob.id, {
             silentNotification: true,
             openCart: false,
             requeueAfterRestore: true,
           });
           if (!recovered) {
+            const currentAttempts =
+              failedPaidSyncAutoRetryAttemptsRef.current.get(latestJob.id) || 0;
+            failedPaidSyncAutoRetryAttemptsRef.current.set(latestJob.id, currentAttempts + 1);
+            setFailedPaidSyncAutoRetryRevision((current) => current + 1);
+            void handleRetryFailedPaidSyncJob(latestJob.id, { autoRetry: true });
             showCornerSync(
               'error',
-              'Auto recuperação não concluiu. A fila seguirá tentando.',
-              2400
+              'Robô não reconstruiu agora. Vai tentar novamente sozinho.',
+              2200
             );
           }
-        }, FAILED_PAID_SYNC_AUTO_RECOVER_DELAY_MS);
+        }, recoveryDelayMs);
 
         failedPaidSyncAutoRecoverTimersRef.current.set(job.id, recoveryTimerId);
-        return;
       }
 
       if (failedPaidSyncAutoRetryTimersRef.current.has(job.id)) return;
 
-      const retryDelayMs =
-        FAILED_PAID_SYNC_AUTO_RETRY_BASE_DELAY_MS + autoAttempts * 700;
+      const retryDelayMs = getPaidSyncAssistantRetryDelayMs(autoAttempts);
       const timerId = window.setTimeout(() => {
         const currentTimer = failedPaidSyncAutoRetryTimersRef.current.get(job.id);
         if (currentTimer !== timerId) return;
@@ -4817,11 +4950,21 @@ const App: React.FC = () => {
 
         const currentAttempts =
           failedPaidSyncAutoRetryAttemptsRef.current.get(job.id) || 0;
-        if (currentAttempts >= FAILED_PAID_SYNC_AUTO_RETRY_MAX_ATTEMPTS) return;
 
         failedPaidSyncAutoRetryAttemptsRef.current.set(job.id, currentAttempts + 1);
         setFailedPaidSyncAutoRetryRevision((current) => current + 1);
-        handleRetryFailedPaidSyncJob(job.id, { autoRetry: true });
+        setPaidSyncAssistantActivity(
+          'retrying',
+          describePaidSyncAssistantMode(
+            'retrying',
+            `pedido ${job.draftId.slice(-8).toUpperCase()}`
+          ),
+          {
+            draftId: job.draftId,
+            jobId: job.id,
+          }
+        );
+        void handleRetryFailedPaidSyncJob(job.id, { autoRetry: true });
       }, retryDelayMs);
 
       failedPaidSyncAutoRetryTimersRef.current.set(job.id, timerId);
@@ -4832,9 +4975,13 @@ const App: React.FC = () => {
     }
   }, [
     failedPaidSyncQueue,
+    getPaidSyncAssistantRecoverDelayMs,
+    getPaidSyncAssistantRetryDelayMs,
     handleRecoverFailedPaidSyncJobToCart,
     handleRetryFailedPaidSyncJob,
     isAccessVerified,
+    setPaidSyncAssistantActivity,
+    shouldPaidSyncAssistantRunRecovery,
     showCornerSync,
   ]);
 
@@ -5710,14 +5857,24 @@ const App: React.FC = () => {
           lastError: job.lastError || null,
           isFailed: false,
           autoRetryAttempts: 0,
-          autoRetryRemaining: 0,
           autoRetryPending: false,
+          assistantLabel: null as string | null,
         };
       });
 
       const failedCards = failedPaidSyncQueue.map((job) => {
         const autoRetryAttempts =
           failedPaidSyncAutoRetryAttemptsRef.current.get(job.id) || 0;
+        const recoverableError =
+          isDraftEmptyErrorMessage(job.lastError || '') ||
+          isAutoRecoverableFailedQueueMessage(job.lastError || '');
+        const shouldRecoverSoon = shouldPaidSyncAssistantRunRecovery(
+          autoRetryAttempts,
+          recoverableError
+        );
+        const assistantLabel = shouldRecoverSoon
+          ? 'Robô: reconstruindo snapshot'
+          : 'Robô: nova tentativa automática';
         return {
           id: job.id,
           draftId: job.draftId,
@@ -5727,12 +5884,10 @@ const App: React.FC = () => {
           lastError: job.lastError || null,
           isFailed: true,
           autoRetryAttempts,
-          autoRetryRemaining: Math.max(
-            0,
-            FAILED_PAID_SYNC_AUTO_RETRY_MAX_ATTEMPTS - autoRetryAttempts
-          ),
           autoRetryPending:
-            failedPaidSyncAutoRetryTimersRef.current.has(job.id),
+            failedPaidSyncAutoRetryTimersRef.current.has(job.id) ||
+            failedPaidSyncAutoRecoverTimersRef.current.has(job.id),
+          assistantLabel,
         };
       });
 
@@ -5742,6 +5897,7 @@ const App: React.FC = () => {
       failedPaidSyncAutoRetryRevision,
       failedPaidSyncQueue,
       pendingPaidSyncQueueSnapshot,
+      shouldPaidSyncAssistantRunRecovery,
       syncingPaidDraftIds,
     ]
   );
@@ -5835,13 +5991,25 @@ const App: React.FC = () => {
         message={syncIndicatorMessage}
         pendingCount={Math.max(1, totalPendingOps)}
       />
-      <div className="pointer-events-none fixed bottom-3 right-3 z-[1190] flex max-w-[300px] flex-col items-end gap-2">
+      <div className="pointer-events-none fixed bottom-3 right-3 z-[1190] flex w-[220px] flex-col items-end gap-1.5">
         {hasPaidSyncQueueCards && (
-          <div className="pointer-events-auto w-full max-h-[45vh] overflow-y-auto rounded-2xl border border-slate-200 bg-white/95 p-2 shadow-xl backdrop-blur">
-            <p className="px-1 pb-1 text-[9px] font-black uppercase tracking-widest text-slate-500">
-              Fila de Pedidos
-            </p>
-            <div className="space-y-2">
+          <div className="pointer-events-auto w-full rounded-xl border border-slate-200 bg-white/95 p-1.5 shadow-lg backdrop-blur">
+            <div className="flex items-center justify-between px-0.5 text-[9px] font-black uppercase tracking-widest text-slate-500">
+              <span className="inline-flex items-center gap-1">
+                <span aria-hidden="true">🤖</span>
+                Fila
+              </span>
+              <span>{paidSyncQueueCards.length}</span>
+            </div>
+            {paidSyncAssistantState.active && (
+              <div className="mt-1 flex items-center gap-1 rounded-full border border-sky-200 bg-sky-50 px-1.5 py-0.5 text-[8px] font-black uppercase tracking-wide text-sky-700">
+                <span aria-hidden="true" className="qb-corner-sync-pulse">🤖</span>
+                <span className="truncate">
+                  {paidSyncAssistantState.message || 'Robô atuando'}
+                </span>
+              </div>
+            )}
+            <div className="mt-1 max-h-[170px] space-y-1 overflow-y-auto">
               {paidSyncQueueCards.map((card) => {
                 const draftShort = card.draftId.replace(/^draft-/, '').slice(-8).toUpperCase() || '---';
                 const statusToneClass =
@@ -5862,58 +6030,22 @@ const App: React.FC = () => {
                           ? `Nova tentativa em ${card.retryInSeconds}s`
                           : 'Aguardando nova tentativa'
                         : 'Na fila';
-                const failedAutoRetryLabel = card.isFailed
-                  ? card.autoRetryRemaining > 0
-                    ? card.autoRetryPending
-                      ? `Auto-tentativa em breve (${Math.min(
-                          card.autoRetryAttempts + 1,
-                          FAILED_PAID_SYNC_AUTO_RETRY_MAX_ATTEMPTS
-                        )}/${FAILED_PAID_SYNC_AUTO_RETRY_MAX_ATTEMPTS})`
-                      : `Auto-tentativas: ${card.autoRetryAttempts}/${FAILED_PAID_SYNC_AUTO_RETRY_MAX_ATTEMPTS}`
-                    : 'Auto-tentativas esgotadas'
-                  : null;
 
                 return (
-                  <div key={card.id} className={`rounded-xl border p-2 text-[10px] ${statusToneClass}`}>
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-2">
-                        <span className="inline-flex flex-col gap-[2px] text-current/80">
-                          <span className="h-[2px] w-3 rounded bg-current" />
-                          <span className="h-[2px] w-4 rounded bg-current" />
-                          <span className="h-[2px] w-5 rounded bg-current" />
-                        </span>
-                        <span className="font-black uppercase tracking-widest">Pedido {draftShort}</span>
-                      </div>
-                      <span className="font-black uppercase tracking-wider">{statusLabel}</span>
+                  <div key={card.id} className={`rounded-lg border px-1.5 py-1 text-[9px] ${statusToneClass}`}>
+                    <div className="flex items-center justify-between gap-1">
+                      <span className="truncate font-black uppercase tracking-wide">Pedido {draftShort}</span>
+                      <span className="shrink-0 font-black uppercase tracking-wide">{statusLabel}</span>
                     </div>
+                    {card.assistantLabel && (
+                      <p className="mt-0.5 truncate text-[8px] font-black uppercase tracking-wide text-current/75">
+                        {card.assistantLabel}
+                      </p>
+                    )}
                     {(card.lastError || card.attempts > 0) && (
-                      <p className="mt-1 truncate text-[9px] font-bold uppercase tracking-wide text-current/80">
+                      <p className="mt-0.5 truncate text-[8px] font-bold uppercase tracking-wide text-current/80">
                         {card.lastError || `Tentativas: ${card.attempts}`}
                       </p>
-                    )}
-                    {failedAutoRetryLabel && (
-                      <p className="mt-1 text-[9px] font-black uppercase tracking-widest text-current/70">
-                        {failedAutoRetryLabel}
-                      </p>
-                    )}
-                    {card.isFailed && (
-                      <button
-                        type="button"
-                        onClick={() => handleRetryFailedPaidSyncJob(card.id)}
-                        disabled={card.autoRetryPending}
-                        className="mt-2 w-full rounded-lg border border-current/30 bg-white/70 px-2 py-1 text-[9px] font-black uppercase tracking-widest transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
-                      >
-                        {card.autoRetryPending ? 'Auto Tentando...' : 'Tentar de Novo'}
-                      </button>
-                    )}
-                    {card.isFailed && card.autoRetryRemaining === 0 && (
-                      <button
-                        type="button"
-                        onClick={() => handleRecoverFailedPaidSyncJobToCart(card.id)}
-                        className="mt-2 w-full rounded-lg border border-current/30 bg-white px-2 py-1 text-[9px] font-black uppercase tracking-widest transition hover:bg-white/80"
-                      >
-                        Reconstruir e Reenfileirar
-                      </button>
                     )}
                   </div>
                 );
