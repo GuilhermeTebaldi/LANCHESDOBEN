@@ -846,7 +846,7 @@ const isRetryableSyncError = (error: unknown): boolean => {
 };
 
 const ASYNC_COMMAND_JOB_POLL_INTERVAL_MS = 850;
-const ASYNC_COMMAND_JOB_POLL_TIMEOUT_MS = 120000;
+const ASYNC_COMMAND_JOB_POLL_TIMEOUT_MS = 25000;
 
 const isAsyncCommandJobTerminalStatus = (status: StateCommandAsyncJobStatus): boolean =>
   status === 'COMPLETED' || status === 'FAILED';
@@ -2275,7 +2275,9 @@ const App: React.FC = () => {
         knownPersistedDraftIds.add(saleDraftId);
       }
     });
-    const pendingOnlyDrafts = Object.entries(pendingDraftAddsByDraft)
+    const pendingOnlyDrafts = (Object.entries(
+      pendingDraftAddsByDraft
+    ) as Array<[string, PendingDraftAdd[]]>)
       .filter(
         ([draftId, entries]) =>
           entries.length > 0 &&
@@ -2322,7 +2324,9 @@ const App: React.FC = () => {
 
   const reservedDraftStockByIngredient = useMemo(() => {
     const reservedByIngredient = new Map<string, number>();
-    const ingredientById = new Map(ingredients.map((ingredient) => [ingredient.id, ingredient]));
+    const ingredientById = new Map<string, Ingredient>(
+      ingredients.map((ingredient): [string, Ingredient] => [ingredient.id, ingredient])
+    );
 
     saleDraftsWithPendingAdds.forEach((draft) => {
       if (draft.status !== 'DRAFT' && draft.status !== 'PENDING_PAYMENT') return;
@@ -2332,7 +2336,8 @@ const App: React.FC = () => {
         if (!Number.isFinite(itemQty) || itemQty <= 0) return;
 
         const recipeTotals = aggregateRecipe(item.recipe || []);
-        Object.entries(recipeTotals).forEach(([ingredientId, recipeQuantity]) => {
+        (Object.entries(recipeTotals) as Array<[string, number]>).forEach(
+          ([ingredientId, recipeQuantity]) => {
           const ingredient = ingredientById.get(ingredientId);
           if (!ingredient) return;
 
@@ -2343,15 +2348,19 @@ const App: React.FC = () => {
           if (!Number.isFinite(stockRequired) || stockRequired <= 0) return;
 
           const currentReserved = reservedByIngredient.get(ingredientId) || 0;
-          reservedByIngredient.set(ingredientId, Number((currentReserved + stockRequired).toFixed(6)));
-        });
+          reservedByIngredient.set(
+            ingredientId,
+            Number((currentReserved + stockRequired).toFixed(6))
+          );
+        }
+        );
       });
     });
 
     return reservedByIngredient;
   }, [ingredients, saleDraftsWithPendingAdds]);
 
-  const ingredientsForSale = useMemo(
+  const ingredientsForSale = useMemo<Ingredient[]>(
     () =>
       ingredients.map((ingredient) => {
         const reservedQuantity = reservedDraftStockByIngredient.get(ingredient.id) || 0;
@@ -2369,7 +2378,10 @@ const App: React.FC = () => {
   );
 
   const saleIngredientById = useMemo(
-    () => new Map(ingredientsForSale.map((ingredient) => [ingredient.id, ingredient])),
+    () =>
+      new Map<string, Ingredient>(
+        ingredientsForSale.map((ingredient): [string, Ingredient] => [ingredient.id, ingredient])
+      ),
     [ingredientsForSale]
   );
 
@@ -2382,7 +2394,9 @@ const App: React.FC = () => {
       if (normalizedDelta <= 0) return null;
 
       const recipeTotals = aggregateRecipe(recipe || []);
-      for (const [ingredientId, recipeQuantity] of Object.entries(recipeTotals)) {
+      for (const [ingredientId, recipeQuantity] of Object.entries(
+        recipeTotals
+      ) as Array<[string, number]>) {
         const ingredient = saleIngredientById.get(ingredientId);
         if (!ingredient) continue;
 
@@ -2629,13 +2643,15 @@ const App: React.FC = () => {
       recipeOverride?: RecipeItem[],
       priceOverride?: number
     ): boolean => {
-      const ingredientIdSet = new Set(ingredientsForSale.map((ingredient) => ingredient.id));
+      const ingredientIdSet = new Set<string>(
+        ingredientsForSale.map((ingredient) => ingredient.id)
+      );
       const recipeValidation = validateDraftItemRecipe(
         product,
         recipeOverride ?? product.recipe,
         ingredientIdSet
       );
-      if (!recipeValidation.ok) {
+      if (recipeValidation.ok === false) {
         showNotification(recipeValidation.message);
         return false;
       }
@@ -3287,13 +3303,15 @@ const App: React.FC = () => {
 
         const current = currentPendingAdds[0];
         const product = products.find((entry) => entry.id === current.productId) || null;
-        const ingredientIdSet = new Set(ingredients.map((ingredient) => ingredient.id));
+        const ingredientIdSet = new Set<string>(
+          ingredients.map((ingredient) => ingredient.id)
+        );
         const recipeValidation = validateDraftItemRecipe(
           product,
           current.recipeOverride ?? product?.recipe,
           ingredientIdSet
         );
-        if (!recipeValidation.ok) {
+        if (recipeValidation.ok === false) {
           updateRunCommandErrorSink(options.errorSink, {
             message: recipeValidation.message,
             retryable: false,
@@ -3919,7 +3937,7 @@ const App: React.FC = () => {
       }
 
       const rebuiltPendingAdds = snapshotItems
-        .map((item) => {
+        .map((item): PendingDraftAdd | null => {
           const productId = typeof item.productId === 'string' ? item.productId.trim() : '';
           if (!productId) return null;
 
@@ -3938,17 +3956,24 @@ const App: React.FC = () => {
               : undefined;
           const note = typeof item.note === 'string' && item.note.trim() ? item.note.trim() : undefined;
 
-          return {
+          const rebuiltEntry: PendingDraftAdd = {
             draftId: normalizedDraftId,
             localItemId: createClientId('draft-item-local'),
             commandId: createClientId('cmd'),
             productId,
             quantity,
-            recipeOverride,
-            priceOverride,
-            note,
             queuedAt: new Date().toISOString(),
-          } satisfies PendingDraftAdd;
+          };
+          if (recipeOverride) {
+            rebuiltEntry.recipeOverride = recipeOverride;
+          }
+          if (priceOverride !== undefined) {
+            rebuiltEntry.priceOverride = priceOverride;
+          }
+          if (note) {
+            rebuiltEntry.note = note;
+          }
+          return rebuiltEntry;
         })
         .filter((entry): entry is PendingDraftAdd => entry !== null);
 

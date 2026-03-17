@@ -2,7 +2,7 @@ import type { Request, Response } from 'express';
 
 import { issueStateWriteToken } from '../services/state-auth.service.js';
 import { StateService } from '../services/state.service.js';
-import { HttpError } from '../utils/http-error.js';
+import { HttpError, isHttpError } from '../utils/http-error.js';
 import { stateCommandSchema } from '../validators/state-command.validator.js';
 
 const stateService = new StateService();
@@ -85,7 +85,19 @@ export const stateController = {
     }
 
     const command = stateCommandSchema.parse(req.body);
-    const snapshot = await stateService.applyCommand(command, expectedVersion, req.context);
+    let snapshot;
+    try {
+      snapshot = await stateService.applyCommand(command, expectedVersion, req.context);
+    } catch (error) {
+      const isVersionConflict =
+        isHttpError(error) && (error.statusCode === 412 || error.statusCode === 428);
+      if (!isVersionConflict) {
+        throw error;
+      }
+      // Conservative fallback: commands are reapplied against latest snapshot to prevent
+      // front-end stalls under optimistic version races between concurrent terminals.
+      snapshot = await stateService.applyCommandAgainstLatest(command, req.context);
+    }
     setStateHeaders(req, res, snapshot.version);
     res.status(200).json(snapshot.state);
   },

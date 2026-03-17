@@ -27,11 +27,15 @@
     "noEmit": true
   },
   "include": [
+    "*.d.ts",
     "*.ts",
     "*.tsx",
+    "components/**/*.d.ts",
     "components/**/*.ts",
     "components/**/*.tsx",
+    "data/**/*.d.ts",
     "data/**/*.ts",
+    "utils/**/*.d.ts",
     "utils/**/*.ts",
     "scripts/**/*.ts"
   ],

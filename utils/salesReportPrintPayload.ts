@@ -96,14 +96,18 @@ const normalizePayload = (value: unknown): SalesReportPrintPayload | null => {
     return null;
   }
 
+  const pageHeightMm =
+    source.pageHeightMm === null || source.pageHeightMm === undefined
+      ? null
+      : Number(source.pageHeightMm);
+
   return {
     id: source.id,
     createdAt: source.createdAt,
     title: source.title,
     paperWidthMm: source.paperWidthMm,
     pageWidthMm: source.pageWidthMm,
-    pageHeightMm:
-      source.pageHeightMm === null || source.pageHeightMm === undefined ? null : source.pageHeightMm,
+    pageHeightMm,
     reportPadding: source.reportPadding,
     reportFontSizePx: source.reportFontSizePx,
     reportLineHeight: source.reportLineHeight,
