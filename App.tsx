@@ -1353,10 +1353,10 @@ const PENDING_PAID_SYNC_RETRY_MAX_MS = 15 * 60 * 1000;
 const PENDING_PAID_SYNC_RETRY_JITTER = 0.2;
 const PENDING_PAID_SYNC_EMPTY_DRAFT_RECOVERY_DELAY_MS = 600;
 const PENDING_PAID_SYNC_EMPTY_DRAFT_RECOVERY_MAX_ATTEMPTS = 2;
-const FAILED_PAID_SYNC_AUTO_RETRY_MAX_ATTEMPTS = 2;
-const FAILED_PAID_SYNC_AUTO_RETRY_BASE_DELAY_MS = 1400;
-const FAILED_PAID_SYNC_AUTO_RECOVER_MAX_ATTEMPTS = 1;
-const FAILED_PAID_SYNC_AUTO_RECOVER_DELAY_MS = 2200;
+const FAILED_PAID_SYNC_AUTO_RETRY_MAX_ATTEMPTS = 4;
+const FAILED_PAID_SYNC_AUTO_RETRY_BASE_DELAY_MS = 1200;
+const FAILED_PAID_SYNC_AUTO_RECOVER_MAX_ATTEMPTS = 4;
+const FAILED_PAID_SYNC_AUTO_RECOVER_DELAY_MS = 1400;
 const PAID_SYNC_QUEUE_PREVIEW_LIMIT = 6;
 const PENDING_DRAFT_BACKGROUND_SYNC_DEBOUNCE_MS = 650;
 const PENDING_DRAFT_BACKGROUND_SYNC_SWEEP_MS = 10000;
@@ -4040,6 +4040,12 @@ const App: React.FC = () => {
     setFailedPaidSyncAutoRetryAttempts(normalizedJobId, 0);
   }, [setFailedPaidSyncAutoRetryAttempts]);
 
+  const clearFailedPaidSyncAutoRecoverDraftState = useCallback((draftId: string): void => {
+    const normalizedDraftId = draftId.trim();
+    if (!normalizedDraftId) return;
+    failedPaidSyncAutoRecoverDraftAttemptsRef.current.delete(normalizedDraftId);
+  }, []);
+
   const handleRecoverFailedPaidSyncJobToCart = useCallback(
     (
       jobId: string,
@@ -4067,6 +4073,7 @@ const App: React.FC = () => {
           failedPaidSyncQueueRef.current.filter((entry) => entry.id !== normalizedJobId)
         );
         clearFailedPaidSyncAutoRetryState(normalizedJobId);
+        clearFailedPaidSyncAutoRecoverDraftState(failedJob.draftId);
         if (!options.silentNotification) {
           showNotification('Pedido já resolvido no servidor. Item removido da fila de falhas.');
         }
@@ -4087,6 +4094,7 @@ const App: React.FC = () => {
         failedPaidSyncQueueRef.current.filter((entry) => entry.id !== normalizedJobId)
       );
       clearFailedPaidSyncAutoRetryState(normalizedJobId);
+      clearFailedPaidSyncAutoRecoverDraftState(failedJob.draftId);
       const shouldRequeueAfterRestore = options.requeueAfterRestore === true;
       if (shouldRequeueAfterRestore) {
         enqueuePendingPaidSyncJob({
@@ -4119,6 +4127,7 @@ const App: React.FC = () => {
       return true;
     },
     [
+      clearFailedPaidSyncAutoRecoverDraftState,
       clearFailedPaidSyncAutoRetryState,
       enqueuePendingPaidSyncJob,
       hydrateFailedPaidSyncQueue,
@@ -4636,6 +4645,7 @@ const App: React.FC = () => {
     if (!isFailedPaidSyncQueueHydratedRef.current) return;
 
     const activeFailedIds = new Set(failedPaidSyncQueue.map((job) => job.id));
+    const activeFailedDraftIds = new Set(failedPaidSyncQueue.map((job) => job.draftId));
     let shouldRefreshAutoRetryUi = false;
 
     failedPaidSyncAutoRetryTimersRef.current.forEach((timerId, jobId) => {
@@ -4653,6 +4663,10 @@ const App: React.FC = () => {
       if (activeFailedIds.has(jobId)) return;
       failedPaidSyncAutoRetryAttemptsRef.current.delete(jobId);
       shouldRefreshAutoRetryUi = true;
+    });
+    failedPaidSyncAutoRecoverDraftAttemptsRef.current.forEach((_attempts, draftId) => {
+      if (activeFailedDraftIds.has(draftId)) return;
+      failedPaidSyncAutoRecoverDraftAttemptsRef.current.delete(draftId);
     });
 
     failedPaidSyncQueue.forEach((job) => {
