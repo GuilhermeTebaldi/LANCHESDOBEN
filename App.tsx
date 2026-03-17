@@ -125,6 +125,7 @@ interface RunCommandOptions {
   silentErrorNotification?: boolean;
   errorSink?: RunCommandErrorSink;
   trackPendingState?: boolean;
+  failFastOnVersionConflict?: boolean;
 }
 
 interface PaymentCommitSnapshot {
@@ -1991,7 +1992,7 @@ const App: React.FC = () => {
   const executeSyncedCommand = useCallback(
     async (
       command: StateCommand,
-      options: { trackPendingState?: boolean } = {}
+      options: { trackPendingState?: boolean; failFastOnVersionConflict?: boolean } = {}
     ): Promise<{ ok: true } | { ok: false; error: unknown }> => {
       const shouldTrackPendingState = options.trackPendingState !== false;
       if (shouldTrackPendingState) {
@@ -2000,7 +2001,9 @@ const App: React.FC = () => {
 
       const executeCommand = async (): Promise<{ ok: true } | { ok: false; error: unknown }> => {
         try {
-          const nextState = await runStateCommand(command);
+          const nextState = await runStateCommand(command, {
+            failFastOnVersionConflict: options.failFastOnVersionConflict,
+          });
           applyStateSnapshot(nextState);
           return { ok: true };
         } catch (error) {
@@ -2038,6 +2041,7 @@ const App: React.FC = () => {
         : command;
       const result = await executeSyncedCommand(normalizedCommand, {
         trackPendingState: options.trackPendingState,
+        failFastOnVersionConflict: options.failFastOnVersionConflict,
       });
 
       if (result.ok) {
@@ -3247,7 +3251,11 @@ const App: React.FC = () => {
     async (
       draftId: string,
       customerType: SaleCustomerType = 'BALCAO',
-      options: { silentErrorNotification?: boolean; errorSink?: RunCommandErrorSink } = {}
+      options: {
+        silentErrorNotification?: boolean;
+        errorSink?: RunCommandErrorSink;
+        failFastOnVersionConflict?: boolean;
+      } = {}
     ): Promise<boolean> => {
       hydratePendingDraftAdds();
 
@@ -3265,6 +3273,7 @@ const App: React.FC = () => {
             silentErrorNotification: options.silentErrorNotification,
             errorSink: options.errorSink,
             trackPendingState: false,
+            failFastOnVersionConflict: options.failFastOnVersionConflict,
           }
         );
         if (!created) return false;
@@ -3311,6 +3320,7 @@ const App: React.FC = () => {
           silentErrorNotification: options.silentErrorNotification,
           errorSink: options.errorSink,
           trackPendingState: false,
+          failFastOnVersionConflict: options.failFastOnVersionConflict,
         });
         if (!ok) return false;
 
@@ -3338,7 +3348,11 @@ const App: React.FC = () => {
     async (
       draftId: string,
       customerType: SaleCustomerType = 'BALCAO',
-      options: { silentErrorNotification?: boolean; errorSink?: RunCommandErrorSink } = {}
+      options: {
+        silentErrorNotification?: boolean;
+        errorSink?: RunCommandErrorSink;
+        failFastOnVersionConflict?: boolean;
+      } = {}
     ): Promise<boolean> => {
       const normalizedDraftId = draftId.trim();
       if (!normalizedDraftId) {
@@ -3393,6 +3407,7 @@ const App: React.FC = () => {
           {
             silentErrorNotification: true,
             errorSink,
+            failFastOnVersionConflict: true,
           }
         );
         if (ok) {
@@ -3540,6 +3555,7 @@ const App: React.FC = () => {
       errorSink?: RunCommandErrorSink;
       preferAsyncFinalize?: boolean;
       asyncFinalizeCommandId?: string;
+      failFastOnVersionConflict?: boolean;
     } = {}
   ): Promise<boolean> => {
     const notifyError = (message: string) => {
@@ -3679,6 +3695,7 @@ const App: React.FC = () => {
           silentErrorNotification: options.silentErrorNotification,
           errorSink: options.errorSink,
           trackPendingState: options.trackPendingState,
+          failFastOnVersionConflict: options.failFastOnVersionConflict,
         });
       }
 
@@ -3705,6 +3722,7 @@ const App: React.FC = () => {
             silentErrorNotification: options.silentErrorNotification,
             errorSink: options.errorSink,
             trackPendingState: options.trackPendingState,
+            failFastOnVersionConflict: options.failFastOnVersionConflict,
           });
         }
 
@@ -4190,6 +4208,7 @@ const App: React.FC = () => {
           {
             silentErrorNotification: true,
             errorSink: draftAddsErrorSink,
+            failFastOnVersionConflict: true,
           }
         );
         if (!flushed) {
@@ -4204,6 +4223,7 @@ const App: React.FC = () => {
           silentErrorNotification: true,
           errorSink: finalizeErrorSink,
           preferAsyncFinalize: false,
+          failFastOnVersionConflict: true,
         });
         if (!finalized) {
           const finalizeMessage = finalizeErrorSink.message || 'Falha ao salvar forma de pagamento.';
@@ -4258,6 +4278,7 @@ const App: React.FC = () => {
                 silentSuccessNotification: true,
                 silentErrorNotification: true,
                 errorSink: confirmErrorSink,
+                failFastOnVersionConflict: true,
               }
             );
             if (!confirmed) {
@@ -4303,6 +4324,7 @@ const App: React.FC = () => {
                 silentSuccessNotification: true,
                 silentErrorNotification: true,
                 errorSink: confirmErrorSink,
+                failFastOnVersionConflict: true,
               }
             );
             if (!confirmed) {
@@ -4325,6 +4347,7 @@ const App: React.FC = () => {
                 silentSuccessNotification: true,
                 silentErrorNotification: true,
                 errorSink: confirmErrorSink,
+                failFastOnVersionConflict: true,
               }
             );
             if (!confirmed) {

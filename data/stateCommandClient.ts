@@ -21,8 +21,8 @@ const COMMAND_RETRY_MAX_DELAY_MS = 8000;
 const COMMAND_RETRY_BUDGET_MS = 35000;
 const COMMAND_RETRY_JITTER_MIN = 0.75;
 const COMMAND_RETRY_JITTER_MAX = 1.35;
-const COMMAND_VERSION_CONFLICT_RETRY_BASE_DELAY_MS = 140;
-const COMMAND_VERSION_CONFLICT_RETRY_MAX_DELAY_MS = 2200;
+const COMMAND_VERSION_CONFLICT_RETRY_BASE_DELAY_MS = 80;
+const COMMAND_VERSION_CONFLICT_RETRY_MAX_DELAY_MS = 650;
 const DEFAULT_API_BASE_URL = 'https://xburger-backend.onrender.com';
 
 type BaseCommand = {
@@ -33,6 +33,10 @@ interface StateCommandSyncErrorOptions {
   statusCode?: number;
   retryable?: boolean;
   cause?: unknown;
+}
+
+interface RunStateCommandOptions {
+  failFastOnVersionConflict?: boolean;
 }
 
 export class StateCommandSyncError extends Error {
@@ -664,7 +668,10 @@ export const warmupStateWriteContext = async (): Promise<void> => {
   }
 };
 
-export const runStateCommand = async (command: StateCommand): Promise<AppState> => {
+export const runStateCommand = async (
+  command: StateCommand,
+  options: RunStateCommandOptions = {}
+): Promise<AppState> => {
   const payloadCommand = withCommandId(command);
   const startedAtMs = Date.now();
 
@@ -710,6 +717,9 @@ export const runStateCommand = async (command: StateCommand): Promise<AppState> 
     const isVersionConflictStatus = response.status === 412 || response.status === 428;
     if (response.status === 401 || isVersionConflictStatus) {
       writeContext = null;
+      if (isVersionConflictStatus && options.failFastOnVersionConflict) {
+        throw await toApiError(response);
+      }
       if (
         await waitBeforeRetry(
           startedAtMs,

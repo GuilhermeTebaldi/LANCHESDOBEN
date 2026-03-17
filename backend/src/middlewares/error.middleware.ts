@@ -32,6 +32,15 @@ const isExpectedErrorMonitorAuthFailure = (req: Request, statusCode: number, mes
   return normalizedMessage.includes('senha inválida para monitor de erros');
 };
 
+const isKnownDatabaseUnavailableError = (error: Prisma.PrismaClientKnownRequestError): boolean => {
+  const normalizedMessage = (error.message || '').toLowerCase();
+  return (
+    normalizedMessage.includes("can't reach database server") ||
+    normalizedMessage.includes('connection timed out') ||
+    normalizedMessage.includes('server has closed the connection')
+  );
+};
+
 const reportBackendErrorEvent = (req: Request, input: BackendErrorMonitorInput): void => {
   const requestPath = `${req.method.toUpperCase()} ${req.originalUrl || req.url || ''}`.trim();
   void new AuditService(prisma)
@@ -86,6 +95,20 @@ export const errorMiddleware = (error: unknown, req: Request, res: Response, _ne
   }
 
   if (error instanceof Prisma.PrismaClientKnownRequestError) {
+    if (isKnownDatabaseUnavailableError(error)) {
+      reportBackendErrorEvent(req, {
+        level: 'error',
+        message: 'Banco temporariamente indisponível. Tente novamente em instantes.',
+        statusCode: 503,
+        details: { prismaCode: error.code || null },
+      });
+      res.status(503).json({
+        error: 'Banco temporariamente indisponível. Tente novamente em instantes.',
+        requestId: req.context?.requestId,
+      });
+      return;
+    }
+
     if (error.code === 'P2002') {
       reportBackendErrorEvent(req, {
         level: 'warn',
