@@ -23,6 +23,8 @@ const COMMAND_RETRY_JITTER_MIN = 0.75;
 const COMMAND_RETRY_JITTER_MAX = 1.35;
 const COMMAND_VERSION_CONFLICT_RETRY_BASE_DELAY_MS = 80;
 const COMMAND_VERSION_CONFLICT_RETRY_MAX_DELAY_MS = 650;
+const WRITE_CONTEXT_REFRESH_RETRY_BASE_DELAY_MS = 900;
+const WRITE_CONTEXT_REFRESH_RETRY_MAX_DELAY_MS = 15000;
 const DEFAULT_API_BASE_URL = 'https://xburger-backend.onrender.com';
 
 type BaseCommand = {
@@ -159,6 +161,8 @@ interface StateWriteContext {
 
 let writeContext: StateWriteContext | null = null;
 let writeContextRefreshInFlight: Promise<void> | null = null;
+let writeContextRefreshFailureStreak = 0;
+let writeContextRefreshBlockedUntilMs = 0;
 
 const getApiBaseUrl = (): string | null => {
   const raw = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env
@@ -248,6 +252,27 @@ const getVersionConflictRetryDelayMs = (attempt: number): number => {
     COMMAND_RETRY_JITTER_MIN +
     Math.random() * (COMMAND_RETRY_JITTER_MAX - COMMAND_RETRY_JITTER_MIN);
   return Math.max(0, Math.round(capped * jitterFactor));
+};
+
+const getWriteContextRefreshRetryDelayMs = (failureStreak: number): number => {
+  const safeStreak = Math.max(1, Math.floor(failureStreak));
+  const exponential = WRITE_CONTEXT_REFRESH_RETRY_BASE_DELAY_MS * 2 ** Math.max(0, safeStreak - 1);
+  const capped = Math.min(WRITE_CONTEXT_REFRESH_RETRY_MAX_DELAY_MS, exponential);
+  const jitterFactor =
+    COMMAND_RETRY_JITTER_MIN +
+    Math.random() * (COMMAND_RETRY_JITTER_MAX - COMMAND_RETRY_JITTER_MIN);
+  return Math.max(WRITE_CONTEXT_REFRESH_RETRY_BASE_DELAY_MS, Math.round(capped * jitterFactor));
+};
+
+const clearWriteContextRefreshFailureState = (): void => {
+  writeContextRefreshFailureStreak = 0;
+  writeContextRefreshBlockedUntilMs = 0;
+};
+
+const registerWriteContextRefreshFailure = (): void => {
+  writeContextRefreshFailureStreak += 1;
+  const delayMs = getWriteContextRefreshRetryDelayMs(writeContextRefreshFailureStreak);
+  writeContextRefreshBlockedUntilMs = Date.now() + delayMs;
 };
 
 const asRetryableNetworkError = (error: unknown): StateCommandSyncError => {
@@ -648,13 +673,30 @@ const refreshWriteContext = async (): Promise<void> => {
 
 const ensureWriteContext = async (): Promise<void> => {
   if (writeContext && !isWriteContextExpiringSoon(writeContext)) {
+    clearWriteContextRefreshFailureState();
     return;
   }
 
-  if (!writeContextRefreshInFlight) {
-    writeContextRefreshInFlight = refreshWriteContext().finally(() => {
-      writeContextRefreshInFlight = null;
+  const now = Date.now();
+  if (writeContextRefreshBlockedUntilMs > now) {
+    throw new StateCommandSyncError('Banco temporariamente indisponível. Tentando novamente...', {
+      statusCode: 503,
+      retryable: true,
     });
+  }
+
+  if (!writeContextRefreshInFlight) {
+    writeContextRefreshInFlight = refreshWriteContext()
+      .then(() => {
+        clearWriteContextRefreshFailureState();
+      })
+      .catch((error) => {
+        registerWriteContextRefreshFailure();
+        throw error;
+      })
+      .finally(() => {
+        writeContextRefreshInFlight = null;
+      });
   }
 
   await writeContextRefreshInFlight;
@@ -676,13 +718,24 @@ export const runStateCommand = async (
   const startedAtMs = Date.now();
 
   for (let attempt = 0; attempt < COMMAND_MAX_ATTEMPTS; attempt += 1) {
-    await ensureWriteContext();
-
-    const context = writeContext;
-    if (!context) {
-      throw new StateCommandSyncError('Contexto de escrita indisponível.', {
-        retryable: true,
-      });
+    let context: StateWriteContext | null = null;
+    try {
+      await ensureWriteContext();
+      context = writeContext;
+      if (!context) {
+        throw new StateCommandSyncError('Contexto de escrita indisponível.', {
+          retryable: true,
+        });
+      }
+    } catch (error) {
+      const syncError = asRetryableNetworkError(error);
+      if (
+        syncError.retryable &&
+        (await waitBeforeRetry(startedAtMs, attempt, getRetryDelayMs(attempt)))
+      ) {
+        continue;
+      }
+      throw syncError;
     }
 
     let response: Response;
@@ -755,12 +808,24 @@ export const enqueueStateCommandAsync = async (
   const startedAtMs = Date.now();
 
   for (let attempt = 0; attempt < COMMAND_MAX_ATTEMPTS; attempt += 1) {
-    await ensureWriteContext();
-    const context = writeContext;
-    if (!context) {
-      throw new StateCommandSyncError('Contexto de escrita indisponível.', {
-        retryable: true,
-      });
+    let context: StateWriteContext | null = null;
+    try {
+      await ensureWriteContext();
+      context = writeContext;
+      if (!context) {
+        throw new StateCommandSyncError('Contexto de escrita indisponível.', {
+          retryable: true,
+        });
+      }
+    } catch (error) {
+      const syncError = asRetryableNetworkError(error);
+      if (
+        syncError.retryable &&
+        (await waitBeforeRetry(startedAtMs, attempt, getRetryDelayMs(attempt)))
+      ) {
+        continue;
+      }
+      throw syncError;
     }
 
     let response: Response;
@@ -826,12 +891,24 @@ export const getStateCommandAsyncJob = async (jobId: string): Promise<StateComma
   const startedAtMs = Date.now();
 
   for (let attempt = 0; attempt < COMMAND_MAX_ATTEMPTS; attempt += 1) {
-    await ensureWriteContext();
-    const context = writeContext;
-    if (!context) {
-      throw new StateCommandSyncError('Contexto de escrita indisponível.', {
-        retryable: true,
-      });
+    let context: StateWriteContext | null = null;
+    try {
+      await ensureWriteContext();
+      context = writeContext;
+      if (!context) {
+        throw new StateCommandSyncError('Contexto de escrita indisponível.', {
+          retryable: true,
+        });
+      }
+    } catch (error) {
+      const syncError = asRetryableNetworkError(error);
+      if (
+        syncError.retryable &&
+        (await waitBeforeRetry(startedAtMs, attempt, getRetryDelayMs(attempt)))
+      ) {
+        continue;
+      }
+      throw syncError;
     }
 
     let response: Response;
