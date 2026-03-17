@@ -19,6 +19,13 @@ export type StateCommandJobStatus =
   (typeof STATE_COMMAND_JOB_STATUS)[keyof typeof STATE_COMMAND_JOB_STATUS];
 
 const RETRYABLE_HTTP_STATUS = new Set([408, 412, 425, 429, 500, 502, 503, 504]);
+const DATABASE_UNAVAILABLE_PRISMA_CODES = new Set(['P1001', 'P1002', 'P1017']);
+const DATABASE_UNAVAILABLE_MESSAGE_PATTERNS = [
+  "can't reach database server",
+  'database system is not yet accepting connections',
+  'consistent recovery state has not been yet reached',
+  'the database system is starting up',
+];
 const QUEUEABLE_COMMAND_TYPES = new Set<StateCommandInput['type']>(['SALE_DRAFT_CONFIRM_PAID']);
 if (env.STATE_COMMAND_QUEUE_ENABLE_FINALIZE) {
   QUEUEABLE_COMMAND_TYPES.add('SALE_DRAFT_FINALIZE');
@@ -118,14 +125,50 @@ const normalizeErrorMessage = (error: unknown): string => {
 const truncateErrorMessage = (message: string): string =>
   message.length <= 1200 ? message : message.slice(0, 1197).concat('...');
 
+export const isDatabaseUnavailableQueueError = (error: unknown): boolean => {
+  if (error instanceof HttpError) {
+    return error.statusCode === 503;
+  }
+
+  if (error instanceof Prisma.PrismaClientKnownRequestError) {
+    if (DATABASE_UNAVAILABLE_PRISMA_CODES.has(error.code)) return true;
+  }
+
+  if (error instanceof Prisma.PrismaClientInitializationError) {
+    const code =
+      typeof (error as { errorCode?: unknown }).errorCode === 'string'
+        ? (error as { errorCode: string }).errorCode
+        : null;
+    if (code && DATABASE_UNAVAILABLE_PRISMA_CODES.has(code)) return true;
+  }
+
+  if (
+    error instanceof Prisma.PrismaClientUnknownRequestError ||
+    error instanceof Error
+  ) {
+    const normalized = error.message.toLowerCase();
+    return DATABASE_UNAVAILABLE_MESSAGE_PATTERNS.some((pattern) =>
+      normalized.includes(pattern)
+    );
+  }
+
+  return false;
+};
+
 const isRetryableWorkerError = (error: unknown): boolean => {
+  if (isDatabaseUnavailableQueueError(error)) return true;
+
   if (isHttpError(error)) {
     if (RETRYABLE_HTTP_STATUS.has(error.statusCode)) return true;
     return error.statusCode >= 500;
   }
 
   if (error instanceof Prisma.PrismaClientKnownRequestError) {
-    return error.code === 'P2024' || error.code === 'P2028' || error.code === 'P2034';
+    return (
+      error.code === 'P2024' ||
+      error.code === 'P2028' ||
+      error.code === 'P2034'
+    );
   }
 
   if (error instanceof Prisma.PrismaClientUnknownRequestError) {
