@@ -34,6 +34,14 @@ const baseEnvSchema = z.object({
       const normalized = value.trim().toLowerCase();
       return !['0', 'false', 'off', 'no'].includes(normalized);
     }),
+  STATE_COMMAND_QUEUE_ENABLE_FINALIZE: z
+    .string()
+    .optional()
+    .transform((value) => {
+      if (!value) return false;
+      const normalized = value.trim().toLowerCase();
+      return ['1', 'true', 'on', 'yes'].includes(normalized);
+    }),
   STATE_COMMAND_QUEUE_POLL_INTERVAL_MS: z.coerce.number().int().min(250).max(60000).default(1000),
   STATE_COMMAND_QUEUE_BATCH_SIZE: z.coerce.number().int().min(1).max(50).default(6),
   STATE_COMMAND_QUEUE_STALE_LOCK_MS: z.coerce.number().int().min(60000).max(86400000).default(300000),

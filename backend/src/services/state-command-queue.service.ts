@@ -20,6 +20,9 @@ export type StateCommandJobStatus =
 
 const RETRYABLE_HTTP_STATUS = new Set([408, 412, 425, 429, 500, 502, 503, 504]);
 const QUEUEABLE_COMMAND_TYPES = new Set<StateCommandInput['type']>(['SALE_DRAFT_CONFIRM_PAID']);
+if (env.STATE_COMMAND_QUEUE_ENABLE_FINALIZE) {
+  QUEUEABLE_COMMAND_TYPES.add('SALE_DRAFT_FINALIZE');
+}
 const MAX_CLAIM_ATTEMPTS_PER_CYCLE = 6;
 
 export interface StateCommandJobSnapshot {

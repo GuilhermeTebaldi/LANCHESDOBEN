@@ -139,6 +139,7 @@ interface PendingPaidSyncJob {
   id: string;
   draftId: string;
   snapshot: PaymentCommitSnapshot;
+  finalizeCommandId: string;
   confirmCommandId: string;
   createdAt: string;
   attempts: number;
@@ -522,6 +523,9 @@ const createClientId = (prefix: string): string => {
   }
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 };
+
+const isLocalPendingDraftItemId = (itemId: string): boolean =>
+  typeof itemId === 'string' && itemId.startsWith('draft-item-local-');
 
 const isSaleRegisterCommand = (command: StateCommand): command is SaleRegisterCommand =>
   command.type === 'SALE_REGISTER';
@@ -1199,6 +1203,10 @@ const normalizePendingPaidSyncJob = (value: unknown): PendingPaidSyncJob | null 
     typeof source.confirmCommandId === 'string' && source.confirmCommandId.trim()
       ? source.confirmCommandId.trim()
       : createClientId('cmd');
+  const finalizeCommandId =
+    typeof source.finalizeCommandId === 'string' && source.finalizeCommandId.trim()
+      ? source.finalizeCommandId.trim()
+      : createClientId('cmd');
   const attemptsRaw = Number(source.attempts);
   const attempts = Number.isFinite(attemptsRaw) && attemptsRaw >= 0 ? Math.floor(attemptsRaw) : 0;
   const createdAt =
@@ -1241,6 +1249,7 @@ const normalizePendingPaidSyncJob = (value: unknown): PendingPaidSyncJob | null 
     id,
     draftId,
     snapshot,
+    finalizeCommandId,
     confirmCommandId,
     createdAt,
     attempts,
@@ -2246,6 +2255,11 @@ const App: React.FC = () => {
     () => activeDraft?.items.reduce((sum, item) => sum + item.qty, 0) || 0,
     [activeDraft]
   );
+  const activeDraftApiLinkedItemCount = useMemo(
+    () =>
+      activeDraft?.items.filter((item) => !isLocalPendingDraftItemId(item.id)).length || 0,
+    [activeDraft]
+  );
 
   useEffect(() => {
     if (activeDraftId && activeDraft?.id === activeDraftId) return;
@@ -2671,6 +2685,56 @@ const App: React.FC = () => {
       }
     })();
   };
+
+  const handleClearApiLinkedDraftItems = useCallback(() => {
+    if (!activeDraft) return;
+    if (activeDraft.status !== 'DRAFT') {
+      showNotification('Limpeza disponível apenas com a venda em DRAFT.');
+      return;
+    }
+
+    const apiLinkedItems = activeDraft.items.filter(
+      (item) => !isLocalPendingDraftItemId(item.id)
+    );
+    if (apiLinkedItems.length === 0) {
+      showNotification('Nenhum item vinculado ao banco para limpar.');
+      return;
+    }
+
+    const confirmed = confirm(
+      apiLinkedItems.length === 1
+        ? 'Limpar o item já sincronizado com o banco deste carrinho?'
+        : `Limpar ${apiLinkedItems.length} item(ns) já sincronizado(s) com o banco deste carrinho?`
+    );
+    if (!confirmed) return;
+
+    void (async () => {
+      for (const item of apiLinkedItems) {
+        const ok = await runCommandWithSync(
+          {
+            type: 'SALE_DRAFT_REMOVE_ITEM',
+            draftId: activeDraft.id,
+            itemId: item.id,
+          },
+          undefined,
+          {
+            silentSuccessNotification: true,
+            trackPendingState: false,
+          }
+        );
+        if (!ok) {
+          showNotification('Falha ao limpar itens vinculados ao banco.');
+          return;
+        }
+      }
+
+      showNotification(
+        apiLinkedItems.length === 1
+          ? '1 item do banco removido do carrinho.'
+          : `${apiLinkedItems.length} itens do banco removidos do carrinho.`
+      );
+    })();
+  }, [activeDraft, runCommandWithSync, showNotification]);
 
   const resetSplitPaymentState = () => {
     setIsSplitSetupOpen(false);
@@ -3208,6 +3272,8 @@ const App: React.FC = () => {
       silentSavedNotification?: boolean;
       silentErrorNotification?: boolean;
       errorSink?: RunCommandErrorSink;
+      preferAsyncFinalize?: boolean;
+      asyncFinalizeCommandId?: string;
     } = {}
   ): Promise<boolean> => {
     const notifyError = (message: string) => {
@@ -3340,14 +3406,117 @@ const App: React.FC = () => {
       };
     }
 
+    const executeFinalizeCommand = async (): Promise<boolean> => {
+      if (!options.preferAsyncFinalize) {
+        return runCommandWithSync(finalizeCommand, undefined, {
+          silentSuccessNotification: true,
+          silentErrorNotification: options.silentErrorNotification,
+          errorSink: options.errorSink,
+          trackPendingState: options.trackPendingState,
+        });
+      }
+
+      const asyncFinalizeCommand: StateCommand = {
+        ...finalizeCommand,
+        commandId:
+          options.asyncFinalizeCommandId?.trim() ||
+          finalizeCommand.commandId?.trim() ||
+          createClientId('cmd'),
+      };
+
+      let asyncJobId: string | null = null;
+      try {
+        const queuedAsyncJob = await enqueueStateCommandAsync(asyncFinalizeCommand);
+        asyncJobId = queuedAsyncJob.id;
+      } catch (error) {
+        const statusCode = error instanceof StateCommandSyncError ? error.statusCode : undefined;
+        const shouldFallbackToSync =
+          statusCode === 404 || statusCode === 405 || statusCode === 422 || statusCode === 501;
+
+        if (shouldFallbackToSync) {
+          return runCommandWithSync(asyncFinalizeCommand, undefined, {
+            silentSuccessNotification: true,
+            silentErrorNotification: options.silentErrorNotification,
+            errorSink: options.errorSink,
+            trackPendingState: options.trackPendingState,
+          });
+        }
+
+        const message = getStateSyncErrorMessage(error);
+        updateRunCommandErrorSink(options.errorSink, {
+          error,
+          message,
+          retryable: isRetryableSyncError(error),
+          statusCode,
+        });
+        if (!options.silentErrorNotification) {
+          showNotification(message);
+        }
+        return false;
+      }
+
+      let terminalStatus: { status: StateCommandAsyncJobStatus; lastError: string | null } | null = null;
+      try {
+        terminalStatus = await waitForAsyncCommandJobTerminalStatus(asyncJobId);
+      } catch (error) {
+        const message = getStateSyncErrorMessage(error);
+        updateRunCommandErrorSink(options.errorSink, {
+          error,
+          message,
+          retryable: isRetryableSyncError(error),
+          statusCode: error instanceof StateCommandSyncError ? error.statusCode : undefined,
+        });
+        if (!options.silentErrorNotification) {
+          showNotification(message);
+        }
+        return false;
+      }
+
+      if (!terminalStatus || terminalStatus.status !== 'COMPLETED') {
+        const message =
+          terminalStatus?.lastError ||
+          'Falha no processamento assíncrono ao salvar forma de pagamento.';
+        updateRunCommandErrorSink(options.errorSink, {
+          error: undefined,
+          message,
+          retryable: false,
+          statusCode: 409,
+        });
+        if (!options.silentErrorNotification) {
+          showNotification(message);
+        }
+        return false;
+      }
+
+      try {
+        const refreshedState = await fetchStateSnapshot();
+        applyStateSnapshot(refreshedState);
+      } catch (error) {
+        const message = getStateSyncErrorMessage(error);
+        updateRunCommandErrorSink(options.errorSink, {
+          error,
+          message,
+          retryable: isRetryableSyncError(error),
+          statusCode: error instanceof StateCommandSyncError ? error.statusCode : undefined,
+        });
+        if (!options.silentErrorNotification) {
+          showNotification(message);
+        }
+        return false;
+      }
+
+      updateRunCommandErrorSink(options.errorSink, {
+        error: undefined,
+        message: undefined,
+        retryable: undefined,
+        statusCode: undefined,
+      });
+      return true;
+    };
+
     // Defensive: backend must persist app-origin and app amount before allowing confirm.
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const ok = await runCommandWithSync(finalizeCommand, undefined, {
-        silentSuccessNotification: true,
-        silentErrorNotification: options.silentErrorNotification,
-        errorSink: options.errorSink,
-        trackPendingState: options.trackPendingState,
-      });
+      const ok = await executeFinalizeCommand();
       if (!ok) return false;
 
       if (!isAppSaleOrigin(snapshotSaleOrigin)) {
@@ -3510,6 +3679,8 @@ const App: React.FC = () => {
           silentSavedNotification: true,
           silentErrorNotification: true,
           errorSink: finalizeErrorSink,
+          preferAsyncFinalize: true,
+          asyncFinalizeCommandId: currentJob.finalizeCommandId,
         });
         if (!finalized) {
           markJobAsFailed('Falha ao salvar forma de pagamento.', finalizeErrorSink);
@@ -3814,6 +3985,7 @@ const App: React.FC = () => {
       id: createClientId('paid-sync-job'),
       draftId,
       snapshot: clonePaymentCommitSnapshot(paymentSnapshot),
+      finalizeCommandId: createClientId('cmd'),
       confirmCommandId: createClientId('cmd'),
       createdAt: new Date().toISOString(),
       attempts: 0,
@@ -4907,7 +5079,7 @@ const App: React.FC = () => {
                   {activeDraft.items.map((item) => {
                     const subtotal = (item.unitPriceSnapshot || 0) * item.qty;
                     const canEditItems = activeDraft.status === 'DRAFT';
-                    const isPendingLocalItem = item.id.startsWith('draft-item-local-');
+                    const isPendingLocalItem = isLocalPendingDraftItemId(item.id);
                     return (
                       <div
                         key={item.id}
@@ -4970,6 +5142,16 @@ const App: React.FC = () => {
                     Total: <span className="text-red-600">R$ {formatMoney(activeDraft.total)}</span>
                   </div>
                   <div className="flex items-center gap-2">
+                    {activeDraft.status === 'DRAFT' && activeDraftApiLinkedItemCount > 0 && (
+                      <button
+                        onClick={handleClearApiLinkedDraftItems}
+                        disabled={isCancellingDraft || isStateHydrating || pendingStateOps > 0}
+                        className="qb-btn-touch bg-amber-100 text-amber-800 px-3 py-2 rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-amber-200 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                        title="Limpa apenas os itens já vinculados ao banco/API"
+                      >
+                        Limpar do Banco ({activeDraftApiLinkedItemCount})
+                      </button>
+                    )}
                     <button
                       onClick={handleCancelActiveDraft}
                       disabled={isCancellingDraft || isStateHydrating || pendingStateOps > 0}
