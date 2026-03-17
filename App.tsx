@@ -904,11 +904,27 @@ const isRetryableSyncError = (error: unknown): boolean => {
   return false;
 };
 
-const ASYNC_COMMAND_JOB_POLL_INTERVAL_MS = 850;
+const ASYNC_COMMAND_JOB_POLL_BASE_INTERVAL_MS = 1200;
+const ASYNC_COMMAND_JOB_POLL_MAX_INTERVAL_MS = 5000;
+const ASYNC_COMMAND_JOB_POLL_JITTER_MIN = 0.8;
+const ASYNC_COMMAND_JOB_POLL_JITTER_MAX = 1.25;
 const ASYNC_COMMAND_JOB_POLL_TIMEOUT_MS = 25000;
 
 const isAsyncCommandJobTerminalStatus = (status: StateCommandAsyncJobStatus): boolean =>
   status === 'COMPLETED' || status === 'FAILED';
+
+const getAsyncCommandJobPollDelayMs = (attempt: number): number => {
+  const safeAttempt = Math.max(0, Math.floor(attempt));
+  const exponentialDelay = ASYNC_COMMAND_JOB_POLL_BASE_INTERVAL_MS * 2 ** safeAttempt;
+  const cappedDelay = Math.min(ASYNC_COMMAND_JOB_POLL_MAX_INTERVAL_MS, exponentialDelay);
+  const jitterFactor =
+    ASYNC_COMMAND_JOB_POLL_JITTER_MIN +
+    Math.random() * (ASYNC_COMMAND_JOB_POLL_JITTER_MAX - ASYNC_COMMAND_JOB_POLL_JITTER_MIN);
+  return Math.max(
+    ASYNC_COMMAND_JOB_POLL_BASE_INTERVAL_MS,
+    Math.round(cappedDelay * jitterFactor)
+  );
+};
 
 const waitForAsyncCommandJobTerminalStatus = async (
   jobId: string
@@ -917,6 +933,7 @@ const waitForAsyncCommandJobTerminalStatus = async (
   lastError: string | null;
 }> => {
   const startedAt = Date.now();
+  let pollAttempt = 0;
 
   while (Date.now() - startedAt < ASYNC_COMMAND_JOB_POLL_TIMEOUT_MS) {
     const job = await getStateCommandAsyncJob(jobId);
@@ -928,8 +945,9 @@ const waitForAsyncCommandJobTerminalStatus = async (
     }
 
     await new Promise<void>((resolve) => {
-      globalThis.setTimeout(resolve, ASYNC_COMMAND_JOB_POLL_INTERVAL_MS);
+      globalThis.setTimeout(resolve, getAsyncCommandJobPollDelayMs(pollAttempt));
     });
+    pollAttempt += 1;
   }
 
   throw new StateCommandSyncError('Timeout aguardando processamento assíncrono no servidor.', {

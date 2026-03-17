@@ -25,6 +25,8 @@ const COMMAND_VERSION_CONFLICT_RETRY_BASE_DELAY_MS = 80;
 const COMMAND_VERSION_CONFLICT_RETRY_MAX_DELAY_MS = 650;
 const WRITE_CONTEXT_REFRESH_RETRY_BASE_DELAY_MS = 900;
 const WRITE_CONTEXT_REFRESH_RETRY_MAX_DELAY_MS = 15000;
+const API_UNAVAILABLE_RETRY_BASE_DELAY_MS = 1500;
+const API_UNAVAILABLE_RETRY_MAX_DELAY_MS = 30000;
 const DEFAULT_API_BASE_URL = 'https://xburger-backend.onrender.com';
 
 type BaseCommand = {
@@ -163,6 +165,8 @@ let writeContext: StateWriteContext | null = null;
 let writeContextRefreshInFlight: Promise<void> | null = null;
 let writeContextRefreshFailureStreak = 0;
 let writeContextRefreshBlockedUntilMs = 0;
+let apiUnavailableFailureStreak = 0;
+let apiUnavailableBlockedUntilMs = 0;
 
 const getApiBaseUrl = (): string | null => {
   const raw = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env
@@ -262,6 +266,59 @@ const getWriteContextRefreshRetryDelayMs = (failureStreak: number): number => {
     COMMAND_RETRY_JITTER_MIN +
     Math.random() * (COMMAND_RETRY_JITTER_MAX - COMMAND_RETRY_JITTER_MIN);
   return Math.max(WRITE_CONTEXT_REFRESH_RETRY_BASE_DELAY_MS, Math.round(capped * jitterFactor));
+};
+
+const getApiUnavailableRetryDelayMs = (failureStreak: number): number => {
+  const safeStreak = Math.max(1, Math.floor(failureStreak));
+  const exponential = API_UNAVAILABLE_RETRY_BASE_DELAY_MS * 2 ** Math.max(0, safeStreak - 1);
+  const capped = Math.min(API_UNAVAILABLE_RETRY_MAX_DELAY_MS, exponential);
+  const jitterFactor =
+    COMMAND_RETRY_JITTER_MIN +
+    Math.random() * (COMMAND_RETRY_JITTER_MAX - COMMAND_RETRY_JITTER_MIN);
+  return Math.max(API_UNAVAILABLE_RETRY_BASE_DELAY_MS, Math.round(capped * jitterFactor));
+};
+
+const DATABASE_UNAVAILABLE_MESSAGE_PATTERNS = [
+  'banco temporariamente indisponivel',
+  'banco temporariamente ocupado',
+  'http 503',
+  'p1001',
+  'p1002',
+  'p1017',
+  "can't reach database server",
+  'server has closed the connection',
+  'connection reset by peer',
+  'database system is not yet accepting connections',
+] as const;
+
+const isDatabaseUnavailableMessage = (message: string): boolean => {
+  const normalized = message
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+  return DATABASE_UNAVAILABLE_MESSAGE_PATTERNS.some((pattern) =>
+    normalized.includes(pattern)
+  );
+};
+
+const clearApiUnavailableFailureState = (): void => {
+  apiUnavailableFailureStreak = 0;
+  apiUnavailableBlockedUntilMs = 0;
+};
+
+const registerApiUnavailableFailure = (): void => {
+  apiUnavailableFailureStreak += 1;
+  const delayMs = getApiUnavailableRetryDelayMs(apiUnavailableFailureStreak);
+  apiUnavailableBlockedUntilMs = Date.now() + delayMs;
+};
+
+const assertApiAvailability = (): void => {
+  const now = Date.now();
+  if (apiUnavailableBlockedUntilMs <= now) return;
+  throw new StateCommandSyncError('Banco temporariamente indisponível. Tentando novamente...', {
+    statusCode: 503,
+    retryable: true,
+  });
 };
 
 const clearWriteContextRefreshFailureState = (): void => {
@@ -718,6 +775,19 @@ export const runStateCommand = async (
   const startedAtMs = Date.now();
 
   for (let attempt = 0; attempt < COMMAND_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      assertApiAvailability();
+    } catch (error) {
+      const syncError = asRetryableNetworkError(error);
+      if (
+        syncError.retryable &&
+        (await waitBeforeRetry(startedAtMs, attempt, getRetryDelayMs(attempt)))
+      ) {
+        continue;
+      }
+      throw syncError;
+    }
+
     let context: StateWriteContext | null = null;
     try {
       await ensureWriteContext();
@@ -762,6 +832,7 @@ export const runStateCommand = async (
     }
 
     if (response.ok) {
+      clearApiUnavailableFailureState();
       writeContext = readContextFromResponse(response);
       const payload = (await response.json()) as unknown;
       return normalizeAppState(payload);
@@ -787,6 +858,9 @@ export const runStateCommand = async (
     }
 
     const apiError = await toApiError(response);
+    if (response.status === 503 || isDatabaseUnavailableMessage(apiError.message)) {
+      registerApiUnavailableFailure();
+    }
     if (
       apiError.retryable &&
       (await waitBeforeRetry(startedAtMs, attempt, getRetryDelayMs(attempt)))
@@ -808,6 +882,19 @@ export const enqueueStateCommandAsync = async (
   const startedAtMs = Date.now();
 
   for (let attempt = 0; attempt < COMMAND_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      assertApiAvailability();
+    } catch (error) {
+      const syncError = asRetryableNetworkError(error);
+      if (
+        syncError.retryable &&
+        (await waitBeforeRetry(startedAtMs, attempt, getRetryDelayMs(attempt)))
+      ) {
+        continue;
+      }
+      throw syncError;
+    }
+
     let context: StateWriteContext | null = null;
     try {
       await ensureWriteContext();
@@ -851,6 +938,7 @@ export const enqueueStateCommandAsync = async (
     }
 
     if (response.ok) {
+      clearApiUnavailableFailureState();
       const refreshedContext = tryReadContextFromResponse(response);
       if (refreshedContext) {
         writeContext = refreshedContext;
@@ -867,6 +955,9 @@ export const enqueueStateCommandAsync = async (
     }
 
     const apiError = await toApiError(response);
+    if (response.status === 503 || isDatabaseUnavailableMessage(apiError.message)) {
+      registerApiUnavailableFailure();
+    }
     if (
       apiError.retryable &&
       (await waitBeforeRetry(startedAtMs, attempt, getRetryDelayMs(attempt)))
@@ -891,6 +982,19 @@ export const getStateCommandAsyncJob = async (jobId: string): Promise<StateComma
   const startedAtMs = Date.now();
 
   for (let attempt = 0; attempt < COMMAND_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      assertApiAvailability();
+    } catch (error) {
+      const syncError = asRetryableNetworkError(error);
+      if (
+        syncError.retryable &&
+        (await waitBeforeRetry(startedAtMs, attempt, getRetryDelayMs(attempt)))
+      ) {
+        continue;
+      }
+      throw syncError;
+    }
+
     let context: StateWriteContext | null = null;
     try {
       await ensureWriteContext();
@@ -932,6 +1036,7 @@ export const getStateCommandAsyncJob = async (jobId: string): Promise<StateComma
     }
 
     if (response.ok) {
+      clearApiUnavailableFailureState();
       const refreshedContext = tryReadContextFromResponse(response);
       if (refreshedContext) {
         writeContext = refreshedContext;
@@ -948,6 +1053,9 @@ export const getStateCommandAsyncJob = async (jobId: string): Promise<StateComma
     }
 
     const apiError = await toApiError(response);
+    if (response.status === 503 || isDatabaseUnavailableMessage(apiError.message)) {
+      registerApiUnavailableFailure();
+    }
     if (
       apiError.retryable &&
       (await waitBeforeRetry(startedAtMs, attempt, getRetryDelayMs(attempt)))
@@ -965,6 +1073,19 @@ export const getStateCommandAsyncJob = async (jobId: string): Promise<StateComma
 export const fetchStateSnapshot = async (): Promise<AppState> => {
   const startedAtMs = Date.now();
   for (let attempt = 0; attempt < COMMAND_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      assertApiAvailability();
+    } catch (error) {
+      const syncError = asRetryableNetworkError(error);
+      if (
+        syncError.retryable &&
+        (await waitBeforeRetry(startedAtMs, attempt, getRetryDelayMs(attempt)))
+      ) {
+        continue;
+      }
+      throw syncError;
+    }
+
     let response: Response;
     try {
       response = await fetchWithTimeout(getStateApiUrl(), {
@@ -985,12 +1106,16 @@ export const fetchStateSnapshot = async (): Promise<AppState> => {
     }
 
     if (response.ok) {
+      clearApiUnavailableFailureState();
       writeContext = readContextFromResponse(response);
       const payload = (await response.json()) as unknown;
       return normalizeAppState(payload);
     }
 
     const apiError = await toApiError(response);
+    if (response.status === 503 || isDatabaseUnavailableMessage(apiError.message)) {
+      registerApiUnavailableFailure();
+    }
     if (
       apiError.retryable &&
       (await waitBeforeRetry(startedAtMs, attempt, getRetryDelayMs(attempt)))
