@@ -4547,15 +4547,6 @@ const App: React.FC = () => {
           continue;
         }
 
-        if (currentServerDraft?.status === 'PENDING_PAYMENT') {
-          const nextPendingByDraft = { ...pendingDraftAddsRef.current };
-          if ((nextPendingByDraft[currentJob.draftId] || []).length > 0) {
-            delete nextPendingByDraft[currentJob.draftId];
-            replacePendingDraftAdds(nextPendingByDraft);
-          }
-          clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
-        }
-
         setDraftSyncInProgress(currentJob.draftId, true);
         setPaidSyncAssistantActivity(
           'reconciling',
@@ -4720,22 +4711,51 @@ const App: React.FC = () => {
           }, 180);
         };
 
+        const visiblePendingCount = (pendingDraftAddsRef.current[currentJob.draftId] || []).length;
+        const recoveryPendingCount =
+          (recoveryPendingDraftAddsRef.current[currentJob.draftId] || []).length;
         const shouldFlushDraftAdds =
-          !currentServerDraft || currentServerDraft.status === 'DRAFT';
+          !currentServerDraft ||
+          currentServerDraft.status === 'DRAFT' ||
+          visiblePendingCount > 0 ||
+          recoveryPendingCount > 0;
         if (shouldFlushDraftAdds) {
-          const draftAddsErrorSink: RunCommandErrorSink = {};
-          const flushed = await flushPendingDraftAdds(
-            currentJob.draftId,
-            (currentJob.snapshot.draft.customerType || 'BALCAO') as SaleCustomerType,
-            {
-              silentErrorNotification: true,
-              errorSink: draftAddsErrorSink,
-              failFastOnVersionConflict: false,
+          const shouldFlushVisibleDraftAdds =
+            !currentServerDraft || currentServerDraft.status === 'DRAFT' || visiblePendingCount > 0;
+          if (shouldFlushVisibleDraftAdds) {
+            const draftAddsErrorSink: RunCommandErrorSink = {};
+            const flushedVisible = await flushPendingDraftAdds(
+              currentJob.draftId,
+              (currentJob.snapshot.draft.customerType || 'BALCAO') as SaleCustomerType,
+              {
+                silentErrorNotification: true,
+                errorSink: draftAddsErrorSink,
+                failFastOnVersionConflict: false,
+                source: 'visible',
+              }
+            );
+            if (!flushedVisible) {
+              await markJobAsFailed('Falha ao enviar itens pendentes.', draftAddsErrorSink);
+              return;
             }
-          );
-          if (!flushed) {
-            await markJobAsFailed('Falha ao enviar itens pendentes.', draftAddsErrorSink);
-            return;
+          }
+
+          if (recoveryPendingCount > 0) {
+            const recoveryAddsErrorSink: RunCommandErrorSink = {};
+            const flushedRecovery = await flushPendingDraftAdds(
+              currentJob.draftId,
+              (currentJob.snapshot.draft.customerType || 'BALCAO') as SaleCustomerType,
+              {
+                silentErrorNotification: true,
+                errorSink: recoveryAddsErrorSink,
+                failFastOnVersionConflict: false,
+                source: 'recovery',
+              }
+            );
+            if (!flushedRecovery) {
+              await markJobAsFailed('Falha ao enviar itens pendentes da recuperação.', recoveryAddsErrorSink);
+              return;
+            }
           }
           currentServerDraft = saleDraftsRef.current.find((entry) => entry.id === currentJob.draftId);
           if (
