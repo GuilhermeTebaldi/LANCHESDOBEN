@@ -3045,6 +3045,7 @@ const App: React.FC = () => {
       const nextPendingByDraft = { ...pendingDraftAddsRef.current };
       delete nextPendingByDraft[draftId];
       replacePendingDraftAdds(nextPendingByDraft);
+      clearRecoveryPendingDraftAddsForDraft(draftId);
       if (activeDraftIdRef.current === draftId) {
         activeDraftIdRef.current = null;
       }
@@ -3062,6 +3063,7 @@ const App: React.FC = () => {
         delete nextPendingByDraft[draftId];
         replacePendingDraftAdds(nextPendingByDraft);
       }
+      clearRecoveryPendingDraftAddsForDraft(draftId);
       if (activeDraftIdRef.current === draftId) {
         activeDraftIdRef.current = null;
       }
@@ -3091,6 +3093,7 @@ const App: React.FC = () => {
           delete nextPendingByDraft[draftId];
           replacePendingDraftAdds(nextPendingByDraft);
         }
+        clearRecoveryPendingDraftAddsForDraft(draftId);
 
         if (activeDraftIdRef.current === draftId) {
           activeDraftIdRef.current = null;
@@ -5403,6 +5406,34 @@ const App: React.FC = () => {
     }
   };
 
+  const moveVisiblePendingDraftAddsToRecovery = useCallback((draftId: string): number => {
+    const normalizedDraftId = draftId.trim();
+    if (!normalizedDraftId) return 0;
+    hydratePendingDraftAdds();
+
+    const visibleEntries = pendingDraftAddsRef.current[normalizedDraftId] || [];
+    if (visibleEntries.length === 0) return 0;
+
+    const nextRecoveryByDraft: PendingDraftAddsByDraftId = {
+      ...recoveryPendingDraftAddsRef.current,
+    };
+    const existingRecoveryEntries = nextRecoveryByDraft[normalizedDraftId] || [];
+    const mergedEntries = [...existingRecoveryEntries, ...visibleEntries];
+    const dedupedEntriesByKey = new Map<string, PendingDraftAdd>();
+    mergedEntries.forEach((entry) => {
+      const dedupeKey = `${entry.commandId}:${entry.localItemId}`;
+      dedupedEntriesByKey.set(dedupeKey, entry);
+    });
+    nextRecoveryByDraft[normalizedDraftId] = Array.from(dedupedEntriesByKey.values());
+    recoveryPendingDraftAddsRef.current = nextRecoveryByDraft;
+
+    const nextVisibleByDraft = { ...pendingDraftAddsRef.current };
+    delete nextVisibleByDraft[normalizedDraftId];
+    replacePendingDraftAdds(nextVisibleByDraft);
+
+    return visibleEntries.length;
+  }, [hydratePendingDraftAdds, replacePendingDraftAdds]);
+
   const navigatePreparedReceiptWindow = useCallback(
     (printWindow: Window | null, receiptId: string): boolean => {
       const normalizedId = receiptId.trim();
@@ -5493,7 +5524,7 @@ const App: React.FC = () => {
     const receiptPayload: ReceiptPrintPayload | null = receiptPayloadInput
       ? saveReceiptPrintPayload(receiptPayloadInput)
       : null;
-    const pendingItemsCount = pendingDraftAddsRef.current[draftId]?.length || 0;
+    const pendingItemsCount = moveVisiblePendingDraftAddsToRecovery(draftId);
     const preparedPrintWindow = prepareReceiptPrintWindow();
     if (receiptPayload && preparedPrintWindow) {
       setReceiptPrintPayloadOnWindow(preparedPrintWindow, receiptPayload);
