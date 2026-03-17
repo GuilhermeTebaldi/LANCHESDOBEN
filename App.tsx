@@ -4175,11 +4175,12 @@ const App: React.FC = () => {
             nextAttemptAt: retryAt,
             lastError: statusCode ? `${message} (HTTP ${statusCode})` : message,
           };
-          replacePendingPaidSyncQueue([failedJob, ...pendingPaidSyncQueueRef.current.slice(1)]);
-          showCornerSync('error', 'Banco lento. Pedido segue na fila.', 1800);
-          pendingPaidSyncRetryTimerRef.current = window.setTimeout(() => {
+          replacePendingPaidSyncQueue([...pendingPaidSyncQueueRef.current.slice(1), failedJob]);
+          setDraftSyncInProgress(currentJob.draftId, false);
+          showCornerSync('error', 'Banco lento. Pedido movido para o fim da fila.', 1800);
+          window.setTimeout(() => {
             void processPendingPaidSyncQueue();
-          }, retryDelayMs);
+          }, 180);
         };
 
         const draftAddsErrorSink: RunCommandErrorSink = {};
@@ -4202,8 +4203,7 @@ const App: React.FC = () => {
           silentSavedNotification: true,
           silentErrorNotification: true,
           errorSink: finalizeErrorSink,
-          preferAsyncFinalize: true,
-          asyncFinalizeCommandId: currentJob.finalizeCommandId,
+          preferAsyncFinalize: false,
         });
         if (!finalized) {
           const finalizeMessage = finalizeErrorSink.message || 'Falha ao salvar forma de pagamento.';
@@ -4277,42 +4277,86 @@ const App: React.FC = () => {
 
         if (asyncJobId) {
           let terminalStatus: { status: StateCommandAsyncJobStatus; lastError: string | null } | null = null;
+          let resolvedBySyncFallback = false;
           try {
             terminalStatus = await waitForAsyncCommandJobTerminalStatus(asyncJobId);
           } catch (error) {
-            markJobAsFailed('Falha ao aguardar processamento assíncrono.', {
-              error,
-              message: getStateSyncErrorMessage(error),
-              retryable: isRetryableSyncError(error),
-              statusCode: error instanceof StateCommandSyncError ? error.statusCode : undefined,
-            });
-            return;
-          }
+            const errorMessage = getStateSyncErrorMessage(error);
+            const isTimeoutWhileWaiting =
+              errorMessage.toLowerCase().includes('timeout aguardando processamento assíncrono');
+            if (!isTimeoutWhileWaiting) {
+              markJobAsFailed('Falha ao aguardar processamento assíncrono.', {
+                error,
+                message: errorMessage,
+                retryable: isRetryableSyncError(error),
+                statusCode: error instanceof StateCommandSyncError ? error.statusCode : undefined,
+              });
+              return;
+            }
 
-          if (!terminalStatus || terminalStatus.status !== 'COMPLETED') {
-            markJobAsFailed(
-              terminalStatus?.lastError || 'Falha no processamento assíncrono do pedido.',
+            const confirmErrorSink: RunCommandErrorSink = {};
+            const confirmed = await runCommandWithSync(
+              confirmCommand,
+              undefined,
               {
-                message:
-                  terminalStatus?.lastError ||
-                  'Falha no processamento assíncrono do pedido.',
-                retryable: false,
+                trackPendingState: false,
+                silentSuccessNotification: true,
+                silentErrorNotification: true,
+                errorSink: confirmErrorSink,
               }
             );
-            return;
+            if (!confirmed) {
+              markJobAsFailed(
+                'Falha ao confirmar pagamento após timeout do processamento assíncrono.',
+                confirmErrorSink
+              );
+              return;
+            }
+            resolvedBySyncFallback = true;
           }
 
-          try {
-            const refreshedState = await fetchStateSnapshot();
-            applyStateSnapshot(refreshedState);
-          } catch (error) {
-            markJobAsFailed('Pedido confirmado, mas falhou ao atualizar estado local.', {
-              error,
-              message: getStateSyncErrorMessage(error),
-              retryable: isRetryableSyncError(error),
-              statusCode: error instanceof StateCommandSyncError ? error.statusCode : undefined,
-            });
-            return;
+          if (!resolvedBySyncFallback && (!terminalStatus || terminalStatus.status !== 'COMPLETED')) {
+            const confirmErrorSink: RunCommandErrorSink = {};
+            const confirmed = await runCommandWithSync(
+              confirmCommand,
+              undefined,
+              {
+                trackPendingState: false,
+                silentSuccessNotification: true,
+                silentErrorNotification: true,
+                errorSink: confirmErrorSink,
+              }
+            );
+            if (!confirmed) {
+              markJobAsFailed(
+                terminalStatus?.lastError || 'Falha no processamento assíncrono do pedido.',
+                {
+                  message:
+                    terminalStatus?.lastError ||
+                    confirmErrorSink.message ||
+                    'Falha no processamento assíncrono do pedido.',
+                  retryable: confirmErrorSink.retryable ?? false,
+                  statusCode: confirmErrorSink.statusCode,
+                }
+              );
+              return;
+            }
+            resolvedBySyncFallback = true;
+          }
+
+          if (!resolvedBySyncFallback) {
+            try {
+              const refreshedState = await fetchStateSnapshot();
+              applyStateSnapshot(refreshedState);
+            } catch (error) {
+              markJobAsFailed('Pedido confirmado, mas falhou ao atualizar estado local.', {
+                error,
+                message: getStateSyncErrorMessage(error),
+                retryable: isRetryableSyncError(error),
+                statusCode: error instanceof StateCommandSyncError ? error.statusCode : undefined,
+              });
+              return;
+            }
           }
         }
 
@@ -4322,6 +4366,11 @@ const App: React.FC = () => {
       }
     } finally {
       isPendingPaidSyncQueueRunningRef.current = false;
+      if (pendingPaidSyncQueueRef.current.length > 0) {
+        window.setTimeout(() => {
+          void processPendingPaidSyncQueue();
+        }, 120);
+      }
     }
   }, [
     applyStateSnapshot,
