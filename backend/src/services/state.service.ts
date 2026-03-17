@@ -93,6 +93,14 @@ const APPLY_COMMAND_RETRY_MAX_DELAY_MS = 900;
 const APPLY_COMMAND_LATEST_MAX_ATTEMPTS = 8;
 const APPLY_COMMAND_LATEST_RETRY_BASE_DELAY_MS = 80;
 const APPLY_COMMAND_LATEST_RETRY_MAX_DELAY_MS = 1200;
+const DATABASE_UNAVAILABLE_MESSAGE_PATTERNS = [
+  "can't reach database server",
+  'database system is not yet accepting connections',
+  'consistent recovery state has not been yet reached',
+  'server has closed the connection',
+  'connection terminated unexpectedly',
+  'connection reset by peer',
+];
 
 const wait = (ms: number): Promise<void> =>
   new Promise((resolve) => {
@@ -282,11 +290,24 @@ export class StateService {
 
   private isRetryableApplyCommandError(error: unknown): boolean {
     if (error instanceof Prisma.PrismaClientKnownRequestError) {
-      return error.code === 'P2024' || error.code === 'P2028' || error.code === 'P2034';
+      return (
+        error.code === 'P2024' ||
+        error.code === 'P2028' ||
+        error.code === 'P2034' ||
+        error.code === 'P1001' ||
+        error.code === 'P1002' ||
+        error.code === 'P1017'
+      );
     }
 
     if (error instanceof Prisma.PrismaClientUnknownRequestError) {
-      return error.message.includes('Transaction API error');
+      const normalizedMessage = (error.message || '').toLowerCase();
+      return (
+        normalizedMessage.includes('transaction api error') ||
+        DATABASE_UNAVAILABLE_MESSAGE_PATTERNS.some((pattern) =>
+          normalizedMessage.includes(pattern)
+        )
+      );
     }
 
     if (error instanceof Prisma.PrismaClientInitializationError) {
@@ -295,6 +316,13 @@ export class StateService {
           ? (error as { errorCode: string }).errorCode
           : null;
       return errorCode === 'P1001' || errorCode === 'P1002' || errorCode === 'P1017';
+    }
+
+    if (error instanceof Error) {
+      const normalizedMessage = (error.message || '').toLowerCase();
+      return DATABASE_UNAVAILABLE_MESSAGE_PATTERNS.some((pattern) =>
+        normalizedMessage.includes(pattern)
+      );
     }
 
     return false;

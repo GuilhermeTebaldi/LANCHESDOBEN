@@ -27,6 +27,7 @@ const DATABASE_UNAVAILABLE_MESSAGE_PATTERNS = [
   'the database system is starting up',
   'server has closed the connection',
   'connection terminated unexpectedly',
+  'connection reset by peer',
 ];
 const QUEUEABLE_COMMAND_TYPES = new Set<StateCommandInput['type']>(['SALE_DRAFT_CONFIRM_PAID']);
 if (env.STATE_COMMAND_QUEUE_ENABLE_FINALIZE) {

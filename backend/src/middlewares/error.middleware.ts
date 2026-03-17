@@ -16,6 +16,15 @@ interface BackendErrorMonitorInput {
   stack?: string;
 }
 
+const DATABASE_UNAVAILABLE_MESSAGE_PATTERNS = [
+  "can't reach database server",
+  'connection timed out',
+  'server has closed the connection',
+  'database system is not yet accepting connections',
+  'consistent recovery state has not been yet reached',
+  'connection reset by peer',
+];
+
 const isExpectedStateVersionConflict = (req: Request, statusCode: number, message: string): boolean => {
   if (statusCode !== 412) return false;
   const path = (req.originalUrl || req.url || '').toLowerCase();
@@ -35,13 +44,38 @@ const isExpectedErrorMonitorAuthFailure = (req: Request, statusCode: number, mes
 const isKnownDatabaseUnavailableError = (error: Prisma.PrismaClientKnownRequestError): boolean => {
   const normalizedMessage = (error.message || '').toLowerCase();
   return (
-    normalizedMessage.includes("can't reach database server") ||
-    normalizedMessage.includes('connection timed out') ||
-    normalizedMessage.includes('server has closed the connection')
+    error.code === 'P1001' ||
+    error.code === 'P1002' ||
+    error.code === 'P1017' ||
+    DATABASE_UNAVAILABLE_MESSAGE_PATTERNS.some((pattern) =>
+      normalizedMessage.includes(pattern)
+    )
+  );
+};
+
+const isUnknownDatabaseUnavailableError = (
+  error: Prisma.PrismaClientUnknownRequestError
+): boolean => {
+  const normalizedMessage = (error.message || '').toLowerCase();
+  return DATABASE_UNAVAILABLE_MESSAGE_PATTERNS.some((pattern) =>
+    normalizedMessage.includes(pattern)
+  );
+};
+
+const shouldSkipPersistingErrorMonitorEvent = (input: BackendErrorMonitorInput): boolean => {
+  if (input.statusCode !== 503) return false;
+  const normalizedMessage = (input.message || '').toLowerCase();
+  return (
+    normalizedMessage.includes('banco temporariamente indisponível') ||
+    normalizedMessage.includes('banco temporariamente ocupado')
   );
 };
 
 const reportBackendErrorEvent = (req: Request, input: BackendErrorMonitorInput): void => {
+  if (shouldSkipPersistingErrorMonitorEvent(input)) {
+    return;
+  }
+
   const requestPath = `${req.method.toUpperCase()} ${req.originalUrl || req.url || ''}`.trim();
   void new AuditService(prisma)
     .log(
@@ -164,6 +198,21 @@ export const errorMiddleware = (error: unknown, req: Request, res: Response, _ne
         statusCode: 503,
         details: { prismaCode: errorCode },
         stack: error.stack,
+      });
+      res.status(503).json({
+        error: 'Banco temporariamente indisponível. Tente novamente em instantes.',
+        requestId: req.context?.requestId,
+      });
+      return;
+    }
+  }
+
+  if (error instanceof Prisma.PrismaClientUnknownRequestError) {
+    if (isUnknownDatabaseUnavailableError(error)) {
+      reportBackendErrorEvent(req, {
+        level: 'error',
+        message: 'Banco temporariamente indisponível. Tente novamente em instantes.',
+        statusCode: 503,
       });
       res.status(503).json({
         error: 'Banco temporariamente indisponível. Tente novamente em instantes.',
