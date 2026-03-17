@@ -4182,32 +4182,16 @@ const App: React.FC = () => {
 
       if (rebuiltPendingAdds.length === 0) return false;
 
-      const target: PendingDraftAddsSource =
-        options.target ||
-        (options.trigger === 'manual-recover' ? 'visible' : 'recovery');
-      if (target === 'visible') {
-        const nextPendingByDraft: PendingDraftAddsByDraftId = {
-          ...pendingDraftAddsRef.current,
-          [normalizedDraftId]: rebuiltPendingAdds,
-        };
-        replacePendingDraftAdds(nextPendingByDraft);
-      } else {
-        const nextRecoveryByDraft: PendingDraftAddsByDraftId = {
-          ...recoveryPendingDraftAddsRef.current,
-          [normalizedDraftId]: rebuiltPendingAdds,
-        };
-        recoveryPendingDraftAddsRef.current = nextRecoveryByDraft;
-      }
+      const target: PendingDraftAddsSource = 'recovery';
+      const nextRecoveryByDraft: PendingDraftAddsByDraftId = {
+        ...recoveryPendingDraftAddsRef.current,
+        [normalizedDraftId]: rebuiltPendingAdds,
+      };
+      recoveryPendingDraftAddsRef.current = nextRecoveryByDraft;
       reportErrorMonitorEvent({
-        source:
-          target === 'visible'
-            ? 'sistema:paid-sync:cart-restored'
-            : 'sistema:paid-sync:recovery-buffer-restored',
+        source: 'sistema:paid-sync:recovery-buffer-restored',
         level: 'warn',
-        message:
-          target === 'visible'
-            ? 'Pedido reconstruído no carrinho local para auto-recuperação da fila.'
-            : 'Pedido reconstruído em buffer interno para auto-recuperação da fila.',
+        message: 'Pedido reconstruído em buffer interno para auto-recuperação da fila.',
         statusCode: options.statusCode,
         context: {
           trigger: options.trigger || 'unknown',
@@ -4246,8 +4230,7 @@ const App: React.FC = () => {
       }
 
       const localServerDraft = saleDraftsRef.current.find((draft) => draft.id === normalizedDraftId);
-      const recoverySource: PendingDraftAddsSource =
-        options.trigger === 'manual-recover' ? 'visible' : 'recovery';
+      const recoverySource: PendingDraftAddsSource = 'recovery';
       if (
         localServerDraft &&
         (localServerDraft.status === 'PAID' || localServerDraft.status === 'CANCELLED')
@@ -5556,6 +5539,12 @@ const App: React.FC = () => {
     setIsSplitSetupOpen(false);
     setIsPaymentOpen(false);
     setIsCartOpen(false);
+
+    if (activeDraftIdRef.current === draftId) {
+      activeDraftIdRef.current = null;
+    }
+    setActiveDraftId(null);
+
     setIsConfirmingPaid(true);
 
     enqueuePendingPaidSyncJob(queuedJob);
