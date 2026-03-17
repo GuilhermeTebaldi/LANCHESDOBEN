@@ -25,6 +25,8 @@ const DATABASE_UNAVAILABLE_MESSAGE_PATTERNS = [
   'database system is not yet accepting connections',
   'consistent recovery state has not been yet reached',
   'the database system is starting up',
+  'server has closed the connection',
+  'connection terminated unexpectedly',
 ];
 const QUEUEABLE_COMMAND_TYPES = new Set<StateCommandInput['type']>(['SALE_DRAFT_CONFIRM_PAID']);
 if (env.STATE_COMMAND_QUEUE_ENABLE_FINALIZE) {

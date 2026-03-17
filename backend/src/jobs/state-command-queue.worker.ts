@@ -40,7 +40,8 @@ const runQueueCycle = async (): Promise<void> => {
       console.log(`[state-command-queue] worker=${workerId} processed=${processed}`);
     }
   } catch (error) {
-    if (isDatabaseUnavailableQueueError(error)) {
+    const databaseUnavailable = isDatabaseUnavailableQueueError(error);
+    if (databaseUnavailable) {
       dbUnavailableFailureStreak += 1;
       const backoffMs = getDbOutageBackoffMs(dbUnavailableFailureStreak);
       nextCycleNotBeforeMs = Date.now() + backoffMs;
@@ -52,8 +53,10 @@ const runQueueCycle = async (): Promise<void> => {
       dbUnavailableFailureStreak = 0;
       nextCycleNotBeforeMs = 0;
     }
-    // eslint-disable-next-line no-console
-    console.error('[state-command-queue] cycle failed', error);
+    if (!databaseUnavailable) {
+      // eslint-disable-next-line no-console
+      console.error('[state-command-queue] cycle failed', error);
+    }
   } finally {
     queueCycleRunning = false;
   }
