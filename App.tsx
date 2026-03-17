@@ -63,6 +63,7 @@ const ADMIN_SESSION_BACKUP_KEY = 'lanchesdoben_admin_session_backup';
 const OFFLINE_SALE_QUEUE_KEY = 'qb_offline_sale_queue_v1';
 const PENDING_DRAFT_ADDS_KEY = 'qb_pending_draft_adds_v1';
 const PENDING_PAID_SYNC_QUEUE_KEY = 'qb_pending_paid_sync_queue_v1';
+const FAILED_PAID_SYNC_QUEUE_KEY = 'qb_failed_paid_sync_queue_v1';
 const CASH_HISTORY_LEGACY_MODE_KEY = 'qb_cash_history_legacy_mode_v1';
 const LOCAL_CASH_REGISTER_KEY = 'qb_cash_register_local_v1';
 const LOCAL_DAILY_HISTORY_KEY = 'qb_daily_sales_history_local_v1';
@@ -802,6 +803,17 @@ const getStateSyncErrorMessage = (error: unknown): string => {
   return 'Falha ao sincronizar com o servidor. Tente novamente.';
 };
 
+const isStockRelatedErrorMessage = (message: string): boolean => {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes('estoque') ||
+    normalized.includes('insumo') ||
+    normalized.includes('insuficient') ||
+    normalized.includes('sem estoque') ||
+    normalized.includes('falt')
+  );
+};
+
 const isRetryableSyncError = (error: unknown): boolean => {
   if (error instanceof StateCommandSyncError) {
     return error.retryable;
@@ -1282,9 +1294,34 @@ const savePendingPaidSyncQueue = (queue: PendingPaidSyncJob[]): void => {
   }
 };
 
+const loadFailedPaidSyncQueue = (): PendingPaidSyncJob[] => {
+  if (typeof window === 'undefined') return [];
+  try {
+    const raw = window.localStorage.getItem(FAILED_PAID_SYNC_QUEUE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((entry) => normalizePendingPaidSyncJob(entry))
+      .filter((entry): entry is PendingPaidSyncJob => entry !== null);
+  } catch {
+    return [];
+  }
+};
+
+const saveFailedPaidSyncQueue = (queue: PendingPaidSyncJob[]): void => {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(FAILED_PAID_SYNC_QUEUE_KEY, JSON.stringify(queue));
+  } catch {
+    // ignore storage write failures
+  }
+};
+
 const PENDING_PAID_SYNC_RETRY_BASE_MS = 5000;
 const PENDING_PAID_SYNC_RETRY_MAX_MS = 15 * 60 * 1000;
 const PENDING_PAID_SYNC_RETRY_JITTER = 0.2;
+const PAID_SYNC_QUEUE_PREVIEW_LIMIT = 6;
 const PENDING_DRAFT_BACKGROUND_SYNC_DEBOUNCE_MS = 650;
 const PENDING_DRAFT_BACKGROUND_SYNC_SWEEP_MS = 10000;
 const PENDING_DRAFT_BACKGROUND_SYNC_RETRY_BASE_MS = 1800;
@@ -1331,10 +1368,12 @@ const App: React.FC = () => {
   const commandQueueRef = useRef<Promise<void>>(Promise.resolve());
   const offlineSalesQueueRef = useRef<OfflineQueuedSale[]>([]);
   const pendingPaidSyncQueueRef = useRef<PendingPaidSyncJob[]>([]);
+  const failedPaidSyncQueueRef = useRef<PendingPaidSyncJob[]>([]);
   const pendingDraftAddsRef = useRef<PendingDraftAddsByDraftId>({});
   const syncingPaidDraftIdsRef = useRef<Set<string>>(new Set());
   const isPendingDraftAddsHydratedRef = useRef(false);
   const isPendingPaidSyncQueueHydratedRef = useRef(false);
+  const isFailedPaidSyncQueueHydratedRef = useRef(false);
   const isPendingPaidSyncQueueRunningRef = useRef(false);
   const isFlushingOfflineSalesRef = useRef(false);
   const isOfflineQueueHydratedRef = useRef(false);
@@ -1378,6 +1417,8 @@ const App: React.FC = () => {
   const [pendingDraftAddsByDraft, setPendingDraftAddsByDraft] =
     useState<PendingDraftAddsByDraftId>({});
   const [syncingPaidDraftIds, setSyncingPaidDraftIds] = useState<string[]>([]);
+  const [pendingPaidSyncQueueSnapshot, setPendingPaidSyncQueueSnapshot] = useState<PendingPaidSyncJob[]>([]);
+  const [failedPaidSyncQueue, setFailedPaidSyncQueue] = useState<PendingPaidSyncJob[]>([]);
   
   const [isAddProductModalOpen, setIsAddProductModalOpen] = useState(false);
   const [isAddIngredientModalOpen, setIsAddIngredientModalOpen] = useState(false);
@@ -1815,6 +1856,7 @@ const App: React.FC = () => {
         .filter((entry): entry is PendingPaidSyncJob => entry !== null);
       pendingPaidSyncQueueRef.current = normalizedQueue;
       setPendingPaidSyncJobs(normalizedQueue.length);
+      setPendingPaidSyncQueueSnapshot(normalizedQueue);
       savePendingPaidSyncQueue(normalizedQueue);
       isPendingPaidSyncQueueHydratedRef.current = true;
     },
@@ -1826,6 +1868,7 @@ const App: React.FC = () => {
     const loadedQueue = loadPendingPaidSyncQueue();
     pendingPaidSyncQueueRef.current = loadedQueue;
     setPendingPaidSyncJobs(loadedQueue.length);
+    setPendingPaidSyncQueueSnapshot(loadedQueue);
     loadedQueue.forEach((job) => {
       setDraftSyncInProgress(job.draftId, true);
     });
@@ -1836,6 +1879,29 @@ const App: React.FC = () => {
     if (!isAccessVerified) return;
     hydratePendingPaidSyncQueue();
   }, [hydratePendingPaidSyncQueue, isAccessVerified]);
+
+  const replaceFailedPaidSyncQueue = useCallback((nextQueue: PendingPaidSyncJob[]) => {
+    const normalizedQueue = nextQueue
+      .map((entry) => normalizePendingPaidSyncJob(entry))
+      .filter((entry): entry is PendingPaidSyncJob => entry !== null);
+    failedPaidSyncQueueRef.current = normalizedQueue;
+    setFailedPaidSyncQueue(normalizedQueue);
+    saveFailedPaidSyncQueue(normalizedQueue);
+    isFailedPaidSyncQueueHydratedRef.current = true;
+  }, []);
+
+  const hydrateFailedPaidSyncQueue = useCallback(() => {
+    if (isFailedPaidSyncQueueHydratedRef.current) return;
+    const loadedQueue = loadFailedPaidSyncQueue();
+    failedPaidSyncQueueRef.current = loadedQueue;
+    setFailedPaidSyncQueue(loadedQueue);
+    isFailedPaidSyncQueueHydratedRef.current = true;
+  }, []);
+
+  useEffect(() => {
+    if (!isAccessVerified) return;
+    hydrateFailedPaidSyncQueue();
+  }, [hydrateFailedPaidSyncQueue, isAccessVerified]);
 
   const replaceOfflineSalesQueue = useCallback((nextQueue: OfflineQueuedSale[]) => {
     offlineSalesQueueRef.current = nextQueue;
@@ -3148,6 +3214,11 @@ const App: React.FC = () => {
         const retryable = errorSink.retryable ?? true;
         if (!retryable) {
           pendingDraftBackgroundRetryAttemptsRef.current.delete(normalizedDraftId);
+          if (isStockRelatedErrorMessage(errorSink.message || '')) {
+            showNotification(
+              'Alerta de estoque: um item do carrinho não pôde ser sincronizado por falta de insumo.'
+            );
+          }
           reportErrorMonitorEvent({
             source: 'sistema:draft-background-sync',
             level: 'error',
@@ -3183,7 +3254,13 @@ const App: React.FC = () => {
         runningSet.delete(normalizedDraftId);
       }
     },
-    [flushPendingDraftAdds, isAccessVerified, isStateHydrating, resolveDraftCustomerType]
+    [
+      flushPendingDraftAdds,
+      isAccessVerified,
+      isStateHydrating,
+      resolveDraftCustomerType,
+      showNotification,
+    ]
   );
 
   const schedulePendingDraftBackgroundSync = useCallback(
@@ -3583,6 +3660,32 @@ const App: React.FC = () => {
     [hydratePendingPaidSyncQueue, replacePendingPaidSyncQueue, setDraftSyncInProgress]
   );
 
+  const enqueueFailedPaidSyncJob = useCallback(
+    (jobInput: PendingPaidSyncJob) => {
+      hydrateFailedPaidSyncQueue();
+      const normalizedJob = normalizePendingPaidSyncJob(jobInput);
+      if (!normalizedJob) return;
+
+      const existingIndex = failedPaidSyncQueueRef.current.findIndex(
+        (entry) => entry.id === normalizedJob.id || entry.draftId === normalizedJob.draftId
+      );
+
+      if (existingIndex >= 0) {
+        const nextQueue = [...failedPaidSyncQueueRef.current];
+        nextQueue[existingIndex] = {
+          ...nextQueue[existingIndex],
+          ...normalizedJob,
+          nextAttemptAt: undefined,
+        };
+        replaceFailedPaidSyncQueue(nextQueue);
+        return;
+      }
+
+      replaceFailedPaidSyncQueue([normalizedJob, ...failedPaidSyncQueueRef.current]);
+    },
+    [hydrateFailedPaidSyncQueue, replaceFailedPaidSyncQueue]
+  );
+
   const processPendingPaidSyncQueue = useCallback(async (): Promise<void> => {
     hydratePendingPaidSyncQueue();
     if (isStateHydrating) return;
@@ -3636,9 +3739,26 @@ const App: React.FC = () => {
           const statusCode = errorSink?.statusCode;
 
           if (!retryable) {
+            const failedJob: PendingPaidSyncJob = {
+              ...currentJob,
+              attempts: currentJob.attempts + 1,
+              nextAttemptAt: undefined,
+              lastError: statusCode ? `${message} (HTTP ${statusCode})` : message,
+            };
             replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
+            enqueueFailedPaidSyncJob(failedJob);
             setDraftSyncInProgress(currentJob.draftId, false);
-            showCornerSync('error', 'Falha no pedido. Próximos seguem na fila.', 2600);
+            const isStockFailure = isStockRelatedErrorMessage(message);
+            showCornerSync(
+              'error',
+              isStockFailure
+                ? 'Estoque insuficiente em pedido da fila.'
+                : 'Falha no pedido. Use "Tentar de novo" no painel.',
+              3200
+            );
+            if (isStockFailure) {
+              showNotification('Alerta de estoque: item sem insumo suficiente para concluir pedido.');
+            }
             showNotification(`Erro ao enviar pedido: ${message}`);
             return;
           }
@@ -3783,6 +3903,7 @@ const App: React.FC = () => {
     }
   }, [
     applyStateSnapshot,
+    enqueueFailedPaidSyncJob,
     enqueueStateCommandAsync,
     fetchStateSnapshot,
     flushPendingDraftAdds,
@@ -3829,6 +3950,80 @@ const App: React.FC = () => {
       window.clearInterval(intervalId);
     };
   }, [processPendingPaidSyncQueue]);
+
+  const handleRetryFailedPaidSyncJob = useCallback(
+    (jobId: string) => {
+      hydrateFailedPaidSyncQueue();
+      const normalizedJobId = jobId.trim();
+      if (!normalizedJobId) return;
+
+      const failedJob = failedPaidSyncQueueRef.current.find((entry) => entry.id === normalizedJobId);
+      if (!failedJob) {
+        showNotification('Pedido não encontrado na fila de falhas.');
+        return;
+      }
+
+      const serverDraft = saleDraftsRef.current.find((draft) => draft.id === failedJob.draftId);
+      if (serverDraft && (serverDraft.status === 'PAID' || serverDraft.status === 'CANCELLED')) {
+        replaceFailedPaidSyncQueue(
+          failedPaidSyncQueueRef.current.filter((entry) => entry.id !== normalizedJobId)
+        );
+        showNotification('Pedido já resolvido no servidor. Item removido da fila de falhas.');
+        return;
+      }
+
+      replaceFailedPaidSyncQueue(
+        failedPaidSyncQueueRef.current.filter((entry) => entry.id !== normalizedJobId)
+      );
+      enqueuePendingPaidSyncJob({
+        ...failedJob,
+        attempts: 0,
+        nextAttemptAt: undefined,
+        lastError: undefined,
+      });
+      showCornerSync('syncing', 'Pedido reenviado para a fila.', 1800);
+      showNotification('Pedido reenviado para sincronização.');
+      void processPendingPaidSyncQueue();
+    },
+    [
+      enqueuePendingPaidSyncJob,
+      hydrateFailedPaidSyncQueue,
+      processPendingPaidSyncQueue,
+      replaceFailedPaidSyncQueue,
+      showCornerSync,
+      showNotification,
+    ]
+  );
+
+  useEffect(() => {
+    if (!isAccessVerified) return;
+    if (!isFailedPaidSyncQueueHydratedRef.current) return;
+
+    const knownPersistedDraftIds = new Set<string>();
+    [...sales, ...globalSales, ...globalCancelledSales].forEach((entry) => {
+      const saleDraftId = typeof entry.saleDraftId === 'string' ? entry.saleDraftId.trim() : '';
+      if (saleDraftId) {
+        knownPersistedDraftIds.add(saleDraftId);
+      }
+    });
+
+    const nextQueue = failedPaidSyncQueueRef.current.filter((job) => {
+      if (knownPersistedDraftIds.has(job.draftId)) return false;
+      const serverDraft = saleDraftsRef.current.find((draft) => draft.id === job.draftId);
+      if (!serverDraft) return true;
+      return serverDraft.status === 'DRAFT' || serverDraft.status === 'PENDING_PAYMENT';
+    });
+
+    if (nextQueue.length === failedPaidSyncQueueRef.current.length) return;
+    replaceFailedPaidSyncQueue(nextQueue);
+  }, [
+    globalCancelledSales,
+    globalSales,
+    isAccessVerified,
+    replaceFailedPaidSyncQueue,
+    saleDrafts,
+    sales,
+  ]);
 
   const openReceiptPrintWindow = useCallback(
     (receiptId: string): boolean => {
@@ -4676,6 +4871,49 @@ const App: React.FC = () => {
     isPaymentActionBlocked;
   const isSplitMethodSelectionLocked = paymentMethod === 'DIVIDIDO';
   const isSplitConfirmReady = paymentMethod === 'DIVIDIDO' && isSplitPlanComplete && !isConfirmPaidDisabled;
+  const paidSyncQueueCards = useMemo(
+    () => {
+      const nowMs = Date.now();
+      const syncingSet = new Set(syncingPaidDraftIds);
+      const activeCards = pendingPaidSyncQueueSnapshot.map((job, index) => {
+        const retryAtMs = job.nextAttemptAt ? Date.parse(job.nextAttemptAt) : Number.NaN;
+        const isWaitingRetry = Number.isFinite(retryAtMs) && retryAtMs > nowMs;
+        const isProcessing = syncingSet.has(job.draftId) && index === 0 && !isWaitingRetry;
+        const status: 'PROCESSING' | 'QUEUED' | 'RETRY' = isProcessing
+          ? 'PROCESSING'
+          : isWaitingRetry
+            ? 'RETRY'
+            : 'QUEUED';
+        const retryInSeconds =
+          isWaitingRetry && Number.isFinite(retryAtMs)
+            ? Math.max(1, Math.ceil((retryAtMs - nowMs) / 1000))
+            : null;
+        return {
+          id: job.id,
+          draftId: job.draftId,
+          status,
+          retryInSeconds,
+          attempts: job.attempts,
+          lastError: job.lastError || null,
+          isFailed: false,
+        };
+      });
+
+      const failedCards = failedPaidSyncQueue.map((job) => ({
+        id: job.id,
+        draftId: job.draftId,
+        status: 'FAILED' as const,
+        retryInSeconds: null,
+        attempts: job.attempts,
+        lastError: job.lastError || null,
+        isFailed: true,
+      }));
+
+      return [...activeCards, ...failedCards].slice(0, PAID_SYNC_QUEUE_PREVIEW_LIMIT);
+    },
+    [failedPaidSyncQueue, pendingPaidSyncQueueSnapshot, syncingPaidDraftIds]
+  );
+  const hasPaidSyncQueueCards = paidSyncQueueCards.length > 0;
   const cornerSyncToneClass =
     cornerSyncState.status === 'success'
       ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
@@ -4765,22 +5003,85 @@ const App: React.FC = () => {
         message={syncIndicatorMessage}
         pendingCount={Math.max(1, totalPendingOps)}
       />
-      <div
-        aria-live="polite"
-        aria-hidden={!cornerSyncState.visible}
-        className={`pointer-events-none fixed bottom-3 right-3 z-[1190] transition-all duration-300 ${
-          cornerSyncState.visible ? 'translate-y-0 opacity-100' : 'translate-y-2 opacity-0'
-        }`}
-      >
+      <div className="pointer-events-none fixed bottom-3 right-3 z-[1190] flex max-w-[300px] flex-col items-end gap-2">
+        {hasPaidSyncQueueCards && (
+          <div className="pointer-events-auto w-full max-h-[45vh] overflow-y-auto rounded-2xl border border-slate-200 bg-white/95 p-2 shadow-xl backdrop-blur">
+            <p className="px-1 pb-1 text-[9px] font-black uppercase tracking-widest text-slate-500">
+              Fila de Pedidos
+            </p>
+            <div className="space-y-2">
+              {paidSyncQueueCards.map((card) => {
+                const draftShort = card.draftId.replace(/^draft-/, '').slice(-8).toUpperCase() || '---';
+                const statusToneClass =
+                  card.status === 'FAILED'
+                    ? 'border-red-200 bg-red-50 text-red-700'
+                    : card.status === 'PROCESSING'
+                      ? 'border-blue-200 bg-blue-50 text-blue-700'
+                      : card.status === 'RETRY'
+                        ? 'border-amber-200 bg-amber-50 text-amber-700'
+                        : 'border-slate-200 bg-slate-50 text-slate-700';
+                const statusLabel =
+                  card.status === 'FAILED'
+                    ? 'Falhou'
+                    : card.status === 'PROCESSING'
+                      ? 'Sincronizando'
+                      : card.status === 'RETRY'
+                        ? card.retryInSeconds
+                          ? `Nova tentativa em ${card.retryInSeconds}s`
+                          : 'Aguardando nova tentativa'
+                        : 'Na fila';
+
+                return (
+                  <div key={card.id} className={`rounded-xl border p-2 text-[10px] ${statusToneClass}`}>
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className="inline-flex flex-col gap-[2px] text-current/80">
+                          <span className="h-[2px] w-3 rounded bg-current" />
+                          <span className="h-[2px] w-4 rounded bg-current" />
+                          <span className="h-[2px] w-5 rounded bg-current" />
+                        </span>
+                        <span className="font-black uppercase tracking-widest">Pedido {draftShort}</span>
+                      </div>
+                      <span className="font-black uppercase tracking-wider">{statusLabel}</span>
+                    </div>
+                    {(card.lastError || card.attempts > 0) && (
+                      <p className="mt-1 truncate text-[9px] font-bold uppercase tracking-wide text-current/80">
+                        {card.lastError || `Tentativas: ${card.attempts}`}
+                      </p>
+                    )}
+                    {card.isFailed && (
+                      <button
+                        type="button"
+                        onClick={() => handleRetryFailedPaidSyncJob(card.id)}
+                        className="mt-2 w-full rounded-lg border border-current/30 bg-white/70 px-2 py-1 text-[9px] font-black uppercase tracking-widest transition hover:bg-white"
+                      >
+                        Tentar de Novo
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         <div
-          className={`inline-flex max-w-[220px] items-center gap-2 rounded-full border px-2.5 py-1.5 text-[10px] font-black uppercase tracking-wider shadow-sm ${cornerSyncToneClass}`}
+          aria-live="polite"
+          aria-hidden={!cornerSyncState.visible}
+          className={`transition-all duration-300 ${
+            cornerSyncState.visible ? 'translate-y-0 opacity-100' : 'translate-y-2 opacity-0'
+          }`}
         >
-          <span
-            className={`inline-block h-1.5 w-1.5 rounded-full ${
-              cornerSyncState.status === 'syncing' ? 'qb-corner-sync-pulse' : ''
-            } ${cornerSyncDotClass}`}
-          />
-          <span className="truncate">{cornerSyncState.message || 'Sincronizando'}</span>
+          <div
+            className={`inline-flex max-w-[220px] items-center gap-2 rounded-full border px-2.5 py-1.5 text-[10px] font-black uppercase tracking-wider shadow-sm ${cornerSyncToneClass}`}
+          >
+            <span
+              className={`inline-block h-1.5 w-1.5 rounded-full ${
+                cornerSyncState.status === 'syncing' ? 'qb-corner-sync-pulse' : ''
+              } ${cornerSyncDotClass}`}
+            />
+            <span className="truncate">{cornerSyncState.message || 'Sincronizando'}</span>
+          </div>
         </div>
       </div>
       
