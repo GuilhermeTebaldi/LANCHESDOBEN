@@ -3035,8 +3035,17 @@ const App: React.FC = () => {
 
   const handleClearApiLinkedDraftItems = useCallback(() => {
     if (!activeDraft) return;
-    if (activeDraft.status !== 'DRAFT') {
-      showNotification('Limpeza disponível apenas com a venda em DRAFT.');
+    if (activeDraft.status !== 'DRAFT' && activeDraft.status !== 'PENDING_PAYMENT') {
+      showNotification('Limpeza disponível apenas com a venda em DRAFT ou PENDING_PAYMENT.');
+      return;
+    }
+
+    if (activeDraft.status === 'PENDING_PAYMENT') {
+      const confirmed = confirm(
+        'Este carrinho está em PENDING_PAYMENT. Para limpar itens do banco, a venda será cancelada. Deseja continuar?'
+      );
+      if (!confirmed) return;
+      handleCancelActiveDraft();
       return;
     }
 
@@ -3081,7 +3090,7 @@ const App: React.FC = () => {
           : `${apiLinkedItems.length} itens do banco removidos do carrinho.`
       );
     })();
-  }, [activeDraft, runCommandWithSync, showNotification]);
+  }, [activeDraft, handleCancelActiveDraft, runCommandWithSync, showNotification]);
 
   const handleClearLocalPendingDraftItems = useCallback(() => {
     if (!activeDraft) return;
@@ -6651,14 +6660,22 @@ const App: React.FC = () => {
                     Total: <span className="text-red-600">R$ {formatMoney(activeDraft.total)}</span>
                   </div>
                   <div className="flex items-center gap-2">
-                    {activeDraft.status === 'DRAFT' && activeDraftApiLinkedItemCount > 0 && (
+                    {(activeDraft.status === 'DRAFT' ||
+                      activeDraft.status === 'PENDING_PAYMENT') &&
+                      activeDraftApiLinkedItemCount > 0 && (
                       <button
                         onClick={handleClearApiLinkedDraftItems}
                         disabled={isCancellingDraft || isStateHydrating || pendingStateOps > 0}
                         className="qb-btn-touch bg-amber-100 text-amber-800 px-3 py-2 rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-amber-200 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-                        title="Limpa apenas os itens já vinculados ao banco/API"
+                        title={
+                          activeDraft.status === 'PENDING_PAYMENT'
+                            ? 'Cancela a venda para remover os itens vinculados ao banco/API'
+                            : 'Limpa apenas os itens já vinculados ao banco/API'
+                        }
                       >
-                        Limpar do Banco ({activeDraftApiLinkedItemCount})
+                        {activeDraft.status === 'PENDING_PAYMENT'
+                          ? 'Limpar do Banco (Cancela)'
+                          : `Limpar do Banco (${activeDraftApiLinkedItemCount})`}
                       </button>
                     )}
                     {(activeDraft.status === 'DRAFT' || activeDraft.status === 'PENDING_PAYMENT') &&
