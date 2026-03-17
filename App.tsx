@@ -829,6 +829,21 @@ const isFinalizeStateConflictErrorMessage = (message: string): boolean => {
   return normalized.includes('nao e possivel finalizar esta venda');
 };
 
+const isAutoRecoverableFailedQueueMessage = (message: string): boolean => {
+  const normalized = message
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+  return (
+    normalized.includes('conflito de versao') ||
+    normalized.includes('token de estado desatualizado') ||
+    normalized.includes('failed to fetch') ||
+    normalized.includes('falha de conexao') ||
+    normalized.includes('tempo limite') ||
+    normalized.includes('timeout')
+  );
+};
+
 const isRetryableSyncError = (error: unknown): boolean => {
   if (error instanceof StateCommandSyncError) {
     return error.retryable;
@@ -1340,6 +1355,8 @@ const PENDING_PAID_SYNC_EMPTY_DRAFT_RECOVERY_DELAY_MS = 600;
 const PENDING_PAID_SYNC_EMPTY_DRAFT_RECOVERY_MAX_ATTEMPTS = 2;
 const FAILED_PAID_SYNC_AUTO_RETRY_MAX_ATTEMPTS = 2;
 const FAILED_PAID_SYNC_AUTO_RETRY_BASE_DELAY_MS = 1400;
+const FAILED_PAID_SYNC_AUTO_RECOVER_MAX_ATTEMPTS = 1;
+const FAILED_PAID_SYNC_AUTO_RECOVER_DELAY_MS = 2200;
 const PAID_SYNC_QUEUE_PREVIEW_LIMIT = 6;
 const PENDING_DRAFT_BACKGROUND_SYNC_DEBOUNCE_MS = 650;
 const PENDING_DRAFT_BACKGROUND_SYNC_SWEEP_MS = 10000;
@@ -1401,6 +1418,8 @@ const App: React.FC = () => {
   const pendingPaidSyncRetryTimerRef = useRef<number | null>(null);
   const failedPaidSyncAutoRetryAttemptsRef = useRef<Map<string, number>>(new Map());
   const failedPaidSyncAutoRetryTimersRef = useRef<Map<string, number>>(new Map());
+  const failedPaidSyncAutoRecoverTimersRef = useRef<Map<string, number>>(new Map());
+  const failedPaidSyncAutoRecoverDraftAttemptsRef = useRef<Map<string, number>>(new Map());
   const activeDraftIdRef = useRef<string | null>(null);
   const saleDraftsRef = useRef<SaleDraft[]>(DEFAULT_APP_STATE.saleDrafts);
   const pendingDraftCreationRef = useRef<Promise<string | null> | null>(null);
@@ -4013,13 +4032,22 @@ const App: React.FC = () => {
       window.clearTimeout(timerId);
       failedPaidSyncAutoRetryTimersRef.current.delete(normalizedJobId);
     }
+    const recoveryTimerId = failedPaidSyncAutoRecoverTimersRef.current.get(normalizedJobId);
+    if (recoveryTimerId !== undefined) {
+      window.clearTimeout(recoveryTimerId);
+      failedPaidSyncAutoRecoverTimersRef.current.delete(normalizedJobId);
+    }
     setFailedPaidSyncAutoRetryAttempts(normalizedJobId, 0);
   }, [setFailedPaidSyncAutoRetryAttempts]);
 
   const handleRecoverFailedPaidSyncJobToCart = useCallback(
     (
       jobId: string,
-      options: { silentNotification?: boolean; openCart?: boolean } = {}
+      options: {
+        silentNotification?: boolean;
+        openCart?: boolean;
+        requeueAfterRestore?: boolean;
+      } = {}
     ): boolean => {
       hydrateFailedPaidSyncQueue();
       const normalizedJobId = jobId.trim();
@@ -4059,6 +4087,23 @@ const App: React.FC = () => {
         failedPaidSyncQueueRef.current.filter((entry) => entry.id !== normalizedJobId)
       );
       clearFailedPaidSyncAutoRetryState(normalizedJobId);
+      const shouldRequeueAfterRestore = options.requeueAfterRestore === true;
+      if (shouldRequeueAfterRestore) {
+        enqueuePendingPaidSyncJob({
+          ...failedJob,
+          finalizeCommandId: createClientId('cmd'),
+          confirmCommandId: createClientId('cmd'),
+          attempts: 0,
+          nextAttemptAt: undefined,
+          lastError: undefined,
+        });
+        showCornerSync('syncing', 'Pedido recuperado e reenviado automaticamente.', 2200);
+        if (!options.silentNotification) {
+          showNotification('Pedido recuperado e reenviado automaticamente.');
+        }
+        return true;
+      }
+
       setDraftSyncInProgress(failedJob.draftId, false);
 
       if (options.openCart ?? true) {
@@ -4075,6 +4120,7 @@ const App: React.FC = () => {
     },
     [
       clearFailedPaidSyncAutoRetryState,
+      enqueuePendingPaidSyncJob,
       hydrateFailedPaidSyncQueue,
       replaceFailedPaidSyncQueue,
       restorePendingDraftAddsFromSnapshot,
@@ -4597,6 +4643,11 @@ const App: React.FC = () => {
       window.clearTimeout(timerId);
       failedPaidSyncAutoRetryTimersRef.current.delete(jobId);
     });
+    failedPaidSyncAutoRecoverTimersRef.current.forEach((timerId, jobId) => {
+      if (activeFailedIds.has(jobId)) return;
+      window.clearTimeout(timerId);
+      failedPaidSyncAutoRecoverTimersRef.current.delete(jobId);
+    });
 
     failedPaidSyncAutoRetryAttemptsRef.current.forEach((_attempts, jobId) => {
       if (activeFailedIds.has(jobId)) return;
@@ -4606,7 +4657,52 @@ const App: React.FC = () => {
 
     failedPaidSyncQueue.forEach((job) => {
       const autoAttempts = failedPaidSyncAutoRetryAttemptsRef.current.get(job.id) || 0;
-      if (autoAttempts >= FAILED_PAID_SYNC_AUTO_RETRY_MAX_ATTEMPTS) return;
+      if (autoAttempts >= FAILED_PAID_SYNC_AUTO_RETRY_MAX_ATTEMPTS) {
+        if (failedPaidSyncAutoRecoverTimersRef.current.has(job.id)) return;
+        const recoverableError =
+          isDraftEmptyErrorMessage(job.lastError || '') ||
+          isAutoRecoverableFailedQueueMessage(job.lastError || '');
+        if (!recoverableError) return;
+
+        const draftRecoverAttempts =
+          failedPaidSyncAutoRecoverDraftAttemptsRef.current.get(job.draftId) || 0;
+        if (draftRecoverAttempts >= FAILED_PAID_SYNC_AUTO_RECOVER_MAX_ATTEMPTS) return;
+
+        const recoveryTimerId = window.setTimeout(() => {
+          const currentTimer = failedPaidSyncAutoRecoverTimersRef.current.get(job.id);
+          if (currentTimer !== recoveryTimerId) return;
+          failedPaidSyncAutoRecoverTimersRef.current.delete(job.id);
+
+          const latestJob = failedPaidSyncQueueRef.current.find((entry) => entry.id === job.id);
+          if (!latestJob) return;
+
+          const currentDraftRecoverAttempts =
+            failedPaidSyncAutoRecoverDraftAttemptsRef.current.get(latestJob.draftId) || 0;
+          if (currentDraftRecoverAttempts >= FAILED_PAID_SYNC_AUTO_RECOVER_MAX_ATTEMPTS) return;
+
+          failedPaidSyncAutoRecoverDraftAttemptsRef.current.set(
+            latestJob.draftId,
+            currentDraftRecoverAttempts + 1
+          );
+
+          const recovered = handleRecoverFailedPaidSyncJobToCart(latestJob.id, {
+            silentNotification: true,
+            openCart: false,
+            requeueAfterRestore: true,
+          });
+          if (!recovered) {
+            showCornerSync(
+              'error',
+              'Auto recuperação não concluiu. Use "Resolver no Carrinho".',
+              2400
+            );
+          }
+        }, FAILED_PAID_SYNC_AUTO_RECOVER_DELAY_MS);
+
+        failedPaidSyncAutoRecoverTimersRef.current.set(job.id, recoveryTimerId);
+        return;
+      }
+
       if (failedPaidSyncAutoRetryTimersRef.current.has(job.id)) return;
 
       const retryDelayMs =
@@ -4631,7 +4727,13 @@ const App: React.FC = () => {
     if (shouldRefreshAutoRetryUi) {
       setFailedPaidSyncAutoRetryRevision((current) => current + 1);
     }
-  }, [failedPaidSyncQueue, handleRetryFailedPaidSyncJob, isAccessVerified]);
+  }, [
+    failedPaidSyncQueue,
+    handleRecoverFailedPaidSyncJobToCart,
+    handleRetryFailedPaidSyncJob,
+    isAccessVerified,
+    showCornerSync,
+  ]);
 
   const openReceiptPrintWindow = useCallback(
     (receiptId: string): boolean => {
