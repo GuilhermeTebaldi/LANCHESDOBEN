@@ -107,6 +107,7 @@ interface PendingDraftAdd {
 }
 
 type PendingDraftAddsByDraftId = Record<string, PendingDraftAdd[]>;
+type PendingDraftAddsSource = 'visible' | 'recovery';
 
 type CornerSyncState =
   | { visible: false; status: 'idle'; message: string }
@@ -1475,6 +1476,7 @@ const App: React.FC = () => {
   const pendingPaidSyncQueueRef = useRef<PendingPaidSyncJob[]>([]);
   const failedPaidSyncQueueRef = useRef<PendingPaidSyncJob[]>([]);
   const pendingDraftAddsRef = useRef<PendingDraftAddsByDraftId>({});
+  const recoveryPendingDraftAddsRef = useRef<PendingDraftAddsByDraftId>({});
   const syncingPaidDraftIdsRef = useRef<Set<string>>(new Set());
   const isPendingDraftAddsHydratedRef = useRef(false);
   const isPendingPaidSyncQueueHydratedRef = useRef(false);
@@ -2007,6 +2009,15 @@ const App: React.FC = () => {
     pendingDraftAddsRef.current = loadedPendingAdds;
     setPendingDraftAddsByDraft(loadedPendingAdds);
     isPendingDraftAddsHydratedRef.current = true;
+  }, []);
+
+  const clearRecoveryPendingDraftAddsForDraft = useCallback((draftId: string): void => {
+    const normalizedDraftId = draftId.trim();
+    if (!normalizedDraftId) return;
+    if (!recoveryPendingDraftAddsRef.current[normalizedDraftId]) return;
+    const nextRecoveryByDraft = { ...recoveryPendingDraftAddsRef.current };
+    delete nextRecoveryByDraft[normalizedDraftId];
+    recoveryPendingDraftAddsRef.current = nextRecoveryByDraft;
   }, []);
 
   useEffect(() => {
@@ -3444,9 +3455,11 @@ const App: React.FC = () => {
         silentErrorNotification?: boolean;
         errorSink?: RunCommandErrorSink;
         failFastOnVersionConflict?: boolean;
+        source?: PendingDraftAddsSource;
       } = {}
     ): Promise<boolean> => {
       hydratePendingDraftAdds();
+      const source: PendingDraftAddsSource = options.source === 'recovery' ? 'recovery' : 'visible';
 
       const hasServerDraft = saleDraftsRef.current.some((draft) => draft.id === draftId);
       if (!hasServerDraft) {
@@ -3469,7 +3482,10 @@ const App: React.FC = () => {
       }
 
       while (true) {
-        const currentPendingAdds = pendingDraftAddsRef.current[draftId] || [];
+        const currentPendingAdds =
+          source === 'recovery'
+            ? recoveryPendingDraftAddsRef.current[draftId] || []
+            : pendingDraftAddsRef.current[draftId] || [];
         if (currentPendingAdds.length === 0) {
           return true;
         }
@@ -3515,14 +3531,24 @@ const App: React.FC = () => {
         });
         if (!ok) return false;
 
-        const nextPendingByDraft = { ...pendingDraftAddsRef.current };
         const remaining = currentPendingAdds.slice(1);
-        if (remaining.length === 0) {
-          delete nextPendingByDraft[draftId];
+        if (source === 'recovery') {
+          const nextRecoveryByDraft = { ...recoveryPendingDraftAddsRef.current };
+          if (remaining.length === 0) {
+            delete nextRecoveryByDraft[draftId];
+          } else {
+            nextRecoveryByDraft[draftId] = remaining;
+          }
+          recoveryPendingDraftAddsRef.current = nextRecoveryByDraft;
         } else {
-          nextPendingByDraft[draftId] = remaining;
+          const nextPendingByDraft = { ...pendingDraftAddsRef.current };
+          if (remaining.length === 0) {
+            delete nextPendingByDraft[draftId];
+          } else {
+            nextPendingByDraft[draftId] = remaining;
+          }
+          replacePendingDraftAdds(nextPendingByDraft);
         }
-        replacePendingDraftAdds(nextPendingByDraft);
       }
     },
     [
@@ -3543,6 +3569,7 @@ const App: React.FC = () => {
         silentErrorNotification?: boolean;
         errorSink?: RunCommandErrorSink;
         failFastOnVersionConflict?: boolean;
+        source?: PendingDraftAddsSource;
       } = {}
     ): Promise<boolean> => {
       const normalizedDraftId = draftId.trim();
@@ -4091,6 +4118,7 @@ const App: React.FC = () => {
         trigger?: 'queue-empty-draft' | 'failed-retry' | 'manual-recover' | 'auto-recover';
         failureMessage?: string;
         statusCode?: number;
+        target?: PendingDraftAddsSource;
       } = {}
     ): boolean => {
       hydratePendingDraftAdds();
@@ -4151,18 +4179,36 @@ const App: React.FC = () => {
 
       if (rebuiltPendingAdds.length === 0) return false;
 
-      const nextPendingByDraft: PendingDraftAddsByDraftId = {
-        ...pendingDraftAddsRef.current,
-        [normalizedDraftId]: rebuiltPendingAdds,
-      };
-      replacePendingDraftAdds(nextPendingByDraft);
+      const target: PendingDraftAddsSource =
+        options.target ||
+        (options.trigger === 'manual-recover' ? 'visible' : 'recovery');
+      if (target === 'visible') {
+        const nextPendingByDraft: PendingDraftAddsByDraftId = {
+          ...pendingDraftAddsRef.current,
+          [normalizedDraftId]: rebuiltPendingAdds,
+        };
+        replacePendingDraftAdds(nextPendingByDraft);
+      } else {
+        const nextRecoveryByDraft: PendingDraftAddsByDraftId = {
+          ...recoveryPendingDraftAddsRef.current,
+          [normalizedDraftId]: rebuiltPendingAdds,
+        };
+        recoveryPendingDraftAddsRef.current = nextRecoveryByDraft;
+      }
       reportErrorMonitorEvent({
-        source: 'sistema:paid-sync:cart-restored',
+        source:
+          target === 'visible'
+            ? 'sistema:paid-sync:cart-restored'
+            : 'sistema:paid-sync:recovery-buffer-restored',
         level: 'warn',
-        message: 'Pedido reconstruído no carrinho local para auto-recuperação da fila.',
+        message:
+          target === 'visible'
+            ? 'Pedido reconstruído no carrinho local para auto-recuperação da fila.'
+            : 'Pedido reconstruído em buffer interno para auto-recuperação da fila.',
         statusCode: options.statusCode,
         context: {
           trigger: options.trigger || 'unknown',
+          target,
           draftId: normalizedDraftId,
           jobId: job.id,
           rebuiltItems: rebuiltPendingAdds.length,
@@ -4197,16 +4243,25 @@ const App: React.FC = () => {
       }
 
       const localServerDraft = saleDraftsRef.current.find((draft) => draft.id === normalizedDraftId);
+      const recoverySource: PendingDraftAddsSource =
+        options.trigger === 'manual-recover' ? 'visible' : 'recovery';
       if (
         localServerDraft &&
         (localServerDraft.status === 'PAID' || localServerDraft.status === 'CANCELLED')
       ) {
+        clearRecoveryPendingDraftAddsForDraft(normalizedDraftId);
         return { ok: true, reconciledOnServer: true };
       }
 
-      const localPending = pendingDraftAddsRef.current[normalizedDraftId] || [];
+      const localPending =
+        recoverySource === 'visible'
+          ? pendingDraftAddsRef.current[normalizedDraftId] || []
+          : recoveryPendingDraftAddsRef.current[normalizedDraftId] || [];
       if (localPending.length === 0) {
-        const restored = restorePendingDraftAddsFromSnapshot(job, options);
+        const restored = restorePendingDraftAddsFromSnapshot(job, {
+          ...options,
+          target: recoverySource,
+        });
         if (!restored) {
           return {
             ok: false,
@@ -4223,6 +4278,7 @@ const App: React.FC = () => {
         silentErrorNotification: true,
         errorSink: flushErrorSink,
         failFastOnVersionConflict: false,
+        source: recoverySource,
       });
       if (!flushed) {
         return {
@@ -4257,6 +4313,7 @@ const App: React.FC = () => {
       }
 
       if (refreshedDraft.status === 'PAID' || refreshedDraft.status === 'CANCELLED') {
+        clearRecoveryPendingDraftAddsForDraft(normalizedDraftId);
         return { ok: true, reconciledOnServer: true };
       }
 
@@ -4269,10 +4326,12 @@ const App: React.FC = () => {
         };
       }
 
+      clearRecoveryPendingDraftAddsForDraft(normalizedDraftId);
       return { ok: true, reconciledOnServer: false };
     },
     [
       applyStateSnapshot,
+      clearRecoveryPendingDraftAddsForDraft,
       fetchStateSnapshot,
       flushPendingDraftAdds,
       hydratePendingDraftAdds,
@@ -4484,6 +4543,7 @@ const App: React.FC = () => {
         ) {
           replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
           setDraftSyncInProgress(currentJob.draftId, false);
+          clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
           continue;
         }
 
@@ -4493,6 +4553,7 @@ const App: React.FC = () => {
             delete nextPendingByDraft[currentJob.draftId];
             replacePendingDraftAdds(nextPendingByDraft);
           }
+          clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
         }
 
         setDraftSyncInProgress(currentJob.draftId, true);
@@ -4573,6 +4634,7 @@ const App: React.FC = () => {
               if (recoveryResult.reconciledOnServer) {
                 replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
                 setDraftSyncInProgress(currentJob.draftId, false);
+                clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
                 showCornerSync('success', 'Pedido já estava resolvido no banco.', 1800);
                 return;
               }
@@ -4612,6 +4674,7 @@ const App: React.FC = () => {
                 delete nextPendingByDraft[currentJob.draftId];
                 replacePendingDraftAdds(nextPendingByDraft);
               }
+              clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
             }
             const failedJob: PendingPaidSyncJob = {
               ...currentJob,
@@ -4681,6 +4744,7 @@ const App: React.FC = () => {
           ) {
             replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
             setDraftSyncInProgress(currentJob.draftId, false);
+            clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
             showCornerSync('success', 'Pedido já estava concluído no banco.', 1800);
             continue;
           }
@@ -4705,6 +4769,7 @@ const App: React.FC = () => {
           ) {
             replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
             setDraftSyncInProgress(currentJob.draftId, false);
+            clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
             showCornerSync('success', 'Pedido já estava concluído no banco.', 1800);
             continue;
           }
@@ -4758,6 +4823,7 @@ const App: React.FC = () => {
               ) {
                 replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
                 setDraftSyncInProgress(currentJob.draftId, false);
+                clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
                 showCornerSync('success', 'Pedido já estava concluído no banco.', 1800);
                 continue;
               }
@@ -4919,6 +4985,7 @@ const App: React.FC = () => {
 
         replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
         setDraftSyncInProgress(currentJob.draftId, false);
+        clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
         showCornerSync('success', 'Banco OK', 1400);
       }
     } finally {
@@ -4949,6 +5016,7 @@ const App: React.FC = () => {
     hydratePendingPaidSyncQueue,
     isRetryableSyncError,
     isStateHydrating,
+    clearRecoveryPendingDraftAddsForDraft,
     replacePendingDraftAdds,
     replacePendingPaidSyncQueue,
     recoverPendingPaidSyncDraft,
