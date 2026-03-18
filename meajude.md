@@ -211,6 +211,19 @@ Implementado:
 Beneficio:
 - elimina retorno indevido de itens para o carrinho por condicao de corrida local, sem alterar o fluxo principal de fila e auto-recuperacao.
 
+### Fase J - Robo de auto-reenqueue para draft que voltou do banco
+
+Problema tratado:
+- em alguns cenarios, draft retornava como `PENDING_PAYMENT` fora da fila local e reaparecia para operacao.
+
+Implementado:
+- watchdog que detecta draft `PENDING_PAYMENT` com itens, fora de `pending`/`failed`/`syncing` e sem venda persistida.
+- robo monta snapshot do proprio draft e reenfileira automaticamente para confirmar no banco.
+- ao reenfileirar, dispara processamento imediato da fila e registra evento no monitor.
+
+Beneficio:
+- quando um pedido volta do banco em estado pendente, ele entra de novo na fila de forma automatica, rapida e sem acao manual.
+
 ## 7) Como o sistema evita duplicidade de baixa de estoque
 
 Regra oficial:

@@ -826,6 +826,78 @@ const resolveDraftExpectedPaymentTotal = (draft: SaleDraft, origin: SaleOrigin):
   return roundMoney(draft.total);
 };
 
+const buildAutoRequeuePaymentSnapshot = (draft: SaleDraft): PaymentCommitSnapshot | null => {
+  const paymentMethod = draft.payment.method;
+  if (!paymentMethod) return null;
+  if (!Array.isArray(draft.items) || draft.items.length === 0) return null;
+
+  const saleOrigin = draft.saleOrigin || 'LOCAL';
+  const appOrderTotalInput = isAppSaleOrigin(saleOrigin)
+    ? String(resolveDraftExpectedPaymentTotal(draft, saleOrigin))
+    : '';
+  const cashReceivedInput =
+    paymentMethod === 'DINHEIRO' && Number.isFinite(Number(draft.payment.cashReceived))
+      ? String(roundMoney(Number(draft.payment.cashReceived)))
+      : '';
+
+  let splitCommitted: SalePaymentSplitEntry[] = [];
+  let splitMode: SalePaymentSplitMode | null = null;
+  let splitCount: number | null = null;
+  if (paymentMethod === 'DIVIDIDO') {
+    const normalizedSplits = (draft.payment.splitPayments || [])
+      .filter((entry): entry is SalePaymentSplitEntry => BASE_PAYMENT_METHODS.includes(entry.method))
+      .map((entry, index) => {
+        const amount = Number(entry.amount);
+        const safeAmount = Number.isFinite(amount) && amount > 0 ? roundMoney(amount) : 0;
+        const cashReceived =
+          entry.method === 'DINHEIRO' && Number.isFinite(Number(entry.cashReceived))
+            ? roundMoney(Number(entry.cashReceived))
+            : null;
+        const change =
+          entry.method === 'DINHEIRO'
+            ? cashReceived !== null
+              ? roundMoney(cashReceived - safeAmount)
+              : null
+            : null;
+        return {
+          sequence:
+            Number.isFinite(Number(entry.sequence)) && Number(entry.sequence) > 0
+              ? Math.floor(Number(entry.sequence))
+              : index + 1,
+          label: entry.label?.trim() || `Parcela ${index + 1}`,
+          method: entry.method,
+          amount: safeAmount,
+          cashReceived,
+          change,
+        };
+      })
+      .filter((entry) => entry.amount > 0);
+
+    if (normalizedSplits.length === 0) return null;
+    splitCommitted = normalizedSplits;
+    splitMode = draft.payment.splitMode || 'MIXED';
+    const rawSplitCount = Number(draft.payment.splitCount);
+    splitCount =
+      Number.isFinite(rawSplitCount) && rawSplitCount > 0
+        ? Math.floor(rawSplitCount)
+        : splitMode === 'PEOPLE'
+          ? normalizedSplits.length
+          : 1;
+  }
+
+  return clonePaymentCommitSnapshot({
+    draft,
+    paymentMethod,
+    saleOrigin,
+    appOrderTotalInput,
+    cashReceivedInput,
+    splitMode,
+    splitCount,
+    splitCommitted,
+    effectivePaymentTotal: resolveDraftExpectedPaymentTotal(draft, saleOrigin),
+  });
+};
+
 const getStateSyncErrorMessage = (error: unknown): string => {
   if (error instanceof Error && error.message.trim()) {
     return error.message;
@@ -5043,6 +5115,90 @@ const App: React.FC = () => {
     isStateHydrating,
     pendingPaidSyncJobs,
     processPendingPaidSyncQueue,
+  ]);
+
+  useEffect(() => {
+    if (!isAccessVerified || isStateHydrating) return;
+    if (!isPendingPaidSyncQueueHydratedRef.current) return;
+
+    const knownPersistedDraftIds = new Set<string>();
+    [...sales, ...globalSales, ...globalCancelledSales].forEach((entry) => {
+      const saleDraftId = typeof entry.saleDraftId === 'string' ? entry.saleDraftId.trim() : '';
+      if (saleDraftId) {
+        knownPersistedDraftIds.add(saleDraftId);
+      }
+    });
+
+    const draftsToAutoRequeue = saleDraftsRef.current.filter((draft) => {
+      if (draft.status !== 'PENDING_PAYMENT') return false;
+      if (!Array.isArray(draft.items) || draft.items.length === 0) return false;
+      if (knownPersistedDraftIds.has(draft.id)) return false;
+      if (syncingPaidDraftIdsRef.current.has(draft.id)) return false;
+      if (pendingPaidSyncQueueRef.current.some((job) => job.draftId === draft.id)) return false;
+      if (failedPaidSyncQueueRef.current.some((job) => job.draftId === draft.id)) return false;
+      return true;
+    });
+
+    if (draftsToAutoRequeue.length === 0) return;
+
+    draftsToAutoRequeue.forEach((draft) => {
+      const snapshot = buildAutoRequeuePaymentSnapshot(draft);
+      if (!snapshot) {
+        reportErrorMonitorEvent({
+          source: 'sistema:paid-sync:auto-requeue-invalid-snapshot',
+          level: 'warn',
+          message: 'Draft voltou como PENDING_PAYMENT, mas snapshot inválido para reenfileirar.',
+          context: {
+            draftId: draft.id,
+            paymentMethod: draft.payment.method || null,
+            items: draft.items.length,
+          },
+        });
+        return;
+      }
+
+      enqueuePendingPaidSyncJob({
+        id: createClientId('paid-sync-job'),
+        draftId: draft.id,
+        snapshot,
+        finalizeCommandId: createClientId('cmd'),
+        confirmCommandId: createClientId('cmd'),
+        createdAt: new Date().toISOString(),
+        attempts: 0,
+      });
+      setPaidSyncAssistantActivity(
+        'retrying',
+        describePaidSyncAssistantMode('retrying', `pedido ${draft.id.slice(-8).toUpperCase()} (auto)`),
+        {
+          draftId: draft.id,
+          jobId: null,
+        }
+      );
+      showCornerSync('syncing', 'Robô recolocou pedido que voltou do banco na fila.', 2200);
+      reportErrorMonitorEvent({
+        source: 'sistema:paid-sync:auto-requeue-returned-draft',
+        level: 'warn',
+        message: 'Draft PENDING_PAYMENT fora da fila foi reenfileirado automaticamente.',
+        context: {
+          draftId: draft.id,
+          items: draft.items.length,
+          paymentMethod: draft.payment.method,
+        },
+      });
+    });
+
+    void processPendingPaidSyncQueue();
+  }, [
+    enqueuePendingPaidSyncJob,
+    globalCancelledSales,
+    globalSales,
+    isAccessVerified,
+    isStateHydrating,
+    processPendingPaidSyncQueue,
+    saleDrafts,
+    sales,
+    setPaidSyncAssistantActivity,
+    showCornerSync,
   ]);
 
   useEffect(() => {
