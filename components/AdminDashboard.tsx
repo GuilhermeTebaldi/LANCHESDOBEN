@@ -160,6 +160,137 @@ const toShortDayLabel = (date: Date): string =>
     month: '2-digit',
   });
 
+type AdminPeriodMode = 'ALL' | 'DAY' | 'MONTH' | 'YEAR' | 'RANGE';
+
+interface AdminPeriodRange {
+  startMs: number;
+  endMs: number;
+  label: string;
+}
+
+const toInputDate = (date: Date): string =>
+  `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+
+const toInputMonth = (date: Date): string => `${date.getFullYear()}-${pad2(date.getMonth() + 1)}`;
+
+const parseInputDate = (value: string): Date | null => {
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value.trim());
+  if (!match) return null;
+  const year = Number(match[1]);
+  const monthIndex = Number(match[2]) - 1;
+  const day = Number(match[3]);
+  if (!Number.isFinite(year) || !Number.isFinite(monthIndex) || !Number.isFinite(day)) return null;
+  const date = new Date(year, monthIndex, day);
+  if (date.getFullYear() !== year || date.getMonth() !== monthIndex || date.getDate() !== day) {
+    return null;
+  }
+  return date;
+};
+
+const parseInputMonth = (value: string): { year: number; monthIndex: number } | null => {
+  const match = /^(\d{4})-(\d{2})$/.exec(value.trim());
+  if (!match) return null;
+  const year = Number(match[1]);
+  const monthIndex = Number(match[2]) - 1;
+  if (
+    !Number.isFinite(year) ||
+    !Number.isFinite(monthIndex) ||
+    monthIndex < 0 ||
+    monthIndex > 11
+  ) {
+    return null;
+  }
+  return { year, monthIndex };
+};
+
+const startOfLocalDayMs = (date: Date): number =>
+  new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, 0, 0, 0).getTime();
+
+const endOfLocalDayMs = (date: Date): number =>
+  new Date(date.getFullYear(), date.getMonth(), date.getDate(), 23, 59, 59, 999).getTime();
+
+const buildAdminPeriodRange = (
+  mode: AdminPeriodMode,
+  values: {
+    day: string;
+    month: string;
+    year: string;
+    rangeStart: string;
+    rangeEnd: string;
+  }
+): AdminPeriodRange | null => {
+  if (mode === 'ALL') return null;
+
+  if (mode === 'DAY') {
+    const day = parseInputDate(values.day);
+    if (!day) return null;
+    return {
+      startMs: startOfLocalDayMs(day),
+      endMs: endOfLocalDayMs(day),
+      label: day.toLocaleDateString('pt-BR'),
+    };
+  }
+
+  if (mode === 'MONTH') {
+    const month = parseInputMonth(values.month);
+    if (!month) return null;
+    const start = new Date(month.year, month.monthIndex, 1);
+    const end = new Date(month.year, month.monthIndex + 1, 0);
+    return {
+      startMs: startOfLocalDayMs(start),
+      endMs: endOfLocalDayMs(end),
+      label: start.toLocaleDateString('pt-BR', { month: 'long', year: 'numeric' }),
+    };
+  }
+
+  if (mode === 'YEAR') {
+    const year = Number(values.year);
+    if (!Number.isFinite(year) || year < 1970) return null;
+    return {
+      startMs: new Date(year, 0, 1, 0, 0, 0, 0).getTime(),
+      endMs: new Date(year, 11, 31, 23, 59, 59, 999).getTime(),
+      label: String(Math.floor(year)),
+    };
+  }
+
+  const startDateRaw = parseInputDate(values.rangeStart);
+  const endDateRaw = parseInputDate(values.rangeEnd);
+  if (!startDateRaw && !endDateRaw) return null;
+
+  const startDate = startDateRaw || endDateRaw!;
+  const endDate = endDateRaw || startDateRaw!;
+
+  const startMs = startOfLocalDayMs(startDate);
+  const endMs = endOfLocalDayMs(endDate);
+  if (startMs <= endMs) {
+    return {
+      startMs,
+      endMs,
+      label: `${startDate.toLocaleDateString('pt-BR')} - ${endDate.toLocaleDateString('pt-BR')}`,
+    };
+  }
+
+  return {
+    startMs: startOfLocalDayMs(endDate),
+    endMs: endOfLocalDayMs(startDate),
+    label: `${endDate.toLocaleDateString('pt-BR')} - ${startDate.toLocaleDateString('pt-BR')}`,
+  };
+};
+
+const ADMIN_PERIOD_MODE_OPTIONS: Array<{ key: AdminPeriodMode; label: string }> = [
+  { key: 'ALL', label: 'Todos' },
+  { key: 'DAY', label: 'Dia' },
+  { key: 'MONTH', label: 'Mes' },
+  { key: 'YEAR', label: 'Ano' },
+  { key: 'RANGE', label: 'Intervalo' },
+];
+
+const isTimestampWithinRange = (value: Date | string, range: AdminPeriodRange | null): boolean => {
+  if (!range) return true;
+  const timestampMs = toDate(value).getTime();
+  return timestampMs >= range.startMs && timestampMs <= range.endMs;
+};
+
 const normalizeUnit = (value: string): string => value.trim().toLowerCase();
 
 const hasToken = (unit: string, token: string): boolean =>
@@ -306,22 +437,22 @@ const buildConsolidatedArchiveFinance = (entries: Sale[]): ConsolidatedArchiveFi
   };
 };
 
-const AdminDashboard: React.FC<AdminDashboardProps> = ({ 
-  sales, 
-  cancelledSales, 
-  stockEntries, 
-  sessionStockEntries,
+const AdminDashboard: React.FC<AdminDashboardProps> = ({
+  sales: rawSales,
+  cancelledSales: rawCancelledSales,
+  stockEntries: rawStockEntries,
+  sessionStockEntries: rawSessionStockEntries,
   allProducts,
   allIngredients,
   cleaningMaterials,
-  cleaningStockEntries,
+  cleaningStockEntries: rawCleaningStockEntries,
   onFactoryReset,
   onClearOperationalData,
   onClearOnlyStock,
   onDeleteArchiveDate,
   onDeleteArchiveMonth,
   cashRegisterAmount,
-  dailySalesHistory,
+  dailySalesHistory: rawDailySalesHistory,
 }) => {
   const [activeTab, setActiveTab] = useState<
     'geral' | 'analytics' | 'vendas' | 'estornos' | 'estoque' | 'materiais' | 'arquivos' | 'configuracao'
@@ -340,8 +471,99 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [selectedMateriaisYear, setSelectedMateriaisYear] = useState<string | null>(null);
   const [isStockCostPopoverOpen, setIsStockCostPopoverOpen] = useState(false);
   const [stockCostPopoverMode, setStockCostPopoverMode] = useState<'products' | 'ingredients'>('ingredients');
+  const [adminPeriodMode, setAdminPeriodMode] = useState<AdminPeriodMode>('ALL');
+  const [adminPeriodDay, setAdminPeriodDay] = useState<string>(() => toInputDate(new Date()));
+  const [adminPeriodMonth, setAdminPeriodMonth] = useState<string>(() => toInputMonth(new Date()));
+  const [adminPeriodYear, setAdminPeriodYear] = useState<string>(() => `${new Date().getFullYear()}`);
+  const [adminPeriodRangeStart, setAdminPeriodRangeStart] = useState<string>(() => toInputDate(new Date()));
+  const [adminPeriodRangeEnd, setAdminPeriodRangeEnd] = useState<string>(() => toInputDate(new Date()));
   const stockCostPopoverRef = useRef<HTMLDivElement | null>(null);
   const stockCostPopoverButtonRef = useRef<HTMLButtonElement | null>(null);
+  const availablePeriodYears = useMemo(() => {
+    const years = new Set<string>();
+    const collectYear = (value: Date | string) => {
+      years.add(String(toDate(value).getFullYear()));
+    };
+
+    rawSales.forEach((sale) => collectYear(sale.timestamp));
+    rawCancelledSales.forEach((sale) => collectYear(sale.timestamp));
+    rawStockEntries.forEach((entry) => collectYear(entry.timestamp));
+    rawSessionStockEntries.forEach((entry) => collectYear(entry.timestamp));
+    rawCleaningStockEntries.forEach((entry) => collectYear(entry.timestamp));
+    rawDailySalesHistory.forEach((entry) => collectYear(entry.closedAt));
+
+    if (years.size === 0) {
+      years.add(String(new Date().getFullYear()));
+    }
+
+    return [...years].sort((a, b) => Number(b) - Number(a));
+  }, [
+    rawSales,
+    rawCancelledSales,
+    rawStockEntries,
+    rawSessionStockEntries,
+    rawCleaningStockEntries,
+    rawDailySalesHistory,
+  ]);
+  const activePeriodRange = useMemo(
+    () =>
+      buildAdminPeriodRange(adminPeriodMode, {
+        day: adminPeriodDay,
+        month: adminPeriodMonth,
+        year: adminPeriodYear,
+        rangeStart: adminPeriodRangeStart,
+        rangeEnd: adminPeriodRangeEnd,
+      }),
+    [
+      adminPeriodMode,
+      adminPeriodDay,
+      adminPeriodMonth,
+      adminPeriodYear,
+      adminPeriodRangeStart,
+      adminPeriodRangeEnd,
+    ]
+  );
+  const activePeriodLabel = activePeriodRange ? activePeriodRange.label : 'Todos os dados';
+  const sales = useMemo(
+    () => rawSales.filter((sale) => isTimestampWithinRange(sale.timestamp, activePeriodRange)),
+    [rawSales, activePeriodRange]
+  );
+  const cancelledSales = useMemo(
+    () =>
+      rawCancelledSales.filter((sale) => isTimestampWithinRange(sale.timestamp, activePeriodRange)),
+    [rawCancelledSales, activePeriodRange]
+  );
+  const stockEntries = useMemo(
+    () => rawStockEntries.filter((entry) => isTimestampWithinRange(entry.timestamp, activePeriodRange)),
+    [rawStockEntries, activePeriodRange]
+  );
+  const sessionStockEntries = useMemo(
+    () =>
+      rawSessionStockEntries.filter((entry) =>
+        isTimestampWithinRange(entry.timestamp, activePeriodRange)
+      ),
+    [rawSessionStockEntries, activePeriodRange]
+  );
+  const cleaningStockEntries = useMemo(
+    () =>
+      rawCleaningStockEntries.filter((entry) =>
+        isTimestampWithinRange(entry.timestamp, activePeriodRange)
+      ),
+    [rawCleaningStockEntries, activePeriodRange]
+  );
+  const dailySalesHistory = useMemo(
+    () =>
+      rawDailySalesHistory.filter((entry) =>
+        isTimestampWithinRange(entry.closedAt, activePeriodRange)
+      ),
+    [rawDailySalesHistory, activePeriodRange]
+  );
+
+  useEffect(() => {
+    if (!availablePeriodYears.includes(adminPeriodYear)) {
+      setAdminPeriodYear(availablePeriodYears[0]);
+    }
+  }, [availablePeriodYears, adminPeriodYear]);
 
   const consolidatedSalesFinance = useMemo(
     () => buildConsolidatedArchiveFinance(sales),
@@ -767,6 +989,18 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
     });
     return groups;
   }, [sales]);
+  useEffect(() => {
+    if (!selectedArchiveMonth) return;
+    const monthGroup = archives[selectedArchiveMonth];
+    if (!monthGroup) {
+      setSelectedArchiveMonth(null);
+      setSelectedArchiveDay(null);
+      return;
+    }
+    if (selectedArchiveDay && !monthGroup[selectedArchiveDay]) {
+      setSelectedArchiveDay(null);
+    }
+  }, [archives, selectedArchiveMonth, selectedArchiveDay]);
   const orderedDailySalesHistory = useMemo(
     () =>
       [...dailySalesHistory].sort(
@@ -959,6 +1193,106 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </button>
           ))}
         </div>
+      </div>
+
+      <div className="qb-admin-period-filter bg-white p-4 sm:p-5 rounded-[28px] border-2 border-slate-100 shadow-sm space-y-4">
+        <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+          <div>
+            <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Filtro Global do Painel</p>
+            <p className="text-xs sm:text-sm font-bold text-slate-600 mt-1">
+              Selecione o periodo para atualizar todos os graficos e demonstrativos.
+            </p>
+          </div>
+          <div className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-slate-50 px-3 py-2">
+            <span className="text-[10px] font-black uppercase tracking-widest text-slate-400">Periodo Ativo</span>
+            <span className="text-xs font-black uppercase text-slate-800">{activePeriodLabel}</span>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          {ADMIN_PERIOD_MODE_OPTIONS.map((option) => (
+            <button
+              key={option.key}
+              type="button"
+              onClick={() => setAdminPeriodMode(option.key)}
+              className={`qb-btn-touch px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition ${
+                adminPeriodMode === option.key
+                  ? 'bg-slate-900 text-white shadow-lg shadow-slate-300'
+                  : 'bg-slate-100 text-slate-600 border border-slate-200 hover:bg-slate-200'
+              }`}
+            >
+              {option.label}
+            </button>
+          ))}
+        </div>
+
+        {adminPeriodMode !== 'ALL' && (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            {adminPeriodMode === 'DAY' && (
+              <label className="flex flex-col gap-1">
+                <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">Dia</span>
+                <input
+                  type="date"
+                  value={adminPeriodDay}
+                  onChange={(event) => setAdminPeriodDay(event.target.value)}
+                  className="h-11 rounded-xl border border-slate-200 bg-white px-3 text-sm font-bold text-slate-700 focus:border-slate-400 focus:outline-none"
+                />
+              </label>
+            )}
+
+            {adminPeriodMode === 'MONTH' && (
+              <label className="flex flex-col gap-1">
+                <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">Mes</span>
+                <input
+                  type="month"
+                  value={adminPeriodMonth}
+                  onChange={(event) => setAdminPeriodMonth(event.target.value)}
+                  className="h-11 rounded-xl border border-slate-200 bg-white px-3 text-sm font-bold text-slate-700 focus:border-slate-400 focus:outline-none"
+                />
+              </label>
+            )}
+
+            {adminPeriodMode === 'YEAR' && (
+              <label className="flex flex-col gap-1">
+                <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">Ano</span>
+                <select
+                  value={adminPeriodYear}
+                  onChange={(event) => setAdminPeriodYear(event.target.value)}
+                  className="h-11 rounded-xl border border-slate-200 bg-white px-3 text-sm font-bold text-slate-700 focus:border-slate-400 focus:outline-none"
+                >
+                  {availablePeriodYears.map((year) => (
+                    <option key={year} value={year}>
+                      {year}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+
+            {adminPeriodMode === 'RANGE' && (
+              <>
+                <label className="flex flex-col gap-1">
+                  <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">Data inicial</span>
+                  <input
+                    type="date"
+                    value={adminPeriodRangeStart}
+                    onChange={(event) => setAdminPeriodRangeStart(event.target.value)}
+                    className="h-11 rounded-xl border border-slate-200 bg-white px-3 text-sm font-bold text-slate-700 focus:border-slate-400 focus:outline-none"
+                  />
+                </label>
+                <label className="flex flex-col gap-1">
+                  <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">Data final</span>
+                  <input
+                    type="date"
+                    value={adminPeriodRangeEnd}
+                    onChange={(event) => setAdminPeriodRangeEnd(event.target.value)}
+                    className="h-11 rounded-xl border border-slate-200 bg-white px-3 text-sm font-bold text-slate-700 focus:border-slate-400 focus:outline-none"
+                  />
+                </label>
+              </>
+            )}
+          </div>
+        )}
       </div>
 
       {activeTab === 'geral' && (
@@ -1578,7 +1912,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
               });
               const years = Array.from(yearsSet).sort((a, b) => parseInt(b) - parseInt(a));
               const currentYear = years[0] || new Date().getFullYear().toString();
-              const selectedYear = selectedEstornosYear || currentYear;
+              const selectedYearCandidate = selectedEstornosYear || currentYear;
+              const selectedYear = years.includes(selectedYearCandidate) ? selectedYearCandidate : currentYear;
               
               // Filtrar meses por ano
               const filteredMonths = Object.keys(estornoGroups)
@@ -1950,7 +2285,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
             });
             const years = Array.from(yearsSet).sort((a, b) => parseInt(b) - parseInt(a));
             const currentYear = years[0] || new Date().getFullYear().toString();
-            const selectedYear = selectedVendasYear || currentYear;
+            const selectedYearCandidate = selectedVendasYear || currentYear;
+            const selectedYear = years.includes(selectedYearCandidate) ? selectedYearCandidate : currentYear;
             
             // Filtrar meses por ano
             const filteredMonths = Object.keys(vendaGroups)
@@ -2160,7 +2496,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
             });
             const years = Array.from(yearsSet).sort((a, b) => parseInt(b) - parseInt(a));
             const currentYear = years[0] || new Date().getFullYear().toString();
-            const selectedYear = selectedMateriaisYear || currentYear;
+            const selectedYearCandidate = selectedMateriaisYear || currentYear;
+            const selectedYear = years.includes(selectedYearCandidate) ? selectedYearCandidate : currentYear;
 
             const filteredMonths = Object.keys(materialsGroups)
               .filter(month => month.endsWith(selectedYear))
@@ -2295,7 +2632,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
             });
             const years = Array.from(yearsSet).sort((a, b) => parseInt(b) - parseInt(a));
             const currentYear = years[0] || new Date().getFullYear().toString();
-            const selectedYear = selectedEstoqueYear || currentYear;
+            const selectedYearCandidate = selectedEstoqueYear || currentYear;
+            const selectedYear = years.includes(selectedYearCandidate) ? selectedYearCandidate : currentYear;
             
             // Filtrar meses por ano
             const filteredMonths = Object.keys(stockGroups)

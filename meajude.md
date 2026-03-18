@@ -224,6 +224,20 @@ Implementado:
 Beneficio:
 - quando um pedido volta do banco em estado pendente, ele entra de novo na fila de forma automatica, rapida e sem acao manual.
 
+### Fase K - Filtro global de periodo no ADMIN
+
+Problema tratado:
+- os paineis do ADMIN exibiam historico total por padrao, sem um recorte temporal global no topo.
+
+Implementado:
+- novo filtro global no topo do ADMIN com modos: `Todos`, `Dia`, `Mes`, `Ano`, `Intervalo`.
+- o filtro aplica o mesmo intervalo para as fontes usadas em `geral`, `analise`, `vendas`, `estornos`, `estoque` e `materiais`.
+- `dailySalesHistory` tambem passa pelo mesmo recorte para manter os graficos coerentes com o periodo ativo.
+- guardas adicionais para evitar estados invalidos quando o recorte muda (ex.: selecao de mes/dia em `arquivos` e ano selecionado em abas com chip de ano).
+
+Beneficio:
+- leitura operacional mais rapida por periodo (dia, mes, ano ou faixa), sem alterar a estrutura existente dos cards e tabelas.
+
 ## 7) Como o sistema evita duplicidade de baixa de estoque
 
 Regra oficial:
