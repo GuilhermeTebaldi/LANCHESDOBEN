@@ -5389,33 +5389,58 @@ const App: React.FC = () => {
     }
   };
 
-  const moveVisiblePendingDraftAddsToRecovery = useCallback((draftId: string): number => {
-    const normalizedDraftId = draftId.trim();
-    if (!normalizedDraftId) return 0;
-    hydratePendingDraftAdds();
+  const moveVisiblePendingDraftAddsToRecovery = useCallback(
+    async (draftId: string): Promise<number> => {
+      const normalizedDraftId = draftId.trim();
+      if (!normalizedDraftId) return 0;
 
-    const visibleEntries = pendingDraftAddsRef.current[normalizedDraftId] || [];
-    if (visibleEntries.length === 0) return 0;
+      const queue = pendingDraftFlushQueueRef.current;
+      const previous = queue.get(normalizedDraftId) ?? Promise.resolve(true);
+      let movedEntriesCount = 0;
 
-    const nextRecoveryByDraft: PendingDraftAddsByDraftId = {
-      ...recoveryPendingDraftAddsRef.current,
-    };
-    const existingRecoveryEntries = nextRecoveryByDraft[normalizedDraftId] || [];
-    const mergedEntries = [...existingRecoveryEntries, ...visibleEntries];
-    const dedupedEntriesByKey = new Map<string, PendingDraftAdd>();
-    mergedEntries.forEach((entry) => {
-      const dedupeKey = `${entry.commandId}:${entry.localItemId}`;
-      dedupedEntriesByKey.set(dedupeKey, entry);
-    });
-    nextRecoveryByDraft[normalizedDraftId] = Array.from(dedupedEntriesByKey.values());
-    recoveryPendingDraftAddsRef.current = nextRecoveryByDraft;
+      // Serialize transfer with the same per-draft queue used by flush.
+      // This avoids reintroducing visible pending items from stale in-flight flush snapshots.
+      const execute = async (): Promise<boolean> => {
+        hydratePendingDraftAdds();
 
-    const nextVisibleByDraft = { ...pendingDraftAddsRef.current };
-    delete nextVisibleByDraft[normalizedDraftId];
-    replacePendingDraftAdds(nextVisibleByDraft);
+        const visibleEntries = pendingDraftAddsRef.current[normalizedDraftId] || [];
+        movedEntriesCount = visibleEntries.length;
+        if (visibleEntries.length === 0) return true;
 
-    return visibleEntries.length;
-  }, [hydratePendingDraftAdds, replacePendingDraftAdds]);
+        const nextRecoveryByDraft: PendingDraftAddsByDraftId = {
+          ...recoveryPendingDraftAddsRef.current,
+        };
+        const existingRecoveryEntries = nextRecoveryByDraft[normalizedDraftId] || [];
+        const mergedEntries = [...existingRecoveryEntries, ...visibleEntries];
+        const dedupedEntriesByKey = new Map<string, PendingDraftAdd>();
+        mergedEntries.forEach((entry) => {
+          const dedupeKey = `${entry.commandId}:${entry.localItemId}`;
+          dedupedEntriesByKey.set(dedupeKey, entry);
+        });
+        nextRecoveryByDraft[normalizedDraftId] = Array.from(dedupedEntriesByKey.values());
+        recoveryPendingDraftAddsRef.current = nextRecoveryByDraft;
+
+        const nextVisibleByDraft = { ...pendingDraftAddsRef.current };
+        delete nextVisibleByDraft[normalizedDraftId];
+        replacePendingDraftAdds(nextVisibleByDraft);
+
+        return true;
+      };
+
+      const next = previous.then(execute, execute);
+      queue.set(normalizedDraftId, next);
+
+      try {
+        await next;
+        return movedEntriesCount;
+      } finally {
+        if (queue.get(normalizedDraftId) === next) {
+          queue.delete(normalizedDraftId);
+        }
+      }
+    },
+    [hydratePendingDraftAdds, replacePendingDraftAdds]
+  );
 
   const navigatePreparedReceiptWindow = useCallback(
     (printWindow: Window | null, receiptId: string): boolean => {
@@ -5507,7 +5532,6 @@ const App: React.FC = () => {
     const receiptPayload: ReceiptPrintPayload | null = receiptPayloadInput
       ? saveReceiptPrintPayload(receiptPayloadInput)
       : null;
-    const pendingItemsCount = moveVisiblePendingDraftAddsToRecovery(draftId);
     const preparedPrintWindow = prepareReceiptPrintWindow();
     if (receiptPayload && preparedPrintWindow) {
       setReceiptPrintPayloadOnWindow(preparedPrintWindow, receiptPayload);
@@ -5524,6 +5548,19 @@ const App: React.FC = () => {
       );
     }
 
+    const pendingItemsCount = pendingDraftAddsRef.current[draftId]?.length || 0;
+    setIsConfirmingPaid(true);
+    void moveVisiblePendingDraftAddsToRecovery(draftId).catch((error) => {
+      reportErrorMonitorEvent({
+        source: 'sistema:paid-sync:move-visible-to-recovery',
+        level: 'warn',
+        message: 'Falha ao transferir pendencias visiveis para buffer de recovery.',
+        stack: error instanceof Error ? error.stack : undefined,
+        context: {
+          draftId,
+        },
+      });
+    });
     const queuedJob: PendingPaidSyncJob = {
       id: createClientId('paid-sync-job'),
       draftId,
@@ -5544,8 +5581,6 @@ const App: React.FC = () => {
       activeDraftIdRef.current = null;
     }
     setActiveDraftId(null);
-
-    setIsConfirmingPaid(true);
 
     enqueuePendingPaidSyncJob(queuedJob);
     showCornerSync(

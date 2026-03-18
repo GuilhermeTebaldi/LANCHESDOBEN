@@ -1,6 +1,6 @@
 # MEAJUDE - DOCUMENTACAO COMPLETA DO SISTEMA
 
-Atualizado em: 2026-03-17
+Atualizado em: 2026-03-18
 Branch: main
 
 ## 1) Objetivo deste documento
@@ -199,6 +199,18 @@ Implementado:
 Beneficio:
 - operador consegue limpar "item fantasma local" sem afetar itens ja sincronizados
 
+### Fase I - Serializacao segura ao mover pendencias para recovery
+
+Problema tratado:
+- em confirmacao de pagamento, podia haver corrida entre flush em background e a transferencia `visible -> recovery`, reintroduzindo itens pendentes no carrinho.
+
+Implementado:
+- transferencia para `recovery` agora usa a mesma fila por draft usada no flush (`pendingDraftFlushQueueRef`), garantindo ordem e evitando snapshot stale.
+- `handleConfirmPaid` agenda essa transferencia na mesma fila antes de iniciar o processamento do job de pagamento.
+
+Beneficio:
+- elimina retorno indevido de itens para o carrinho por condicao de corrida local, sem alterar o fluxo principal de fila e auto-recuperacao.
+
 ## 7) Como o sistema evita duplicidade de baixa de estoque
 
 Regra oficial:
@@ -299,4 +311,3 @@ Proximo passo seguro:
 - deploy canario noturno
 - monitorar cards de fila por 1 noite
 - revisar logs de erro e ajustar thresholds de retry se necessario
-
