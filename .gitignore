@@ -9,3 +9,4 @@ dump_completo_banco_atual_*
 restore_xburger_*.log
 ultimo_dump_render_*.dump
 xburger_migracao_*.dump
+backend/prisma/dev.db*
