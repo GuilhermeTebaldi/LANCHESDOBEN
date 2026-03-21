@@ -2243,14 +2243,6 @@ const ENABLE_ASYNC_CONFIRM_PAID = false;
 const ASYNC_CONFIRM_PAID_FLAG_WAS_ENABLED =
   rawAsyncConfirmPaidFlag !== undefined &&
   !['0', 'false', 'off', 'no'].includes(rawAsyncConfirmPaidFlag.trim().toLowerCase());
-const rawDiscardConfirmFinalizeRaceFailedJobsFlag = (
-  import.meta as ImportMeta & { env?: Record<string, string | undefined> }
-).env?.VITE_DISCARD_CONFIRM_FINALIZE_RACE_FAILED_JOBS;
-const DISCARD_CONFIRM_FINALIZE_RACE_FAILED_JOBS =
-  rawDiscardConfirmFinalizeRaceFailedJobsFlag !== undefined &&
-  !['0', 'false', 'off', 'no'].includes(
-    rawDiscardConfirmFinalizeRaceFailedJobsFlag.trim().toLowerCase()
-  );
 
 const getLowerPriority = (priority: CommandPriority): CommandPriority => {
   if (priority === 'CRITICAL') return 'CRITICAL';
@@ -9445,10 +9437,7 @@ const App: React.FC = () => {
     const discardedConfirmFinalizeRaceDraftIds: string[] = [];
     const discardedConfirmFinalizeRaceJobIds: string[] = [];
     const nextQueue = failedPaidSyncQueueRef.current.filter((job) => {
-      if (
-        DISCARD_CONFIRM_FINALIZE_RACE_FAILED_JOBS &&
-        isConfirmPendingFinalizeRaceRelatedMessage(job.lastError || '')
-      ) {
+      if (isConfirmPendingFinalizeRaceRelatedMessage(job.lastError || '')) {
         discardedConfirmFinalizeRaceDraftIds.push(job.draftId);
         discardedConfirmFinalizeRaceJobIds.push(job.id);
         return false;
