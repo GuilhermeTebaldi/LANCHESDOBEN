@@ -1214,6 +1214,17 @@ const isConfirmPendingFinalizeRaceErrorMessage = (message: string): boolean => {
   return normalized.includes('venda ainda nao foi finalizada para pagamento');
 };
 
+const isConfirmPendingFinalizeRaceRelatedMessage = (message: string): boolean => {
+  const normalized = message
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+  return (
+    normalized.includes('venda ainda nao foi finalizada para pagamento') ||
+    normalized.includes('terminal_confirm_finalize_race')
+  );
+};
+
 const isDatabaseUnavailableErrorMessage = (message: string): boolean => {
   const normalized = message
     .normalize('NFD')
@@ -1243,8 +1254,7 @@ const isAutoRecoverableFailedQueueMessage = (message: string): boolean => {
   return (
     normalized.includes('conflito de versao') ||
     normalized.includes('token de estado desatualizado') ||
-    normalized.includes('nao e possivel finalizar esta venda') ||
-    normalized.includes('venda ainda nao foi finalizada para pagamento')
+    normalized.includes('nao e possivel finalizar esta venda')
   );
 };
 
@@ -9094,6 +9104,123 @@ const App: React.FC = () => {
         return;
       }
 
+      const confirmBeforeFinalizeFailure = isConfirmPendingFinalizeRaceRelatedMessage(
+        failedJob.lastError || ''
+      );
+      if (confirmBeforeFinalizeFailure) {
+        let refreshedDraft: SaleDraft | undefined;
+        try {
+          const refreshedState = await fetchStateSnapshotControlled(failedJob.draftId);
+          applyStateSnapshot(refreshedState);
+          refreshedDraft = refreshedState.saleDrafts.find((entry) => entry.id === failedJob.draftId);
+        } catch (error) {
+          const message = getStateSyncErrorMessage(error);
+          replaceFailedPaidSyncQueue(
+            failedPaidSyncQueueRef.current.map((entry) =>
+              entry.id === normalizedJobId
+                ? {
+                    ...entry,
+                    attempts: entry.attempts + 1,
+                    nextAttemptAt: undefined,
+                    lastError: `TERMINAL_CONFIRM_FINALIZE_RACE: ${message}`,
+                  }
+                : entry
+            )
+          );
+          clearFailedPaidSyncAutoRetryState(normalizedJobId);
+          showCornerSync('error', 'Falha terminal: confirme o draft manualmente antes de reenviar.', 2800);
+          if (!isAutoRetry) {
+            showNotification(
+              'Não foi possível validar o estado no servidor para corrigir o conflito de finalização.'
+            );
+          }
+          return;
+        }
+
+        if (refreshedDraft?.status === 'PAID' || refreshedDraft?.status === 'CANCELLED') {
+          completePaymentFlowTelemetry(failedJob.draftId, {
+            retries: failedJob.attempts,
+            hadReconciliation: true,
+          });
+          replaceFailedPaidSyncQueue(
+            failedPaidSyncQueueRef.current.filter((entry) => entry.id !== normalizedJobId)
+          );
+          clearFailedPaidSyncAutoRetryState(normalizedJobId);
+          if (!isAutoRetry) {
+            showNotification('Pedido já estava resolvido no servidor. Item removido da fila de falhas.');
+          }
+          return;
+        }
+
+        if (!refreshedDraft || (refreshedDraft.status !== 'DRAFT' && refreshedDraft.status !== 'PENDING_PAYMENT')) {
+          replaceFailedPaidSyncQueue(
+            failedPaidSyncQueueRef.current.map((entry) =>
+              entry.id === normalizedJobId
+                ? {
+                    ...entry,
+                    attempts: entry.attempts + 1,
+                    nextAttemptAt: undefined,
+                    lastError:
+                      'TERMINAL_CONFIRM_FINALIZE_RACE: estado do draft inconsistente após reconciliação.',
+                  }
+                : entry
+            )
+          );
+          clearFailedPaidSyncAutoRetryState(normalizedJobId);
+          showCornerSync('error', 'Falha terminal: estado inconsistente para confirmar pagamento.', 2800);
+          if (!isAutoRetry) {
+            showNotification(
+              'O draft não está em estado válido para confirmação automática. Verifique o pedido manualmente.'
+            );
+          }
+          return;
+        }
+
+        const reconciledSnapshot =
+          refreshedDraft.status === 'PENDING_PAYMENT'
+            ? buildAutoRequeuePaymentSnapshot(refreshedDraft) || failedJob.snapshot
+            : failedJob.snapshot;
+
+        replaceFailedPaidSyncQueue(
+          failedPaidSyncQueueRef.current.filter((entry) => entry.id !== normalizedJobId)
+        );
+        markPaymentFlowTelemetryProgress(failedJob.draftId, {
+          retries: failedJob.attempts,
+          hadRecovery: true,
+          hadReconciliation: true,
+        });
+        const requeued = enqueuePendingPaidSyncJob({
+          ...failedJob,
+          snapshot: reconciledSnapshot,
+          finalizeCommandId: createClientId('cmd'),
+          confirmCommandId: createClientId('cmd'),
+          attempts: 0,
+          nextAttemptAt: undefined,
+          lastError: undefined,
+        });
+        if (!requeued) {
+          replaceFailedPaidSyncQueue([failedJob, ...failedPaidSyncQueueRef.current]);
+          showCornerSync('error', 'Reconciliado, mas fila cheia para reenfileirar agora.', 2600);
+          if (!isAutoRetry) {
+            showNotification(
+              'Draft reconciliado com o servidor, mas a fila está cheia para reenfileirar neste momento.'
+            );
+          }
+          return;
+        }
+
+        showCornerSync(
+          'syncing',
+          'Conflito de finalização/confirm detectado: draft reconciliado e reenfileirado com segurança.',
+          2200
+        );
+        if (!isAutoRetry) {
+          showNotification('Draft reconciliado com o servidor e reenviado para sincronização.');
+        }
+        requestPendingPaidSyncProcessing('failed-job-requeued-after-confirm-finalize-race');
+        return;
+      }
+
       const isEmptyDraftFailure = isDraftEmptyErrorMessage(failedJob.lastError || '');
       if (isEmptyDraftFailure) {
         setPaidSyncAssistantActivity(
@@ -9186,9 +9313,11 @@ const App: React.FC = () => {
       requestPendingPaidSyncProcessing('failed-job-requeued');
     },
     [
+      applyStateSnapshot,
       clearFailedPaidSyncAutoRetryState,
       completePaymentFlowTelemetry,
       enqueuePendingPaidSyncJob,
+      fetchStateSnapshotControlled,
       hydrateFailedPaidSyncQueue,
       markPaymentFlowTelemetryProgress,
       requestPendingPaidSyncProcessing,
@@ -9255,6 +9384,23 @@ const App: React.FC = () => {
     });
 
     failedPaidSyncQueue.forEach((job) => {
+      const blockedByConfirmFinalizeRace = isConfirmPendingFinalizeRaceRelatedMessage(
+        job.lastError || ''
+      );
+      if (blockedByConfirmFinalizeRace) {
+        const retryTimer = failedPaidSyncAutoRetryTimersRef.current.get(job.id);
+        if (retryTimer !== undefined) {
+          window.clearTimeout(retryTimer);
+          failedPaidSyncAutoRetryTimersRef.current.delete(job.id);
+        }
+        const recoverTimer = failedPaidSyncAutoRecoverTimersRef.current.get(job.id);
+        if (recoverTimer !== undefined) {
+          window.clearTimeout(recoverTimer);
+          failedPaidSyncAutoRecoverTimersRef.current.delete(job.id);
+        }
+        return;
+      }
+
       const autoAttempts = failedPaidSyncAutoRetryAttemptsRef.current.get(job.id) || 0;
       const recoverableError =
         isDraftEmptyErrorMessage(job.lastError || '') ||
