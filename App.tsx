@@ -179,6 +179,7 @@ interface RunCommandOptions {
   errorSink?: RunCommandErrorSink;
   trackPendingState?: boolean;
   failFastOnVersionConflict?: boolean;
+  skipSnapshotApply?: boolean;
 }
 
 interface BackendExecutionOptions {
@@ -3469,7 +3470,12 @@ const App: React.FC = () => {
   );
 
   const scheduleRetryDispatchTask = useCallback(
-    (key: string, delayMs: number, run: () => Promise<void> | void): void => {
+    (
+      key: string,
+      delayMs: number,
+      run: () => Promise<void> | void,
+      options: { allowImmediate?: boolean } = {}
+    ): void => {
       const normalizedKey = key.trim();
       if (!normalizedKey) return;
       const timers = retryDispatchTimersRef.current;
@@ -3477,7 +3483,8 @@ const App: React.FC = () => {
       if (existingTimer !== undefined) {
         window.clearTimeout(existingTimer);
       }
-      const safeDelayMs = Math.max(250, Math.round(delayMs));
+      const roundedDelayMs = Math.max(0, Math.round(delayMs));
+      const safeDelayMs = options.allowImmediate ? roundedDelayMs : Math.max(250, roundedDelayMs);
       const timerId = window.setTimeout(() => {
         const activeTimer = retryDispatchTimersRef.current.get(normalizedKey);
         if (activeTimer !== timerId) return;
@@ -4100,7 +4107,11 @@ const App: React.FC = () => {
   const executeSyncedCommand = useCallback(
     async (
       command: StateCommand,
-      options: { trackPendingState?: boolean; failFastOnVersionConflict?: boolean } = {}
+      options: {
+        trackPendingState?: boolean;
+        failFastOnVersionConflict?: boolean;
+        skipSnapshotApply?: boolean;
+      } = {}
     ): Promise<{ ok: true } | { ok: false; error: unknown }> => {
       const shouldTrackPendingState = options.trackPendingState !== false;
       if (shouldTrackPendingState) {
@@ -4147,12 +4158,14 @@ const App: React.FC = () => {
                 failFastOnVersionConflict: options.failFastOnVersionConflict,
               })
           );
-          applyStateSnapshotIfDraftEpochCurrent(
-            nextState,
-            commandDraftId,
-            expectedDraftEpoch,
-            'run_state_command'
-          );
+          if (!options.skipSnapshotApply) {
+            applyStateSnapshotIfDraftEpochCurrent(
+              nextState,
+              commandDraftId,
+              expectedDraftEpoch,
+              'run_state_command'
+            );
+          }
           return { ok: true };
         } catch (error) {
           return { ok: false, error };
@@ -4275,6 +4288,7 @@ const App: React.FC = () => {
         return executeSyncedCommand(normalizedCommand, {
           trackPendingState: options.trackPendingState,
           failFastOnVersionConflict: options.failFastOnVersionConflict,
+          skipSnapshotApply: options.skipSnapshotApply,
         });
       });
 
@@ -6763,6 +6777,7 @@ const App: React.FC = () => {
       preferAsyncFinalize?: boolean;
       asyncFinalizeCommandId?: string;
       failFastOnVersionConflict?: boolean;
+      skipSnapshotApplyOnTerminalFlow?: boolean;
     } = {}
   ): Promise<boolean> => {
     const notifyError = (message: string) => {
@@ -6804,6 +6819,8 @@ const App: React.FC = () => {
       splitCommitted: snapshotSplitCommitted,
       effectivePaymentTotal: snapshotEffectivePaymentTotal,
     } = activeSnapshot;
+    const shouldSkipFinalizeSnapshotApply =
+      options.skipSnapshotApplyOnTerminalFlow === true && !isAppSaleOrigin(snapshotSaleOrigin);
     const draftEpochAtFinalizeStart = getDraftOperationEpoch(draft.id);
 
     if (draft.items.length === 0) {
@@ -6904,6 +6921,7 @@ const App: React.FC = () => {
           errorSink: options.errorSink,
           trackPendingState: options.trackPendingState,
           failFastOnVersionConflict: options.failFastOnVersionConflict,
+          skipSnapshotApply: shouldSkipFinalizeSnapshotApply,
         });
       }
 
@@ -6931,6 +6949,7 @@ const App: React.FC = () => {
             errorSink: options.errorSink,
             trackPendingState: options.trackPendingState,
             failFastOnVersionConflict: options.failFastOnVersionConflict,
+            skipSnapshotApply: shouldSkipFinalizeSnapshotApply,
           });
         }
 
@@ -8014,6 +8033,7 @@ const App: React.FC = () => {
             errorSink: finalizeErrorSink,
             preferAsyncFinalize: false,
             failFastOnVersionConflict: false,
+            skipSnapshotApplyOnTerminalFlow: true,
           });
           if (!finalized) {
             const finalizeMessage =
@@ -8329,10 +8349,13 @@ const App: React.FC = () => {
 
   const requestPendingPaidSyncProcessing = useCallback(
     (source: string, delayMs = 0): void => {
-      void source;
+      const allowImmediate = source === 'confirm-paid-enqueued';
       const safeDelayMs = Math.max(0, Math.round(delayMs));
-      scheduleRetryDispatchTask('pending-paid-sync-main', safeDelayMs, () =>
-        processPendingPaidSyncQueue()
+      scheduleRetryDispatchTask(
+        'pending-paid-sync-main',
+        safeDelayMs,
+        () => processPendingPaidSyncQueue(),
+        { allowImmediate }
       );
     },
     [processPendingPaidSyncQueue, scheduleRetryDispatchTask]
