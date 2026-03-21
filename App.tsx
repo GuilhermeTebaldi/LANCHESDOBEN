@@ -2060,6 +2060,13 @@ const ENABLE_PENDING_PAID_SYNC_INTERVAL_WAKEUP =
     : !['0', 'false', 'off', 'no'].includes(
         rawPendingPaidSyncIntervalWakeupFlag.trim().toLowerCase()
       );
+const rawAsyncConfirmPaidFlag = (
+  import.meta as ImportMeta & { env?: Record<string, string | undefined> }
+).env?.VITE_ENABLE_ASYNC_CONFIRM_PAID;
+const ENABLE_ASYNC_CONFIRM_PAID =
+  rawAsyncConfirmPaidFlag === undefined
+    ? false
+    : !['0', 'false', 'off', 'no'].includes(rawAsyncConfirmPaidFlag.trim().toLowerCase());
 
 const getLowerPriority = (priority: CommandPriority): CommandPriority => {
   if (priority === 'CRITICAL') return 'CRITICAL';
@@ -8090,138 +8097,157 @@ const App: React.FC = () => {
           commandId: currentJob.confirmCommandId,
         };
 
-        let asyncJobId: string | null = null;
-        try {
-          const queuedAsyncJob = await enqueueStateCommandAsyncControlled(confirmCommand);
-          asyncJobId = queuedAsyncJob.id;
-        } catch (error) {
-          const statusCode =
-            error instanceof StateCommandSyncError ? error.statusCode : undefined;
-          const shouldFallbackToSync =
-            statusCode === 404 ||
-            statusCode === 405 ||
-            statusCode === 422 ||
-            statusCode === 501;
-
-          if (shouldFallbackToSync) {
-            const confirmErrorSink: RunCommandErrorSink = {};
-            const confirmed = await runCommandWithSync(
-              confirmCommand,
-              undefined,
-              {
-                trackPendingState: false,
-                silentSuccessNotification: true,
-                silentErrorNotification: true,
-                errorSink: confirmErrorSink,
-                failFastOnVersionConflict: false,
-              }
-            );
-            if (!confirmed) {
-              await markJobAsFailed('Falha ao confirmar pagamento.', confirmErrorSink);
-              return;
+        if (!ENABLE_ASYNC_CONFIRM_PAID) {
+          const confirmErrorSink: RunCommandErrorSink = {};
+          const confirmed = await runCommandWithSync(
+            confirmCommand,
+            undefined,
+            {
+              trackPendingState: false,
+              silentSuccessNotification: true,
+              silentErrorNotification: true,
+              errorSink: confirmErrorSink,
+              failFastOnVersionConflict: false,
             }
-          } else {
-            await markJobAsFailed('Falha ao enfileirar confirmação assíncrona.', {
-              error,
-              message: getStateSyncErrorMessage(error),
-              retryable: isRetryableSyncError(error),
-              statusCode,
-            });
+          );
+          if (!confirmed) {
+            await markJobAsFailed('Falha ao confirmar pagamento.', confirmErrorSink);
             return;
           }
-        }
-
-        if (asyncJobId) {
-          let terminalStatus: { status: StateCommandAsyncJobStatus; lastError: string | null } | null = null;
-          let resolvedBySyncFallback = false;
+        } else {
+          let asyncJobId: string | null = null;
           try {
-            terminalStatus = await waitForAsyncCommandJobTerminalStatus(
-              asyncJobId,
-              (queuedJobId) => getStateCommandAsyncJobControlled(queuedJobId, currentJob.draftId)
-            );
+            const queuedAsyncJob = await enqueueStateCommandAsyncControlled(confirmCommand);
+            asyncJobId = queuedAsyncJob.id;
           } catch (error) {
-            const errorMessage = getStateSyncErrorMessage(error);
-            const isTimeoutWhileWaiting =
-              errorMessage.toLowerCase().includes('timeout aguardando processamento assíncrono');
-            if (!isTimeoutWhileWaiting) {
-              await markJobAsFailed('Falha ao aguardar processamento assíncrono.', {
-                error,
-                message: errorMessage,
-                retryable: isRetryableSyncError(error),
-                statusCode: error instanceof StateCommandSyncError ? error.statusCode : undefined,
-              });
-              return;
-            }
+            const statusCode =
+              error instanceof StateCommandSyncError ? error.statusCode : undefined;
+            const shouldFallbackToSync =
+              statusCode === 404 ||
+              statusCode === 405 ||
+              statusCode === 422 ||
+              statusCode === 501;
 
-            const confirmErrorSink: RunCommandErrorSink = {};
-            const confirmed = await runCommandWithSync(
-              confirmCommand,
-              undefined,
-              {
-                trackPendingState: false,
-                silentSuccessNotification: true,
-                silentErrorNotification: true,
-                errorSink: confirmErrorSink,
-                failFastOnVersionConflict: false,
-              }
-            );
-            if (!confirmed) {
-              await markJobAsFailed(
-                'Falha ao confirmar pagamento após timeout do processamento assíncrono.',
-                confirmErrorSink
-              );
-              return;
-            }
-            resolvedBySyncFallback = true;
-          }
-
-          if (!resolvedBySyncFallback && (!terminalStatus || terminalStatus.status !== 'COMPLETED')) {
-            const confirmErrorSink: RunCommandErrorSink = {};
-            const confirmed = await runCommandWithSync(
-              confirmCommand,
-              undefined,
-              {
-                trackPendingState: false,
-                silentSuccessNotification: true,
-                silentErrorNotification: true,
-                errorSink: confirmErrorSink,
-                failFastOnVersionConflict: false,
-              }
-            );
-            if (!confirmed) {
-              await markJobAsFailed(
-                terminalStatus?.lastError || 'Falha no processamento assíncrono do pedido.',
+            if (shouldFallbackToSync) {
+              const confirmErrorSink: RunCommandErrorSink = {};
+              const confirmed = await runCommandWithSync(
+                confirmCommand,
+                undefined,
                 {
-                  message:
-                    terminalStatus?.lastError ||
-                    confirmErrorSink.message ||
-                    'Falha no processamento assíncrono do pedido.',
-                  retryable: confirmErrorSink.retryable ?? false,
-                  statusCode: confirmErrorSink.statusCode,
+                  trackPendingState: false,
+                  silentSuccessNotification: true,
+                  silentErrorNotification: true,
+                  errorSink: confirmErrorSink,
+                  failFastOnVersionConflict: false,
                 }
               );
-              return;
-            }
-            resolvedBySyncFallback = true;
-          }
-
-          if (!resolvedBySyncFallback) {
-            try {
-              const refreshedState = await fetchStateSnapshotControlled(currentJob.draftId);
-              applyStateSnapshotIfDraftEpochCurrent(
-                refreshedState,
-                currentJob.draftId,
-                draftProcessingEpoch,
-                'pending_paid_refresh_after_confirm'
-              );
-            } catch (error) {
-              await markJobAsFailed('Pedido confirmado, mas falhou ao atualizar estado local.', {
+              if (!confirmed) {
+                await markJobAsFailed('Falha ao confirmar pagamento.', confirmErrorSink);
+                return;
+              }
+            } else {
+              await markJobAsFailed('Falha ao enfileirar confirmação assíncrona.', {
                 error,
                 message: getStateSyncErrorMessage(error),
                 retryable: isRetryableSyncError(error),
-                statusCode: error instanceof StateCommandSyncError ? error.statusCode : undefined,
+                statusCode,
               });
               return;
+            }
+          }
+
+          if (asyncJobId) {
+            let terminalStatus: { status: StateCommandAsyncJobStatus; lastError: string | null } | null = null;
+            let resolvedBySyncFallback = false;
+            try {
+              terminalStatus = await waitForAsyncCommandJobTerminalStatus(
+                asyncJobId,
+                (queuedJobId) => getStateCommandAsyncJobControlled(queuedJobId, currentJob.draftId)
+              );
+            } catch (error) {
+              const errorMessage = getStateSyncErrorMessage(error);
+              const isTimeoutWhileWaiting =
+                errorMessage.toLowerCase().includes('timeout aguardando processamento assíncrono');
+              if (!isTimeoutWhileWaiting) {
+                await markJobAsFailed('Falha ao aguardar processamento assíncrono.', {
+                  error,
+                  message: errorMessage,
+                  retryable: isRetryableSyncError(error),
+                  statusCode: error instanceof StateCommandSyncError ? error.statusCode : undefined,
+                });
+                return;
+              }
+
+              const confirmErrorSink: RunCommandErrorSink = {};
+              const confirmed = await runCommandWithSync(
+                confirmCommand,
+                undefined,
+                {
+                  trackPendingState: false,
+                  silentSuccessNotification: true,
+                  silentErrorNotification: true,
+                  errorSink: confirmErrorSink,
+                  failFastOnVersionConflict: false,
+                }
+              );
+              if (!confirmed) {
+                await markJobAsFailed(
+                  'Falha ao confirmar pagamento após timeout do processamento assíncrono.',
+                  confirmErrorSink
+                );
+                return;
+              }
+              resolvedBySyncFallback = true;
+            }
+
+            if (!resolvedBySyncFallback && (!terminalStatus || terminalStatus.status !== 'COMPLETED')) {
+              const confirmErrorSink: RunCommandErrorSink = {};
+              const confirmed = await runCommandWithSync(
+                confirmCommand,
+                undefined,
+                {
+                  trackPendingState: false,
+                  silentSuccessNotification: true,
+                  silentErrorNotification: true,
+                  errorSink: confirmErrorSink,
+                  failFastOnVersionConflict: false,
+                }
+              );
+              if (!confirmed) {
+                await markJobAsFailed(
+                  terminalStatus?.lastError || 'Falha no processamento assíncrono do pedido.',
+                  {
+                    message:
+                      terminalStatus?.lastError ||
+                      confirmErrorSink.message ||
+                      'Falha no processamento assíncrono do pedido.',
+                    retryable: confirmErrorSink.retryable ?? false,
+                    statusCode: confirmErrorSink.statusCode,
+                  }
+                );
+                return;
+              }
+              resolvedBySyncFallback = true;
+            }
+
+            if (!resolvedBySyncFallback) {
+              try {
+                const refreshedState = await fetchStateSnapshotControlled(currentJob.draftId);
+                applyStateSnapshotIfDraftEpochCurrent(
+                  refreshedState,
+                  currentJob.draftId,
+                  draftProcessingEpoch,
+                  'pending_paid_refresh_after_confirm'
+                );
+              } catch (error) {
+                await markJobAsFailed('Pedido confirmado, mas falhou ao atualizar estado local.', {
+                  error,
+                  message: getStateSyncErrorMessage(error),
+                  retryable: isRetryableSyncError(error),
+                  statusCode: error instanceof StateCommandSyncError ? error.statusCode : undefined,
+                });
+                return;
+              }
             }
           }
         }
