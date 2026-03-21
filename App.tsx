@@ -9434,7 +9434,14 @@ const App: React.FC = () => {
       }
     });
 
+    const discardedConfirmFinalizeRaceDraftIds: string[] = [];
+    const discardedConfirmFinalizeRaceJobIds: string[] = [];
     const nextQueue = failedPaidSyncQueueRef.current.filter((job) => {
+      if (isConfirmPendingFinalizeRaceRelatedMessage(job.lastError || '')) {
+        discardedConfirmFinalizeRaceDraftIds.push(job.draftId);
+        discardedConfirmFinalizeRaceJobIds.push(job.id);
+        return false;
+      }
       if (knownPersistedDraftIds.has(job.draftId)) return false;
       const serverDraft = saleDraftsRef.current.find((draft) => draft.id === job.draftId);
       if (!serverDraft) return true;
@@ -9443,13 +9450,33 @@ const App: React.FC = () => {
 
     if (nextQueue.length === failedPaidSyncQueueRef.current.length) return;
     replaceFailedPaidSyncQueue(nextQueue);
+    if (discardedConfirmFinalizeRaceDraftIds.length > 0) {
+      const uniqueDraftIds = Array.from(new Set(discardedConfirmFinalizeRaceDraftIds));
+      uniqueDraftIds.forEach((draftId) => {
+        setDraftSyncInProgress(draftId, false);
+      });
+      discardedConfirmFinalizeRaceJobIds.forEach((jobId) => {
+        clearFailedPaidSyncAutoRetryState(jobId);
+      });
+      pushOperationalEvent(
+        'QUEUE_HEALTH',
+        'Jobs da fila de falhas descartados por conflito terminal finalize/confirm.',
+        {
+          discardedJobs: discardedConfirmFinalizeRaceJobIds,
+          draftIds: uniqueDraftIds,
+        }
+      );
+    }
   }, [
+    clearFailedPaidSyncAutoRetryState,
     globalCancelledSales,
     globalSales,
     isAccessVerified,
+    pushOperationalEvent,
     replaceFailedPaidSyncQueue,
     saleDrafts,
     sales,
+    setDraftSyncInProgress,
   ]);
 
   useEffect(() => {
