@@ -11,6 +11,12 @@ export interface CommandSchedulerSnapshot {
   active: number;
   queued: number;
   queuedByPriority: Record<CommandPriority, number>;
+  totalEnqueued: number;
+  totalCompleted: number;
+  totalFailed: number;
+  dedupeHits: number;
+  backpressureHits: number;
+  lastBackpressureAt: number | null;
 }
 
 export class CommandSchedulerBackpressureError extends Error {
@@ -82,6 +88,12 @@ export const createCommandScheduler = (options: CommandSchedulerOptions): Comman
   const pendingByKey = new Map<string, Promise<unknown>>();
   let nextTaskId = 0;
   let active = 0;
+  let totalEnqueued = 0;
+  let totalCompleted = 0;
+  let totalFailed = 0;
+  let dedupeHits = 0;
+  let backpressureHits = 0;
+  let lastBackpressureAt: number | null = null;
 
   const dequeueNextTask = (): ScheduledTask<unknown> | null => {
     if (queued.length === 0) return null;
@@ -107,9 +119,11 @@ export const createCommandScheduler = (options: CommandSchedulerOptions): Comman
         .then(nextTask.run)
         .then(
           (value) => {
+            totalCompleted += 1;
             nextTask.resolve(value);
           },
           (error) => {
+            totalFailed += 1;
             nextTask.reject(error);
           }
         )
@@ -129,11 +143,14 @@ export const createCommandScheduler = (options: CommandSchedulerOptions): Comman
     if (key) {
       const existing = pendingByKey.get(key);
       if (existing) {
+        dedupeHits += 1;
         return existing as Promise<T>;
       }
     }
 
     if (queued.length >= maxQueueSize) {
+      backpressureHits += 1;
+      lastBackpressureAt = Date.now();
       options.onBackpressure?.({
         queueSize: queued.length,
         maxQueueSize,
@@ -160,6 +177,7 @@ export const createCommandScheduler = (options: CommandSchedulerOptions): Comman
       resolve: resolvePromise,
       reject: rejectPromise,
     };
+    totalEnqueued += 1;
     queued.push(scheduledTask as ScheduledTask<unknown>);
 
     if (key) {
@@ -192,6 +210,12 @@ export const createCommandScheduler = (options: CommandSchedulerOptions): Comman
       active,
       queued: queued.length,
       queuedByPriority,
+      totalEnqueued,
+      totalCompleted,
+      totalFailed,
+      dedupeHits,
+      backpressureHits,
+      lastBackpressureAt,
     };
   };
 
@@ -201,4 +225,3 @@ export const createCommandScheduler = (options: CommandSchedulerOptions): Comman
     getSnapshot,
   };
 };
-

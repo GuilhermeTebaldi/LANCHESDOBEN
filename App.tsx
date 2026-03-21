@@ -178,6 +178,46 @@ interface PendingPaidSyncJob {
   lastError?: string;
 }
 
+interface PaymentFlowTelemetryEntry {
+  draftId: string;
+  jobId: string;
+  clickAtMs: number;
+  localPersistedAtMs: number | null;
+  retries: number;
+  hadRecovery: boolean;
+  hadReconciliation: boolean;
+}
+
+interface PaymentFlowTelemetryRecord {
+  draftId: string;
+  jobId: string;
+  clickToLocalPersistMs: number | null;
+  clickToBackendConfirmMs: number | null;
+  retries: number;
+  hadRecovery: boolean;
+  hadReconciliation: boolean;
+  timestamp: string;
+}
+
+interface OperationalHealthSnapshot {
+  timestamp: string;
+  schedulerActive: number;
+  schedulerQueued: number;
+  schedulerCriticalQueued: number;
+  schedulerHighQueued: number;
+  schedulerNormalQueued: number;
+  schedulerLowQueued: number;
+  schedulerBackpressureHits: number;
+  schedulerDedupeHits: number;
+  pendingDraftAdds: number;
+  pendingPaidQueue: number;
+  failedQueue: number;
+  failsafeActivations: number;
+  failsafeDeferredCommands: number;
+  failsafeCurrentPauseMs: number;
+  failsafeAccumulatedPausedMs: number;
+}
+
 interface PendingPaidSyncDraftRecoveryResult {
   ok: boolean;
   reconciledOnServer?: boolean;
@@ -1768,6 +1808,10 @@ const App: React.FC = () => {
   const backendCommandSchedulerRef = useRef<CommandScheduler | null>(null);
   const backendFailsafeBlockedUntilRef = useRef(0);
   const backendFailsafeStreakRef = useRef(0);
+  const backendFailsafeActivationCountRef = useRef(0);
+  const backendFailsafeDeferredCommandsRef = useRef(0);
+  const backendFailsafeAccumulatedPauseMsRef = useRef(0);
+  const backendFailsafeLastStartedAtRef = useRef<number | null>(null);
   const retryDispatchQueueRef = useRef<Array<{ key: string; run: () => Promise<void> }>>([]);
   const retryDispatchQueuedKeysRef = useRef<Set<string>>(new Set());
   const retryDispatchRunningRef = useRef(false);
@@ -1792,18 +1836,24 @@ const App: React.FC = () => {
   const pendingDraftBackgroundSyncTimerRef = useRef<Map<string, number>>(new Map());
   const pendingDraftBackgroundSyncRunningRef = useRef<Set<string>>(new Set());
   const pendingDraftBackgroundRetryAttemptsRef = useRef<Map<string, number>>(new Map());
+  const paymentFlowTelemetryByDraftRef = useRef<Map<string, PaymentFlowTelemetryEntry>>(new Map());
+  const paymentFlowTelemetryRecentRef = useRef<PaymentFlowTelemetryRecord[]>([]);
+  const lastOperationalHealthReportAtRef = useRef(0);
 
   if (!backendCommandSchedulerRef.current) {
     backendCommandSchedulerRef.current = createCommandScheduler({
       maxConcurrent: MAX_CONCURRENT_COMMANDS,
       maxQueueSize: BACKEND_COMMAND_SCHEDULER_MAX_QUEUE_SIZE,
       onBackpressure: (payload) => {
+        const currentSnapshot = backendCommandSchedulerRef.current?.getSnapshot();
+        const backpressureHits = currentSnapshot?.backpressureHits ?? 0;
         reportErrorMonitorEvent({
           source: 'sistema:command-scheduler:backpressure',
           level: 'warn',
           message: 'Scheduler global de comandos atingiu o limite de fila.',
           context: {
             ...payload,
+            backpressureHits,
           },
         });
       },
@@ -1850,6 +1900,25 @@ const App: React.FC = () => {
     jobId: null,
     updatedAt: Date.now(),
   });
+  const [operationalHealthSnapshot, setOperationalHealthSnapshot] =
+    useState<OperationalHealthSnapshot>({
+      timestamp: new Date().toISOString(),
+      schedulerActive: 0,
+      schedulerQueued: 0,
+      schedulerCriticalQueued: 0,
+      schedulerHighQueued: 0,
+      schedulerNormalQueued: 0,
+      schedulerLowQueued: 0,
+      schedulerBackpressureHits: 0,
+      schedulerDedupeHits: 0,
+      pendingDraftAdds: 0,
+      pendingPaidQueue: 0,
+      failedQueue: 0,
+      failsafeActivations: 0,
+      failsafeDeferredCommands: 0,
+      failsafeCurrentPauseMs: 0,
+      failsafeAccumulatedPausedMs: 0,
+    });
   
   const [isAddProductModalOpen, setIsAddProductModalOpen] = useState(false);
   const [isAddIngredientModalOpen, setIsAddIngredientModalOpen] = useState(false);
@@ -2263,23 +2332,210 @@ const App: React.FC = () => {
     setSyncingPaidDraftIds(Array.from(nextSet));
   }, []);
 
-  const logQueueHealth = useCallback((source: string): void => {
+  const registerPaymentFlowTelemetryStart = useCallback(
+    (draftId: string, jobId: string, clickAtMs: number): void => {
+      const normalizedDraftId = draftId.trim();
+      const normalizedJobId = jobId.trim();
+      if (!normalizedDraftId || !normalizedJobId) return;
+
+      paymentFlowTelemetryByDraftRef.current.set(normalizedDraftId, {
+        draftId: normalizedDraftId,
+        jobId: normalizedJobId,
+        clickAtMs,
+        localPersistedAtMs: null,
+        retries: 0,
+        hadRecovery: false,
+        hadReconciliation: false,
+      });
+    },
+    []
+  );
+
+  const markPaymentFlowTelemetryLocalPersisted = useCallback(
+    (draftId: string, jobId: string): void => {
+      const normalizedDraftId = draftId.trim();
+      const normalizedJobId = jobId.trim();
+      if (!normalizedDraftId || !normalizedJobId) return;
+
+      const current = paymentFlowTelemetryByDraftRef.current.get(normalizedDraftId);
+      if (!current) return;
+      if (current.jobId !== normalizedJobId) return;
+      if (current.localPersistedAtMs !== null) return;
+      paymentFlowTelemetryByDraftRef.current.set(normalizedDraftId, {
+        ...current,
+        localPersistedAtMs: Date.now(),
+      });
+    },
+    []
+  );
+
+  const markPaymentFlowTelemetryProgress = useCallback(
+    (
+      draftId: string,
+      updates: { retries?: number; hadRecovery?: boolean; hadReconciliation?: boolean }
+    ): void => {
+      const normalizedDraftId = draftId.trim();
+      if (!normalizedDraftId) return;
+      const current = paymentFlowTelemetryByDraftRef.current.get(normalizedDraftId);
+      if (!current) return;
+      paymentFlowTelemetryByDraftRef.current.set(normalizedDraftId, {
+        ...current,
+        retries:
+          updates.retries !== undefined
+            ? Math.max(current.retries, Math.max(0, Math.floor(updates.retries)))
+            : current.retries,
+        hadRecovery:
+          updates.hadRecovery !== undefined
+            ? current.hadRecovery || updates.hadRecovery
+            : current.hadRecovery,
+        hadReconciliation:
+          updates.hadReconciliation !== undefined
+            ? current.hadReconciliation || updates.hadReconciliation
+            : current.hadReconciliation,
+      });
+    },
+    []
+  );
+
+  const completePaymentFlowTelemetry = useCallback(
+    (
+      draftId: string,
+      options: { retries?: number; hadRecovery?: boolean; hadReconciliation?: boolean } = {}
+    ): void => {
+      const normalizedDraftId = draftId.trim();
+      if (!normalizedDraftId) return;
+      const current = paymentFlowTelemetryByDraftRef.current.get(normalizedDraftId);
+      if (!current) return;
+
+      const nowMs = Date.now();
+      const normalizedRetries =
+        options.retries !== undefined
+          ? Math.max(current.retries, Math.max(0, Math.floor(options.retries)))
+          : current.retries;
+      const hadRecovery =
+        options.hadRecovery !== undefined ? current.hadRecovery || options.hadRecovery : current.hadRecovery;
+      const hadReconciliation =
+        options.hadReconciliation !== undefined
+          ? current.hadReconciliation || options.hadReconciliation
+          : current.hadReconciliation;
+
+      const clickToLocalPersistMs =
+        current.localPersistedAtMs !== null
+          ? Math.max(0, current.localPersistedAtMs - current.clickAtMs)
+          : null;
+      const clickToBackendConfirmMs = Math.max(0, nowMs - current.clickAtMs);
+
+      const record: PaymentFlowTelemetryRecord = {
+        draftId: current.draftId,
+        jobId: current.jobId,
+        clickToLocalPersistMs,
+        clickToBackendConfirmMs,
+        retries: normalizedRetries,
+        hadRecovery,
+        hadReconciliation,
+        timestamp: new Date(nowMs).toISOString(),
+      };
+
+      paymentFlowTelemetryByDraftRef.current.delete(normalizedDraftId);
+      const nextRecent = [record, ...paymentFlowTelemetryRecentRef.current].slice(0, 30);
+      paymentFlowTelemetryRecentRef.current = nextRecent;
+
+      reportErrorMonitorEvent({
+        source: 'sistema:payment-flow:completed',
+        level: 'info',
+        message: 'Fluxo de pagamento concluído e telemetria registrada.',
+        context: {
+          draftId: record.draftId,
+          jobId: record.jobId,
+          clickToLocalPersistMs: record.clickToLocalPersistMs,
+          clickToBackendConfirmMs: record.clickToBackendConfirmMs,
+          retries: record.retries,
+          hadRecovery: record.hadRecovery,
+          hadReconciliation: record.hadReconciliation,
+        },
+      });
+    },
+    []
+  );
+
+  const buildOperationalHealthSnapshot = useCallback((): OperationalHealthSnapshot => {
     const schedulerSnapshot = backendCommandSchedulerRef.current?.getSnapshot();
-    console.info('[QUEUE_HEALTH]', {
-      type: 'QUEUE_HEALTH',
-      source,
-      pendingDraftAdds: countPendingDraftAdds(pendingDraftAddsRef.current),
-      pendingPaidQueue: pendingPaidSyncQueueRef.current.length,
-      failedQueue: failedPaidSyncQueueRef.current.length,
+    const failsafeCurrentPauseMs = Math.max(
+      0,
+      backendFailsafeBlockedUntilRef.current - Date.now()
+    );
+    return {
+      timestamp: new Date().toISOString(),
       schedulerActive: schedulerSnapshot?.active ?? 0,
       schedulerQueued: schedulerSnapshot?.queued ?? 0,
       schedulerCriticalQueued: schedulerSnapshot?.queuedByPriority.CRITICAL ?? 0,
       schedulerHighQueued: schedulerSnapshot?.queuedByPriority.HIGH ?? 0,
       schedulerNormalQueued: schedulerSnapshot?.queuedByPriority.NORMAL ?? 0,
       schedulerLowQueued: schedulerSnapshot?.queuedByPriority.LOW ?? 0,
-      timestamp: new Date().toISOString(),
-    });
+      schedulerBackpressureHits: schedulerSnapshot?.backpressureHits ?? 0,
+      schedulerDedupeHits: schedulerSnapshot?.dedupeHits ?? 0,
+      pendingDraftAdds: countPendingDraftAdds(pendingDraftAddsRef.current),
+      pendingPaidQueue: pendingPaidSyncQueueRef.current.length,
+      failedQueue: failedPaidSyncQueueRef.current.length,
+      failsafeActivations: backendFailsafeActivationCountRef.current,
+      failsafeDeferredCommands: backendFailsafeDeferredCommandsRef.current,
+      failsafeCurrentPauseMs,
+      failsafeAccumulatedPausedMs:
+        backendFailsafeAccumulatedPauseMsRef.current +
+        (backendFailsafeLastStartedAtRef.current !== null
+          ? Math.max(0, Date.now() - backendFailsafeLastStartedAtRef.current)
+          : 0),
+    };
   }, []);
+
+  const publishOperationalHealthSnapshot = useCallback(
+    (source: string, options: { forceReport?: boolean } = {}): void => {
+      const snapshot = buildOperationalHealthSnapshot();
+      setOperationalHealthSnapshot(snapshot);
+      console.info('[OPS_HEALTH]', {
+        type: 'OPS_HEALTH',
+        source,
+        ...snapshot,
+      });
+
+      const nowMs = Date.now();
+      const shouldReport =
+        options.forceReport === true || nowMs - lastOperationalHealthReportAtRef.current >= 30_000;
+      if (!shouldReport) return;
+      lastOperationalHealthReportAtRef.current = nowMs;
+
+      reportErrorMonitorEvent({
+        source: 'sistema:ops-health:snapshot',
+        level: 'info',
+        message: 'Snapshot operacional do frontend.',
+        context: {
+          source,
+          ...snapshot,
+        },
+      });
+    },
+    [buildOperationalHealthSnapshot]
+  );
+
+  const logQueueHealth = useCallback((source: string): void => {
+    const snapshot = buildOperationalHealthSnapshot();
+    console.info('[QUEUE_HEALTH]', {
+      type: 'QUEUE_HEALTH',
+      source,
+      ...snapshot,
+    });
+    publishOperationalHealthSnapshot(`queue:${source}`);
+  }, [buildOperationalHealthSnapshot, publishOperationalHealthSnapshot]);
+
+  useEffect(() => {
+    publishOperationalHealthSnapshot('interval:init', { forceReport: true });
+    const intervalId = window.setInterval(() => {
+      publishOperationalHealthSnapshot('interval');
+    }, 15000);
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [publishOperationalHealthSnapshot]);
 
   const getBackendFailsafeRemainingMs = useCallback((): number => {
     return Math.max(0, backendFailsafeBlockedUntilRef.current - Date.now());
@@ -2288,6 +2544,7 @@ const App: React.FC = () => {
   const activateBackendFailsafe = useCallback((reason: string): void => {
     const nextStreak = Math.min(6, backendFailsafeStreakRef.current + 1);
     backendFailsafeStreakRef.current = nextStreak;
+    backendFailsafeActivationCountRef.current += 1;
     const delayMs = Math.min(
       BACKEND_FAILSAFE_MAX_PAUSE_MS,
       BACKEND_FAILSAFE_MIN_PAUSE_MS * 2 ** Math.max(0, nextStreak - 1)
@@ -2297,6 +2554,9 @@ const App: React.FC = () => {
       backendFailsafeBlockedUntilRef.current,
       nextBlockedUntil
     );
+    if (backendFailsafeLastStartedAtRef.current === null) {
+      backendFailsafeLastStartedAtRef.current = Date.now();
+    }
 
     reportErrorMonitorEvent({
       source: 'sistema:backend-failsafe:activated',
@@ -2305,14 +2565,24 @@ const App: React.FC = () => {
       context: {
         streak: nextStreak,
         delayMs,
+        blockedUntil: new Date(backendFailsafeBlockedUntilRef.current).toISOString(),
       },
     });
-  }, []);
+    publishOperationalHealthSnapshot('failsafe:activated', { forceReport: true });
+  }, [publishOperationalHealthSnapshot]);
 
   const clearBackendFailsafe = useCallback((): void => {
+    if (backendFailsafeLastStartedAtRef.current !== null) {
+      backendFailsafeAccumulatedPauseMsRef.current += Math.max(
+        0,
+        Date.now() - backendFailsafeLastStartedAtRef.current
+      );
+      backendFailsafeLastStartedAtRef.current = null;
+    }
     backendFailsafeStreakRef.current = 0;
     backendFailsafeBlockedUntilRef.current = 0;
-  }, []);
+    publishOperationalHealthSnapshot('failsafe:cleared');
+  }, [publishOperationalHealthSnapshot]);
 
   const runBackendExecution = useCallback(
     async <T,>(
@@ -2321,6 +2591,8 @@ const App: React.FC = () => {
     ): Promise<T> => {
       const blockedMs = getBackendFailsafeRemainingMs();
       if (blockedMs > 0) {
+        backendFailsafeDeferredCommandsRef.current += 1;
+        publishOperationalHealthSnapshot('failsafe:deferred-command');
         throw new StateCommandSyncError(
           'Banco temporariamente indisponível. Tentando novamente...',
           {
@@ -2424,7 +2696,12 @@ const App: React.FC = () => {
         throw error;
       }
     },
-    [activateBackendFailsafe, clearBackendFailsafe, getBackendFailsafeRemainingMs]
+    [
+      activateBackendFailsafe,
+      clearBackendFailsafe,
+      getBackendFailsafeRemainingMs,
+      publishOperationalHealthSnapshot,
+    ]
   );
 
   const runWithDraftLock = useCallback(
@@ -5252,6 +5529,10 @@ const App: React.FC = () => {
 
       const serverDraft = saleDraftsRef.current.find((draft) => draft.id === failedJob.draftId);
       if (serverDraft && (serverDraft.status === 'PAID' || serverDraft.status === 'CANCELLED')) {
+        completePaymentFlowTelemetry(failedJob.draftId, {
+          retries: failedJob.attempts,
+          hadReconciliation: true,
+        });
         replaceFailedPaidSyncQueue(
           failedPaidSyncQueueRef.current.filter((entry) => entry.id !== normalizedJobId)
         );
@@ -5299,6 +5580,11 @@ const App: React.FC = () => {
       );
       clearFailedPaidSyncAutoRetryState(normalizedJobId);
       if (recoveryResult.reconciledOnServer) {
+        completePaymentFlowTelemetry(failedJob.draftId, {
+          retries: failedJob.attempts,
+          hadRecovery: true,
+          hadReconciliation: true,
+        });
         showCornerSync('success', 'Pedido já estava resolvido no servidor.', 1800);
         if (!options.silentNotification) {
           showNotification('Pedido já estava resolvido no servidor. Item removido da fila.');
@@ -5308,6 +5594,10 @@ const App: React.FC = () => {
 
       const shouldRequeueAfterRestore = options.requeueAfterRestore !== false;
       if (shouldRequeueAfterRestore) {
+        markPaymentFlowTelemetryProgress(failedJob.draftId, {
+          retries: failedJob.attempts,
+          hadRecovery: true,
+        });
         enqueuePendingPaidSyncJob({
           ...failedJob,
           finalizeCommandId: createClientId('cmd'),
@@ -5335,6 +5625,8 @@ const App: React.FC = () => {
       recoverPendingPaidSyncDraft,
       enqueuePendingPaidSyncJob,
       hydrateFailedPaidSyncQueue,
+      completePaymentFlowTelemetry,
+      markPaymentFlowTelemetryProgress,
       replaceFailedPaidSyncQueue,
       showCornerSync,
       showNotification,
@@ -5407,6 +5699,10 @@ const App: React.FC = () => {
           currentServerDraft &&
           (currentServerDraft.status === 'PAID' || currentServerDraft.status === 'CANCELLED')
         ) {
+          completePaymentFlowTelemetry(currentJob.draftId, {
+            retries: currentJob.attempts,
+            hadReconciliation: true,
+          });
           replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
           setDraftSyncInProgress(currentJob.draftId, false);
           clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
@@ -5491,12 +5787,26 @@ const App: React.FC = () => {
 
             if (recoveryResult.ok) {
               if (recoveryResult.reconciledOnServer) {
+                markPaymentFlowTelemetryProgress(currentJob.draftId, {
+                  retries: currentJob.attempts + 1,
+                  hadRecovery: true,
+                  hadReconciliation: true,
+                });
+                completePaymentFlowTelemetry(currentJob.draftId, {
+                  retries: currentJob.attempts + 1,
+                  hadRecovery: true,
+                  hadReconciliation: true,
+                });
                 replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
                 setDraftSyncInProgress(currentJob.draftId, false);
                 clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
                 showCornerSync('success', 'Pedido já estava resolvido no banco.', 1800);
                 return;
               }
+              markPaymentFlowTelemetryProgress(currentJob.draftId, {
+                retries: currentJob.attempts + 1,
+                hadRecovery: true,
+              });
               scheduleRecoveryRetry(
                 'Draft validado no servidor. Reenfileirando finalização...',
                 recoveryResult.statusCode
@@ -5513,6 +5823,10 @@ const App: React.FC = () => {
             }
 
             if (recoveryResult.retryable ?? true) {
+              markPaymentFlowTelemetryProgress(currentJob.draftId, {
+                retries: currentJob.attempts + 1,
+                hadRecovery: true,
+              });
               scheduleRecoveryRetry(
                 recoveryResult.message || message,
                 recoveryResult.statusCode ?? statusCode
@@ -5541,6 +5855,9 @@ const App: React.FC = () => {
               nextAttemptAt: undefined,
               lastError: statusCode ? `${message} (HTTP ${statusCode})` : message,
             };
+            markPaymentFlowTelemetryProgress(currentJob.draftId, {
+              retries: failedJob.attempts,
+            });
             replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
             enqueueFailedPaidSyncJob(failedJob);
             setDraftSyncInProgress(currentJob.draftId, false);
@@ -5571,6 +5888,9 @@ const App: React.FC = () => {
             nextAttemptAt: retryAt,
             lastError: statusCode ? `${message} (HTTP ${statusCode})` : message,
           };
+          markPaymentFlowTelemetryProgress(currentJob.draftId, {
+            retries: failedJob.attempts,
+          });
           replacePendingPaidSyncQueue([...pendingPaidSyncQueueRef.current.slice(1), failedJob]);
           setDraftSyncInProgress(currentJob.draftId, false);
           showCornerSync('error', 'Banco lento. Pedido movido para o fim da fila.', 1800);
@@ -5630,6 +5950,10 @@ const App: React.FC = () => {
             currentServerDraft &&
             (currentServerDraft.status === 'PAID' || currentServerDraft.status === 'CANCELLED')
           ) {
+            completePaymentFlowTelemetry(currentJob.draftId, {
+              retries: currentJob.attempts,
+              hadReconciliation: true,
+            });
             replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
             setDraftSyncInProgress(currentJob.draftId, false);
             clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
@@ -5655,6 +5979,10 @@ const App: React.FC = () => {
             currentServerDraft &&
             (currentServerDraft.status === 'PAID' || currentServerDraft.status === 'CANCELLED')
           ) {
+            completePaymentFlowTelemetry(currentJob.draftId, {
+              retries: currentJob.attempts,
+              hadReconciliation: true,
+            });
             replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
             setDraftSyncInProgress(currentJob.draftId, false);
             clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
@@ -5709,6 +6037,10 @@ const App: React.FC = () => {
                 latestDraft.status === 'PAID' ||
                 latestDraft.status === 'CANCELLED'
               ) {
+                completePaymentFlowTelemetry(currentJob.draftId, {
+                  retries: currentJob.attempts,
+                  hadReconciliation: true,
+                });
                 replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
                 setDraftSyncInProgress(currentJob.draftId, false);
                 clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
@@ -5874,6 +6206,9 @@ const App: React.FC = () => {
           }
         }
 
+        completePaymentFlowTelemetry(currentJob.draftId, {
+          retries: currentJob.attempts,
+        });
         replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
         setDraftSyncInProgress(currentJob.draftId, false);
         clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
@@ -5913,6 +6248,8 @@ const App: React.FC = () => {
     replacePendingDraftAdds,
     replacePendingPaidSyncQueue,
     recoverPendingPaidSyncDraft,
+    completePaymentFlowTelemetry,
+    markPaymentFlowTelemetryProgress,
     runCommandWithSync,
     setPaidSyncAssistantActivity,
     setDraftSyncInProgress,
@@ -6059,6 +6396,10 @@ const App: React.FC = () => {
 
       const serverDraft = saleDraftsRef.current.find((draft) => draft.id === failedJob.draftId);
       if (serverDraft && (serverDraft.status === 'PAID' || serverDraft.status === 'CANCELLED')) {
+        completePaymentFlowTelemetry(failedJob.draftId, {
+          retries: failedJob.attempts,
+          hadReconciliation: true,
+        });
         replaceFailedPaidSyncQueue(
           failedPaidSyncQueueRef.current.filter((entry) => entry.id !== normalizedJobId)
         );
@@ -6105,6 +6446,11 @@ const App: React.FC = () => {
         }
 
         if (recoveryResult.reconciledOnServer) {
+          completePaymentFlowTelemetry(failedJob.draftId, {
+            retries: failedJob.attempts,
+            hadRecovery: true,
+            hadReconciliation: true,
+          });
           replaceFailedPaidSyncQueue(
             failedPaidSyncQueueRef.current.filter((entry) => entry.id !== normalizedJobId)
           );
@@ -6119,6 +6465,10 @@ const App: React.FC = () => {
       replaceFailedPaidSyncQueue(
         failedPaidSyncQueueRef.current.filter((entry) => entry.id !== normalizedJobId)
       );
+      markPaymentFlowTelemetryProgress(failedJob.draftId, {
+        retries: failedJob.attempts,
+        hadRecovery: isEmptyDraftFailure,
+      });
       enqueuePendingPaidSyncJob({
         ...failedJob,
         finalizeCommandId: createClientId('cmd'),
@@ -6153,9 +6503,11 @@ const App: React.FC = () => {
     },
     [
       clearFailedPaidSyncAutoRetryState,
+      completePaymentFlowTelemetry,
       enqueueRetryDispatchTask,
       enqueuePendingPaidSyncJob,
       hydrateFailedPaidSyncQueue,
+      markPaymentFlowTelemetryProgress,
       processPendingPaidSyncQueue,
       recoverPendingPaidSyncDraft,
       replaceFailedPaidSyncQueue,
@@ -6526,6 +6878,7 @@ const App: React.FC = () => {
     }
 
     const pendingItemsCount = pendingDraftAddsRef.current[draftId]?.length || 0;
+    const paymentClickAtMs = Date.now();
     setIsConfirmingPaid(true);
     void moveVisiblePendingDraftAddsToRecovery(draftId).catch((error) => {
       reportErrorMonitorEvent({
@@ -6547,6 +6900,7 @@ const App: React.FC = () => {
       createdAt: new Date().toISOString(),
       attempts: 0,
     };
+    registerPaymentFlowTelemetryStart(draftId, queuedJob.id, paymentClickAtMs);
 
     setDraftSyncInProgress(draftId, true);
     setIsSaleOriginSetupOpen(false);
@@ -6560,6 +6914,7 @@ const App: React.FC = () => {
     setActiveDraftId(null);
 
     enqueuePendingPaidSyncJob(queuedJob);
+    markPaymentFlowTelemetryLocalPersisted(draftId, queuedJob.id);
     showCornerSync(
       'syncing',
       pendingItemsCount > 0
@@ -7308,6 +7663,7 @@ const App: React.FC = () => {
     ]
   );
   const hasPaidSyncQueueCards = paidSyncQueueCards.length > 0;
+  const latestPaymentFlowTelemetry = paymentFlowTelemetryRecentRef.current[0] || null;
   const cornerSyncToneClass =
     cornerSyncState.status === 'success'
       ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
@@ -7406,6 +7762,25 @@ const App: React.FC = () => {
                 Fila
               </span>
               <span>{paidSyncQueueCards.length}</span>
+            </div>
+            <div className="mt-1 rounded-md border border-slate-200 bg-slate-50 px-1.5 py-1 text-[8px] font-black uppercase tracking-wide text-slate-600">
+              <p className="truncate">
+                Sch {operationalHealthSnapshot.schedulerActive}/{operationalHealthSnapshot.schedulerQueued}{' '}
+                C:{operationalHealthSnapshot.schedulerCriticalQueued} H:{operationalHealthSnapshot.schedulerHighQueued}{' '}
+                N:{operationalHealthSnapshot.schedulerNormalQueued} L:{operationalHealthSnapshot.schedulerLowQueued}
+              </p>
+              <p className="truncate">
+                D:{operationalHealthSnapshot.pendingDraftAdds} P:{operationalHealthSnapshot.pendingPaidQueue} F:{operationalHealthSnapshot.failedQueue}
+              </p>
+              <p className="truncate">
+                BP:{operationalHealthSnapshot.schedulerBackpressureHits} DD:{operationalHealthSnapshot.schedulerDedupeHits}{' '}
+                FS:{operationalHealthSnapshot.failsafeActivations} def:{operationalHealthSnapshot.failsafeDeferredCommands}
+              </p>
+              {latestPaymentFlowTelemetry && (
+                <p className="truncate">
+                  pgto local:{latestPaymentFlowTelemetry.clickToLocalPersistMs ?? '-'}ms conf:{latestPaymentFlowTelemetry.clickToBackendConfirmMs ?? '-'}ms r:{latestPaymentFlowTelemetry.retries}
+                </p>
+              )}
             </div>
             {paidSyncAssistantState.active && (
               <div className="mt-1 flex items-center gap-1 rounded-full border border-sky-200 bg-sky-50 px-1.5 py-0.5 text-[8px] font-black uppercase tracking-wide text-sky-700">
