@@ -158,6 +158,17 @@ const getRetryDelayMs = (attempt: number): number => {
   return Math.max(env.STATE_COMMAND_QUEUE_RETRY_BASE_MS, Math.round(capped * jitterFactor));
 };
 
+const isTerminalPaymentQueueCommand = (commandType: StateCommandInput['type']): boolean =>
+  commandType === 'SALE_DRAFT_CONFIRM_PAID' || commandType === 'SALE_DRAFT_FINALIZE';
+
+const logStateCommandQueuePerf = (event: string, payload: Record<string, unknown>): void => {
+  // eslint-disable-next-line no-console
+  console.info('[state-command-queue-perf]', {
+    event,
+    ...payload,
+  });
+};
+
 export class StateCommandQueueService {
   private readonly stateService = new StateService();
 
@@ -310,12 +321,20 @@ export class StateCommandQueueService {
       maxAttempts: number;
       actorUserId: string | null;
       requestId: string | null;
+      createdAt: Date;
+      nextAttemptAt: Date;
     },
     workerId: string
   ): Promise<void> {
     let needsProcessingFallback = true;
+    const startedAt = Date.now();
+    const queueWaitMs = Math.max(0, startedAt - new Date(job.createdAt).getTime());
+    const parsedCommandType = job.commandType as StateCommandInput['type'];
+    const shouldTrackPerf = isTerminalPaymentQueueCommand(parsedCommandType);
     try {
+      const parseStartedAt = shouldTrackPerf ? Date.now() : 0;
       const parsedCommand = stateCommandSchema.parse(job.payloadJson);
+      const parseMs = shouldTrackPerf ? Date.now() - parseStartedAt : 0;
       if (!parsedCommand.commandId || parsedCommand.commandId !== job.commandId) {
         throw new HttpError(409, 'Payload do job assíncrono está inconsistente com commandId.');
       }
@@ -323,12 +342,15 @@ export class StateCommandQueueService {
         throw new HttpError(422, `Comando ${parsedCommand.type} não suportado pelo worker.`);
       }
 
+      const applyStartedAt = shouldTrackPerf ? Date.now() : 0;
       const snapshot = await this.stateService.applyCommandAgainstLatest(parsedCommand, {
         requestId: job.requestId || `queue-job:${job.id}`,
         origin: 'SYSTEM',
         actorUserId: job.actorUserId || undefined,
       });
+      const applyMs = shouldTrackPerf ? Date.now() - applyStartedAt : 0;
 
+      const completeStartedAt = shouldTrackPerf ? Date.now() : 0;
       await prisma.stateCommandJob.update({
         where: { id: job.id },
         data: {
@@ -340,6 +362,22 @@ export class StateCommandQueueService {
           resultVersion: snapshot.version,
         },
       });
+      const completeMs = shouldTrackPerf ? Date.now() - completeStartedAt : 0;
+      if (shouldTrackPerf) {
+        logStateCommandQueuePerf('job:completed', {
+          jobId: job.id,
+          commandType: parsedCommand.type,
+          commandId: parsedCommand.commandId ?? null,
+          workerId,
+          attempts: job.attempts,
+          queueWaitMs,
+          parseMs,
+          applyMs,
+          completeMs,
+          totalMs: Date.now() - startedAt,
+          resultVersion: snapshot.version,
+        });
+      }
       needsProcessingFallback = false;
     } catch (error) {
       const databaseUnavailable = classifyDatabaseUnavailableError(error);
@@ -350,6 +388,20 @@ export class StateCommandQueueService {
       const retryable = isRetryableWorkerError(error);
       const errorMessage = truncateErrorMessage(normalizeErrorMessage(error));
       const canRetry = retryable && job.attempts < job.maxAttempts;
+      if (shouldTrackPerf) {
+        logStateCommandQueuePerf('job:failed', {
+          jobId: job.id,
+          commandType: job.commandType,
+          commandId: job.commandId,
+          workerId,
+          attempts: job.attempts,
+          queueWaitMs,
+          retryable,
+          canRetry,
+          totalMs: Date.now() - startedAt,
+          error: errorMessage,
+        });
+      }
 
       if (canRetry) {
         const retryAt = new Date(Date.now() + getRetryDelayMs(job.attempts));

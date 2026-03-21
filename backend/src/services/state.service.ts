@@ -112,6 +112,20 @@ const getApplyCommandLatestRetryDelayMs = (attempt: number): number => {
   return Math.min(APPLY_COMMAND_LATEST_RETRY_MAX_DELAY_MS, exponential);
 };
 
+const isTerminalPaymentCommand = (command: StateCommandInput): boolean =>
+  command.type === 'SALE_DRAFT_FINALIZE' || command.type === 'SALE_DRAFT_CONFIRM_PAID';
+
+const logStateServicePerf = (
+  event: string,
+  payload: Record<string, unknown>
+): void => {
+  // eslint-disable-next-line no-console
+  console.info('[state-service-perf]', {
+    event,
+    ...payload,
+  });
+};
+
 interface HotStatePatch {
   ingredients: FrontAppState['ingredients'];
   products: FrontAppState['products'];
@@ -241,11 +255,27 @@ export class StateService {
     command: StateCommandInput,
     context?: RequestContext
   ): Promise<AppStateSnapshot> {
+    const shouldTrackPerf = isTerminalPaymentCommand(command);
+    const startedAt = shouldTrackPerf ? Date.now() : 0;
+    let conflictRetries = 0;
     for (let attempt = 0; attempt < APPLY_COMMAND_LATEST_MAX_ATTEMPTS; attempt += 1) {
+      const attemptStartedAt = shouldTrackPerf ? Date.now() : 0;
       const currentVersion = await this.getAppStateVersion();
 
       try {
-        return await this.applyCommand(command, currentVersion, context);
+        const snapshot = await this.applyCommand(command, currentVersion, context);
+        if (shouldTrackPerf) {
+          logStateServicePerf('apply-command-against-latest:success', {
+            commandType: command.type,
+            commandId: command.commandId ?? null,
+            attempts: attempt + 1,
+            conflictRetries,
+            attemptMs: Date.now() - attemptStartedAt,
+            totalMs: Date.now() - startedAt,
+            resolvedVersion: snapshot.version,
+          });
+        }
+        return snapshot;
       } catch (error) {
         const isVersionConflict =
           error instanceof HttpError &&
@@ -253,9 +283,21 @@ export class StateService {
 
         const isLastAttempt = attempt >= APPLY_COMMAND_LATEST_MAX_ATTEMPTS - 1;
         if (!isVersionConflict || isLastAttempt) {
+          if (shouldTrackPerf) {
+            logStateServicePerf('apply-command-against-latest:failed', {
+              commandType: command.type,
+              commandId: command.commandId ?? null,
+              attempts: attempt + 1,
+              conflictRetries,
+              isVersionConflict,
+              totalMs: Date.now() - startedAt,
+              message: error instanceof Error ? error.message : String(error),
+            });
+          }
           throw error;
         }
 
+        conflictRetries += 1;
         await wait(getApplyCommandLatestRetryDelayMs(attempt));
       }
     }
@@ -525,20 +567,30 @@ export class StateService {
     expectedVersion: string,
     context?: RequestContext
   ): Promise<AppStateSnapshot> {
+    const shouldTrackPerf = isTerminalPaymentCommand(command);
+    const startedAt = shouldTrackPerf ? Date.now() : 0;
     const committed = await this.runStateTransaction(async (tx: Prisma.TransactionClient) => {
+      const readStateStartedAt = shouldTrackPerf ? Date.now() : 0;
       const current = await tx.appState.findUnique({ where: { id: 1 } });
+      const readStateMs = shouldTrackPerf ? Date.now() - readStateStartedAt : 0;
       const currentVersion = current ? toVersionTag(current.updatedAt) : null;
       const operationNow = new Date();
       this.assertExpectedVersion(expectedVersion, currentVersion);
 
+      const applyStartedAt = shouldTrackPerf ? Date.now() : 0;
       const currentState = current
         ? normalizeStatePayloadSafe(current.stateJson)
         : normalizeStatePayloadSafe({});
       const nextState = applyStateCommand(currentState, command, { mutateInPlace: true });
+      const applyCommandMs = shouldTrackPerf ? Date.now() - applyStartedAt : 0;
+      const nextStateSizeBytes = shouldTrackPerf
+        ? JSON.stringify(nextState).length
+        : 0;
 
       // Commands that do not touch historical/global collections update only "hot" keys.
       // This preserves full history while avoiding heavy JSON writes on frequent cart operations.
       const shouldUpdateArchive = commandTouchesArchiveState(command.type);
+      const persistStartedAt = shouldTrackPerf ? Date.now() : 0;
       const saved: PersistedStateRow = current
         ? shouldUpdateArchive
           ? await tx.appState.update({
@@ -554,8 +606,10 @@ export class StateService {
               stateJson: nextState as unknown as Prisma.InputJsonValue,
             },
           });
+      const persistMs = shouldTrackPerf ? Date.now() - persistStartedAt : 0;
       const savedVersion = toVersionTag(saved.updatedAt);
 
+      const auditStartedAt = shouldTrackPerf ? Date.now() : 0;
       await new AuditService(tx).log(
         {
           entityName: 'app_state',
@@ -568,6 +622,24 @@ export class StateService {
         },
         context
       );
+      const auditMs = shouldTrackPerf ? Date.now() - auditStartedAt : 0;
+
+      if (shouldTrackPerf) {
+        logStateServicePerf('apply-command-snapshot:tx', {
+          commandType: command.type,
+          commandId: command.commandId ?? null,
+          requestId: context?.requestId || null,
+          shouldUpdateArchive,
+          readStateMs,
+          applyCommandMs,
+          persistMs,
+          auditMs,
+          txTotalMs: readStateMs + applyCommandMs + persistMs + auditMs,
+          nextStateSizeBytes,
+          versionBefore: currentVersion,
+          versionAfter: savedVersion,
+        });
+      }
 
       return {
         stateJson: saved.stateJson as Prisma.JsonValue,
@@ -582,6 +654,16 @@ export class StateService {
       committed.version,
       committed.operationNow
     );
+
+    if (shouldTrackPerf) {
+      logStateServicePerf('apply-command-snapshot:done', {
+        commandType: command.type,
+        commandId: command.commandId ?? null,
+        requestId: context?.requestId || null,
+        totalMs: Date.now() - startedAt,
+        version: committed.version,
+      });
+    }
 
     return {
       state: committed.state,

@@ -24,6 +24,18 @@ import { HttpError } from '../utils/http-error.js';
 const createId = (prefix: string): string =>
   `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
+const logStateCommandPerf = (
+  commandType: 'SALE_DRAFT_FINALIZE' | 'SALE_DRAFT_CONFIRM_PAID',
+  payload: Record<string, unknown>
+): void => {
+  // Keep perf logs explicit for terminal payment flow diagnostics in production.
+  // eslint-disable-next-line no-console
+  console.info('[state-command-perf]', {
+    commandType,
+    ...payload,
+  });
+};
+
 const toTimestampIso = (value?: Date | string): string => {
   const date = value ? new Date(value) : new Date();
   if (Number.isNaN(date.getTime())) {
@@ -884,8 +896,14 @@ const applySaleDraftFinalize = (
   state: FrontAppState,
   command: Extract<StateCommandInput, { type: 'SALE_DRAFT_FINALIZE' }>
 ) => {
+  const startedAt = Date.now();
   const draft = requireSaleDraft(state, command.draftId);
   if (draft.status === 'PAID') {
+    logStateCommandPerf('SALE_DRAFT_FINALIZE', {
+      draftId: command.draftId,
+      status: 'already_paid_noop',
+      totalMs: Date.now() - startedAt,
+    });
     return;
   }
   ensureDraftStatus(draft, ['DRAFT', 'PENDING_PAYMENT'], 'Não é possível finalizar esta venda.');
@@ -921,12 +939,21 @@ const applySaleDraftFinalize = (
   );
   draft.status = 'PENDING_PAYMENT';
   draft.updatedAt = toTimestampIso();
+  logStateCommandPerf('SALE_DRAFT_FINALIZE', {
+    draftId: command.draftId,
+    itemsCount: draft.items.length,
+    saleOrigin,
+    paymentMethod: command.paymentMethod,
+    totalMs: Date.now() - startedAt,
+  });
 };
 
 const applySaleDraftConfirmPaid = (
   state: FrontAppState,
   command: Extract<StateCommandInput, { type: 'SALE_DRAFT_CONFIRM_PAID' }>
 ) => {
+  const startedAt = Date.now();
+  const validationStartedAt = Date.now();
   const draft = requireSaleDraft(state, command.draftId);
 
   if (draft.status === 'PAID' || draft.stockDebited) {
@@ -995,6 +1022,7 @@ const applySaleDraftConfirmPaid = (
     draft.payment.splitCount = null;
     draft.payment.splitPayments = [];
   }
+  const validationMs = Date.now() - validationStartedAt;
 
   type PlannedDraftSale = {
     saleId: string;
@@ -1011,6 +1039,7 @@ const applySaleDraftConfirmPaid = (
 
   const plannedSales: PlannedDraftSale[] = [];
   const consumptionByIngredient = new Map<string, number>();
+  const planningStartedAt = Date.now();
 
   draft.items.forEach((item) => {
     const quantity = Math.max(1, item.qty);
@@ -1053,7 +1082,9 @@ const applySaleDraftConfirmPaid = (
       baseCost,
     });
   });
+  const planningMs = Date.now() - planningStartedAt;
 
+  const stockCheckStartedAt = Date.now();
   for (const [ingredientId, neededStock] of consumptionByIngredient.entries()) {
     const ingredient = requireIngredient(state, ingredientId);
     if (ingredient.currentStock + Number.EPSILON < neededStock) {
@@ -1064,6 +1095,7 @@ const applySaleDraftConfirmPaid = (
       });
     }
   }
+  const stockCheckMs = Date.now() - stockCheckStartedAt;
 
   if (draft.appOrderTotal !== null) {
     const allocatedTotals = allocateOrderTotalByWeight(
@@ -1089,6 +1121,7 @@ const applySaleDraftConfirmPaid = (
     splitPayments: (draft.payment.splitPayments || []).map((entry) => ({ ...entry })),
   };
 
+  const mutationStartedAt = Date.now();
   plannedSales.forEach((plan) => {
     Object.entries(plan.stockTotals).forEach(([ingredientId, recipeQuantity]) => {
       const ingredient = requireIngredient(state, ingredientId);
@@ -1140,6 +1173,20 @@ const applySaleDraftConfirmPaid = (
   draft.stockDebited = true;
   draft.payment.confirmedAt = timestamp;
   draft.updatedAt = timestamp;
+  const mutationMs = Date.now() - mutationStartedAt;
+  logStateCommandPerf('SALE_DRAFT_CONFIRM_PAID', {
+    draftId: command.draftId,
+    itemsCount: draft.items.length,
+    plannedSales: plannedSales.length,
+    ingredientsTouched: consumptionByIngredient.size,
+    saleOrigin,
+    paymentMethod,
+    validationMs,
+    planningMs,
+    stockCheckMs,
+    mutationMs,
+    totalMs: Date.now() - startedAt,
+  });
 };
 
 const applySaleDraftCancel = (
