@@ -1206,6 +1206,14 @@ const isFinalizeStateConflictErrorMessage = (message: string): boolean => {
   return normalized.includes('nao e possivel finalizar esta venda');
 };
 
+const isConfirmPendingFinalizeRaceErrorMessage = (message: string): boolean => {
+  const normalized = message
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+  return normalized.includes('venda ainda nao foi finalizada para pagamento');
+};
+
 const isDatabaseUnavailableErrorMessage = (message: string): boolean => {
   const normalized = message
     .normalize('NFD')
@@ -8500,8 +8508,138 @@ const App: React.FC = () => {
               }
             );
             if (!confirmed) {
-              await markJobAsFailed('Falha ao confirmar pagamento.', confirmErrorSink);
-              return;
+              const confirmMessage = confirmErrorSink.message || 'Falha ao confirmar pagamento.';
+              const isConfirmBeforeFinalizeConflict =
+                confirmErrorSink.statusCode === 409 &&
+                isConfirmPendingFinalizeRaceErrorMessage(confirmMessage);
+
+              if (!isConfirmBeforeFinalizeConflict) {
+                await markJobAsFailed('Falha ao confirmar pagamento.', confirmErrorSink);
+                return;
+              }
+
+              pushOperationalEvent(
+                'QUEUE_HEALTH',
+                'Conflito finalize/confirm detectado. Tentando refresh + refinalização antes de falhar.',
+                {
+                  draftId: currentJob.draftId,
+                  jobId: currentJob.id,
+                  statusCode: confirmErrorSink.statusCode,
+                  message: confirmMessage,
+                }
+              );
+
+              let refreshedStateAfterConflict = false;
+              try {
+                const stateRefreshStartedAt = performance.now();
+                const refreshedState = await fetchStateSnapshotControlled(currentJob.draftId);
+                applySnapshotForCurrentJob(
+                  refreshedState,
+                  'pending_paid_refresh_confirm_finalize_conflict'
+                );
+                recordStateRefreshMs(performance.now() - stateRefreshStartedAt);
+                refreshedStateAfterConflict = true;
+              } catch {
+                // best effort: fallback to local snapshot if refresh fails
+              }
+
+              const latestDraftAfterConflict = saleDraftsRef.current.find(
+                (entry) => entry.id === currentJob.draftId
+              );
+              if (
+                latestDraftAfterConflict &&
+                (latestDraftAfterConflict.status === 'PAID' ||
+                  latestDraftAfterConflict.status === 'CANCELLED')
+              ) {
+                setDraftLifecycleStage(
+                  currentJob.draftId,
+                  latestDraftAfterConflict.status === 'CANCELLED' ? 'CANCELLED' : 'PAID',
+                  {
+                    reason: 'confirm_conflict_reconciled_terminal',
+                    bumpEpoch: false,
+                  }
+                );
+                completePaymentFlowTelemetry(currentJob.draftId, {
+                  retries: currentJob.attempts,
+                  hadReconciliation: true,
+                });
+                setDraftSyncInProgress(currentJob.draftId, false);
+                cleanupDraftOperationalArtifacts(currentJob.draftId);
+                clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
+                showCornerSync('success', 'Pedido já estava concluído no banco.', 1800);
+                return;
+              }
+
+              let refinalized = latestDraftAfterConflict?.status === 'PENDING_PAYMENT';
+              if (!refinalized) {
+                const refinalizeErrorSink: RunCommandErrorSink = {};
+                const refinalizeStartedAt = performance.now();
+                try {
+                  refinalized = await handleSavePaymentMethod(currentJob.snapshot, {
+                    trackPendingState: false,
+                    silentSavedNotification: true,
+                    silentErrorNotification: true,
+                    errorSink: refinalizeErrorSink,
+                    preferAsyncFinalize: false,
+                    failFastOnVersionConflict: false,
+                    skipSnapshotApplyOnTerminalFlow: true,
+                    onSnapshotAppliedMs: recordSnapshotApplyMs,
+                  });
+                } finally {
+                  markPaymentFlowTelemetryStageDuration(
+                    currentJob.draftId,
+                    currentJob.id,
+                    'finalizeMs',
+                    performance.now() - refinalizeStartedAt
+                  );
+                }
+
+                if (!refinalized) {
+                  await markJobAsFailed(
+                    refreshedStateAfterConflict
+                      ? 'Conflito entre finalização e confirmação. Reagendando tentativa.'
+                      : 'Conflito entre finalização e confirmação.',
+                    {
+                      ...confirmErrorSink,
+                      retryable: true,
+                    }
+                  );
+                  return;
+                }
+
+                setDraftLifecycleStage(currentJob.draftId, 'PENDING_CONFIRM', {
+                  reason: 'confirm_retry_after_refinalize',
+                  bumpEpoch: false,
+                });
+              }
+
+              const retryConfirmErrorSink: RunCommandErrorSink = {};
+              const retriedConfirm = await runCommandWithSync(
+                confirmCommand,
+                undefined,
+                {
+                  trackPendingState: false,
+                  silentSuccessNotification: true,
+                  silentErrorNotification: true,
+                  errorSink: retryConfirmErrorSink,
+                  failFastOnVersionConflict: false,
+                  bypassGlobalCommandQueue: true,
+                  onSnapshotAppliedMs: recordSnapshotApplyMs,
+                }
+              );
+
+              if (!retriedConfirm) {
+                await markJobAsFailed('Falha ao confirmar pagamento.', {
+                  ...retryConfirmErrorSink,
+                  retryable:
+                    retryConfirmErrorSink.retryable ??
+                    (retryConfirmErrorSink.statusCode === 409 &&
+                      isConfirmPendingFinalizeRaceErrorMessage(
+                        retryConfirmErrorSink.message || ''
+                      )),
+                });
+                return;
+              }
             }
           } else {
             let asyncJobId: string | null = null;
