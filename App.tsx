@@ -7200,6 +7200,7 @@ const App: React.FC = () => {
     const executeFinalizeCommand = async (): Promise<boolean> => {
       if (!options.preferAsyncFinalize) {
         return runCommandWithSync(finalizeCommand, undefined, {
+          skipOfflineQueue: shouldBypassFinalizeGlobalQueue,
           silentSuccessNotification: true,
           silentErrorNotification: options.silentErrorNotification,
           errorSink: options.errorSink,
@@ -7231,6 +7232,7 @@ const App: React.FC = () => {
 
         if (shouldFallbackToSync) {
           return runCommandWithSync(asyncFinalizeCommand, undefined, {
+            skipOfflineQueue: shouldBypassFinalizeGlobalQueue,
             silentSuccessNotification: true,
             silentErrorNotification: options.silentErrorNotification,
             errorSink: options.errorSink,
@@ -8490,6 +8492,7 @@ const App: React.FC = () => {
               confirmCommand,
               undefined,
               {
+                skipOfflineQueue: true,
                 trackPendingState: false,
                 silentSuccessNotification: true,
                 silentErrorNotification: true,
@@ -8523,6 +8526,7 @@ const App: React.FC = () => {
                   confirmCommand,
                   undefined,
                   {
+                    skipOfflineQueue: true,
                     trackPendingState: false,
                     silentSuccessNotification: true,
                     silentErrorNotification: true,
@@ -8574,6 +8578,7 @@ const App: React.FC = () => {
                   confirmCommand,
                   undefined,
                   {
+                    skipOfflineQueue: true,
                     trackPendingState: false,
                     silentSuccessNotification: true,
                     silentErrorNotification: true,
@@ -8599,6 +8604,7 @@ const App: React.FC = () => {
                   confirmCommand,
                   undefined,
                   {
+                    skipOfflineQueue: true,
                     trackPendingState: false,
                     silentSuccessNotification: true,
                     silentErrorNotification: true,
