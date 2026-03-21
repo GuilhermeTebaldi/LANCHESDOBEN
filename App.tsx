@@ -7832,8 +7832,12 @@ const App: React.FC = () => {
           const nextAttempts = currentJob.attempts + 1;
           const retryDelayMs = getPendingPaidSyncRetryDelayMs(nextAttempts);
           const retryAt = new Date(Date.now() + retryDelayMs).toISOString();
+          const nextFinalizeCommandId = createClientId('cmd');
+          const nextConfirmCommandId = createClientId('cmd');
           const failedJob: PendingPaidSyncJob = {
             ...currentJob,
+            finalizeCommandId: nextFinalizeCommandId,
+            confirmCommandId: nextConfirmCommandId,
             attempts: nextAttempts,
             nextAttemptAt: retryAt,
             lastError: statusCode ? `${message} (HTTP ${statusCode})` : message,
@@ -7841,6 +7845,19 @@ const App: React.FC = () => {
           markPaymentFlowTelemetryProgress(currentJob.draftId, {
             retries: failedJob.attempts,
           });
+          pushOperationalEvent(
+            'QUEUE_HEALTH',
+            'Pedido reagendado com novos commandIds para evitar retry preso por dedupe.',
+            {
+              draftId: currentJob.draftId,
+              previousFinalizeCommandId: currentJob.finalizeCommandId,
+              previousConfirmCommandId: currentJob.confirmCommandId,
+              nextFinalizeCommandId,
+              nextConfirmCommandId,
+              attempts: failedJob.attempts,
+              retryAt,
+            }
+          );
           replacePendingPaidSyncQueue([...pendingPaidSyncQueueRef.current.slice(1), failedJob]);
           setDraftSyncInProgress(currentJob.draftId, false);
           showCornerSync('error', 'Banco lento. Pedido movido para o fim da fila.', 1800);
