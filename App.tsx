@@ -119,6 +119,18 @@ interface PendingDraftAdd {
   queuedAt: string;
 }
 
+interface PendingDraftAddCancellationIntent {
+  draftId: string;
+  localItemId: string;
+  commandId: string;
+  productId: string;
+  quantity: number;
+  recipeSignature: string;
+  noteNormalized: string;
+  unitPriceSnapshot: number;
+  cancelledAt: string;
+}
+
 type PendingDraftAddsByDraftId = Record<string, PendingDraftAdd[]>;
 type PendingDraftAddsSource = 'visible' | 'recovery';
 
@@ -229,7 +241,10 @@ interface OperationalEventLogEntry {
     | 'FAILSAFE_CLEARED'
     | 'BACKPRESSURE'
     | 'PAYMENT_FLOW'
-    | 'COMMAND_SKIPPED_OBSOLETE';
+    | 'COMMAND_SKIPPED_OBSOLETE'
+    | 'CART_REMOVE_LOCAL_PENDING'
+    | 'CART_REMOVE_REMOTE'
+    | 'PENDING_ADD_CANCELLED';
   message: string;
   timestamp: string;
   context?: Record<string, unknown>;
@@ -633,6 +648,15 @@ const createClientId = (prefix: string): string => {
 
 const isLocalPendingDraftItemId = (itemId: string): boolean =>
   typeof itemId === 'string' && itemId.startsWith('draft-item-local-');
+
+const buildPendingDraftAddRuntimeKey = (draftId: string, localItemId: string): string =>
+  `${draftId.trim()}::${localItemId.trim()}`;
+
+const normalizeDraftItemNoteForMatch = (note: string | undefined): string =>
+  typeof note === 'string' ? note.trim() : '';
+
+const areDraftItemUnitPricesEquivalent = (left: number, right: number): boolean =>
+  Math.abs(left - right) <= 0.009;
 
 const isSaleRegisterCommand = (command: StateCommand): command is SaleRegisterCommand =>
   command.type === 'SALE_REGISTER';
@@ -1640,7 +1664,10 @@ const normalizeOperationalEventLogEntry = (value: unknown): OperationalEventLogE
     typeCandidate === 'FAILSAFE_CLEARED' ||
     typeCandidate === 'BACKPRESSURE' ||
     typeCandidate === 'PAYMENT_FLOW' ||
-    typeCandidate === 'COMMAND_SKIPPED_OBSOLETE';
+    typeCandidate === 'COMMAND_SKIPPED_OBSOLETE' ||
+    typeCandidate === 'CART_REMOVE_LOCAL_PENDING' ||
+    typeCandidate === 'CART_REMOVE_REMOTE' ||
+    typeCandidate === 'PENDING_ADD_CANCELLED';
   if (!isSupportedType) return null;
   const message = typeof source.message === 'string' ? source.message.trim() : '';
   if (!message) return null;
@@ -1789,6 +1816,24 @@ const ENABLE_COMMAND_SCHEDULER =
   rawCommandSchedulerFlag === undefined
     ? true
     : !['0', 'false', 'off', 'no'].includes(rawCommandSchedulerFlag.trim().toLowerCase());
+const rawAutoReenqueuePendingPaymentFlag = (
+  import.meta as ImportMeta & { env?: Record<string, string | undefined> }
+).env?.VITE_ENABLE_AUTO_REENQUEUE_PENDING_PAYMENT;
+const ENABLE_AUTO_REENQUEUE_PENDING_PAYMENT =
+  rawAutoReenqueuePendingPaymentFlag === undefined
+    ? true
+    : !['0', 'false', 'off', 'no'].includes(
+        rawAutoReenqueuePendingPaymentFlag.trim().toLowerCase()
+      );
+const rawPendingPaidSyncIntervalWakeupFlag = (
+  import.meta as ImportMeta & { env?: Record<string, string | undefined> }
+).env?.VITE_ENABLE_PENDING_PAID_SYNC_INTERVAL_WAKEUP;
+const ENABLE_PENDING_PAID_SYNC_INTERVAL_WAKEUP =
+  rawPendingPaidSyncIntervalWakeupFlag === undefined
+    ? false
+    : !['0', 'false', 'off', 'no'].includes(
+        rawPendingPaidSyncIntervalWakeupFlag.trim().toLowerCase()
+      );
 
 const getLowerPriority = (priority: CommandPriority): CommandPriority => {
   if (priority === 'CRITICAL') return 'CRITICAL';
@@ -1935,6 +1980,10 @@ const App: React.FC = () => {
   const pendingPaidSyncQueueRef = useRef<PendingPaidSyncJob[]>([]);
   const failedPaidSyncQueueRef = useRef<PendingPaidSyncJob[]>([]);
   const pendingDraftAddsRef = useRef<PendingDraftAddsByDraftId>({});
+  const pendingDraftAddCancellationIntentsRef = useRef<
+    Map<string, PendingDraftAddCancellationIntent>
+  >(new Map());
+  const pendingDraftAddsInFlightRef = useRef<Map<string, PendingDraftAdd>>(new Map());
   const recoveryPendingDraftAddsRef = useRef<PendingDraftAddsByDraftId>({});
   const syncingPaidDraftIdsRef = useRef<Set<string>>(new Set());
   const isPendingDraftAddsHydratedRef = useRef(false);
@@ -1980,6 +2029,8 @@ const App: React.FC = () => {
   const paymentFlowTelemetryByDraftRef = useRef<Map<string, PaymentFlowTelemetryEntry>>(new Map());
   const paymentFlowTelemetryRecentRef = useRef<PaymentFlowTelemetryRecord[]>([]);
   const operationalEventLogRef = useRef<OperationalEventLogEntry[]>([]);
+  const optimisticRemovedDraftItemsRef = useRef<Map<string, Set<string>>>(new Map());
+  const draftItemRemoteMutationRetryAttemptsRef = useRef<Map<string, number>>(new Map());
   const lastOperationalHealthReportAtRef = useRef(0);
 
   if (!backendCommandSchedulerRef.current) {
@@ -2064,6 +2115,7 @@ const App: React.FC = () => {
   const [paymentFlowTelemetryHistory, setPaymentFlowTelemetryHistory] =
     useState<PaymentFlowTelemetryRecord[]>([]);
   const [operationalEventLog, setOperationalEventLog] = useState<OperationalEventLogEntry[]>([]);
+  const [optimisticRemovedDraftItemsRevision, setOptimisticRemovedDraftItemsRevision] = useState(0);
   const [isTechnicalPanelOpen, setIsTechnicalPanelOpen] = useState(false);
   
   const [isAddProductModalOpen, setIsAddProductModalOpen] = useState(false);
@@ -3182,6 +3234,10 @@ const App: React.FC = () => {
       pendingDraftBackgroundSyncTimerRef.current.clear();
       pendingDraftBackgroundRetryAttemptsRef.current.clear();
       pendingDraftBackgroundSyncRunningRef.current.clear();
+      pendingDraftAddCancellationIntentsRef.current.clear();
+      pendingDraftAddsInFlightRef.current.clear();
+      optimisticRemovedDraftItemsRef.current.clear();
+      draftItemRemoteMutationRetryAttemptsRef.current.clear();
       pendingDraftFlushQueueRef.current.clear();
       retryDispatchTimersRef.current.forEach((timerId) => {
         window.clearTimeout(timerId);
@@ -3939,8 +3995,20 @@ const App: React.FC = () => {
       });
 
     const mergeDraft = (draft: SaleDraft, pendingAdds: PendingDraftAdd[]): SaleDraft => {
-      if (!pendingAdds || pendingAdds.length === 0) return draft;
+      const optimisticRemovedItems = optimisticRemovedDraftItemsRef.current.get(draft.id);
+      const baseItems =
+        optimisticRemovedItems && optimisticRemovedItems.size > 0
+          ? draft.items.filter((item) => !optimisticRemovedItems.has(item.id))
+          : draft.items;
+
+      if ((!pendingAdds || pendingAdds.length === 0) && baseItems === draft.items) return draft;
       const pendingItems = buildPendingItems(pendingAdds);
+      const serverTotal = roundMoney(
+        baseItems.reduce(
+          (sum, item) => sum + (Number(item.unitPriceSnapshot) || 0) * (Number(item.qty) || 0),
+          0
+        )
+      );
       const pendingTotal = roundMoney(
         pendingItems.reduce(
           (sum, item) => sum + (Number(item.unitPriceSnapshot) || 0) * (Number(item.qty) || 0),
@@ -3950,8 +4018,8 @@ const App: React.FC = () => {
 
       return {
         ...draft,
-        items: [...draft.items, ...pendingItems],
-        total: roundMoney(draft.total + pendingTotal),
+        items: [...baseItems, ...pendingItems],
+        total: roundMoney(serverTotal + pendingTotal),
       };
     };
 
@@ -4013,7 +4081,15 @@ const App: React.FC = () => {
       });
 
     return [...mergedServerDrafts, ...pendingOnlyDrafts];
-  }, [globalCancelledSales, globalSales, pendingDraftAddsByDraft, products, saleDrafts, sales]);
+  }, [
+    globalCancelledSales,
+    globalSales,
+    optimisticRemovedDraftItemsRevision,
+    pendingDraftAddsByDraft,
+    products,
+    saleDrafts,
+    sales,
+  ]);
 
   const reservedDraftStockByIngredient = useMemo(() => {
     const reservedByIngredient = new Map<string, number>();
@@ -4169,6 +4245,38 @@ const App: React.FC = () => {
   }, [activeDraftId]);
   useEffect(() => {
     saleDraftsRef.current = saleDrafts;
+  }, [saleDrafts]);
+  useEffect(() => {
+    const currentMap = optimisticRemovedDraftItemsRef.current;
+    if (currentMap.size === 0) return;
+
+    let changed = false;
+    const nextMap = new Map<string, Set<string>>();
+    currentMap.forEach((itemIds, draftId) => {
+      const draft = saleDrafts.find((entry) => entry.id === draftId) || null;
+      if (!draft) {
+        changed = true;
+        return;
+      }
+      const existingItemIds = new Set(draft.items.map((item) => item.id));
+      const nextSet = new Set<string>();
+      itemIds.forEach((itemId) => {
+        if (existingItemIds.has(itemId)) {
+          nextSet.add(itemId);
+          return;
+        }
+        changed = true;
+      });
+      if (nextSet.size > 0) {
+        nextMap.set(draftId, nextSet);
+      } else if (itemIds.size > 0) {
+        changed = true;
+      }
+    });
+
+    if (!changed) return;
+    optimisticRemovedDraftItemsRef.current = nextMap;
+    setOptimisticRemovedDraftItemsRevision((current) => current + 1);
   }, [saleDrafts]);
   const activeDraft = useMemo(() => {
     if (activeDraftId) {
@@ -4483,6 +4591,335 @@ const App: React.FC = () => {
     [updatePendingDraftAddsForDraft]
   );
 
+  const setDraftItemOptimisticRemoval = useCallback(
+    (draftId: string, itemId: string, isActive: boolean): void => {
+      const normalizedDraftId = draftId.trim();
+      const normalizedItemId = itemId.trim();
+      if (!normalizedDraftId || !normalizedItemId) return;
+
+      const currentMap = optimisticRemovedDraftItemsRef.current;
+      const currentSet = currentMap.get(normalizedDraftId);
+
+      if (isActive) {
+        if (currentSet?.has(normalizedItemId)) return;
+        const nextMap = new Map(currentMap);
+        const nextSet = new Set(currentSet || []);
+        nextSet.add(normalizedItemId);
+        nextMap.set(normalizedDraftId, nextSet);
+        optimisticRemovedDraftItemsRef.current = nextMap;
+        setOptimisticRemovedDraftItemsRevision((current) => current + 1);
+        return;
+      }
+
+      if (!currentSet?.has(normalizedItemId)) return;
+      const nextMap = new Map(currentMap);
+      const nextSet = new Set(currentSet);
+      nextSet.delete(normalizedItemId);
+      if (nextSet.size === 0) {
+        nextMap.delete(normalizedDraftId);
+      } else {
+        nextMap.set(normalizedDraftId, nextSet);
+      }
+      optimisticRemovedDraftItemsRef.current = nextMap;
+      setOptimisticRemovedDraftItemsRevision((current) => current + 1);
+    },
+    []
+  );
+
+  const findServerDraftItemMatchingPendingIntent = useCallback(
+    (intent: PendingDraftAddCancellationIntent): SaleDraft['items'][number] | null => {
+      const draft = saleDraftsRef.current.find((entry) => entry.id === intent.draftId) || null;
+      if (!draft || !Array.isArray(draft.items) || draft.items.length === 0) return null;
+      const recipeSignature = intent.recipeSignature;
+      const noteNormalized = intent.noteNormalized;
+      const candidates = draft.items.filter((item) => {
+        if (item.productId !== intent.productId) return false;
+        if (normalizeDraftItemNoteForMatch(item.note) !== noteNormalized) return false;
+        return normalizeRecipeSignature(item.recipe) === recipeSignature;
+      });
+      if (candidates.length === 0) return null;
+      const exactByPrice = candidates.find((item) => {
+        const priceRaw = Number(item.unitPriceSnapshot);
+        const itemPrice = Number.isFinite(priceRaw) ? roundMoney(priceRaw) : 0;
+        return areDraftItemUnitPricesEquivalent(itemPrice, intent.unitPriceSnapshot);
+      });
+      return exactByPrice || candidates[0];
+    },
+    []
+  );
+
+  const runDraftItemRemoteMutation = useCallback(
+    async (params: {
+      draftId: string;
+      itemId: string;
+      targetQty: number;
+      source: 'manual' | 'cancelled_pending_add';
+      optimisticHide?: boolean;
+      silentTerminalErrorNotification?: boolean;
+    }): Promise<boolean> => {
+      const normalizedDraftId = params.draftId.trim();
+      const normalizedItemId = params.itemId.trim();
+      if (!normalizedDraftId || !normalizedItemId) return false;
+
+      const normalizedTargetQty = Math.max(0, Math.round(params.targetQty));
+      const mutationType =
+        normalizedTargetQty <= 0 ? 'SALE_DRAFT_REMOVE_ITEM' : 'SALE_DRAFT_UPDATE_ITEM';
+      const retryKey =
+        normalizedTargetQty <= 0
+          ? `draft-item-remove:${normalizedDraftId}:${normalizedItemId}`
+          : `draft-item-update:${normalizedDraftId}:${normalizedItemId}:${normalizedTargetQty}`;
+      const shouldHideOptimistically =
+        params.optimisticHide === true && normalizedTargetQty <= 0;
+
+      if (shouldHideOptimistically) {
+        setDraftItemOptimisticRemoval(normalizedDraftId, normalizedItemId, true);
+      }
+
+      const executeAttempt = async (): Promise<{
+        ok: boolean;
+        retryable: boolean;
+        message?: string;
+        statusCode?: number;
+      }> => {
+        const command: StateCommand =
+          normalizedTargetQty <= 0
+            ? {
+                type: 'SALE_DRAFT_REMOVE_ITEM',
+                draftId: normalizedDraftId,
+                itemId: normalizedItemId,
+              }
+            : {
+                type: 'SALE_DRAFT_UPDATE_ITEM',
+                draftId: normalizedDraftId,
+                itemId: normalizedItemId,
+                quantity: normalizedTargetQty,
+              };
+        const errorSink: RunCommandErrorSink = {};
+        const ok = await runCommandWithSync(command, undefined, {
+          silentSuccessNotification: true,
+          silentErrorNotification: true,
+          trackPendingState: false,
+          errorSink,
+        });
+        return {
+          ok,
+          retryable: errorSink.retryable ?? true,
+          message: errorSink.message,
+          statusCode: errorSink.statusCode,
+        };
+      };
+
+      const settleSuccess = (stage: string): void => {
+        draftItemRemoteMutationRetryAttemptsRef.current.delete(retryKey);
+        setDraftItemOptimisticRemoval(normalizedDraftId, normalizedItemId, false);
+        pushOperationalEvent('CART_REMOVE_REMOTE', 'Remoção remota concluída.', {
+          draftId: normalizedDraftId,
+          itemId: normalizedItemId,
+          commandType: mutationType,
+          source: params.source,
+          stage,
+        });
+      };
+
+      const settleTerminalFailure = (
+        outcome: { message?: string; statusCode?: number },
+        stage: string
+      ): void => {
+        draftItemRemoteMutationRetryAttemptsRef.current.delete(retryKey);
+        setDraftItemOptimisticRemoval(normalizedDraftId, normalizedItemId, false);
+        pushOperationalEvent('CART_REMOVE_REMOTE', 'Remoção remota falhou de forma terminal.', {
+          draftId: normalizedDraftId,
+          itemId: normalizedItemId,
+          commandType: mutationType,
+          source: params.source,
+          stage,
+          message: outcome.message,
+          statusCode: outcome.statusCode,
+        });
+        if (!params.silentTerminalErrorNotification && outcome.message) {
+          showNotification(outcome.message);
+        }
+      };
+
+      const firstOutcome = await executeAttempt();
+      if (firstOutcome.ok) {
+        settleSuccess('immediate');
+        return true;
+      }
+
+      if (!firstOutcome.retryable) {
+        settleTerminalFailure(firstOutcome, 'immediate');
+        return false;
+      }
+
+      const scheduleNextRetry = (attempt: number): void => {
+        const safeAttempt = Math.max(1, Math.floor(attempt));
+        draftItemRemoteMutationRetryAttemptsRef.current.set(retryKey, safeAttempt);
+        const delayMs = getPendingDraftBackgroundSyncRetryDelayMs(safeAttempt);
+        scheduleRetryDispatchTask(retryKey, delayMs, async () => {
+          const retryOutcome = await executeAttempt();
+          if (retryOutcome.ok) {
+            settleSuccess(`retry_${safeAttempt}`);
+            return;
+          }
+          if (!retryOutcome.retryable) {
+            settleTerminalFailure(retryOutcome, `retry_${safeAttempt}`);
+            return;
+          }
+          scheduleNextRetry(safeAttempt + 1);
+        });
+      };
+
+      pushOperationalEvent('CART_REMOVE_REMOTE', 'Remoção remota reagendada para retry.', {
+        draftId: normalizedDraftId,
+        itemId: normalizedItemId,
+        commandType: mutationType,
+        source: params.source,
+        message: firstOutcome.message,
+        statusCode: firstOutcome.statusCode,
+      });
+      const nextAttempt = (draftItemRemoteMutationRetryAttemptsRef.current.get(retryKey) || 0) + 1;
+      scheduleNextRetry(nextAttempt);
+      return true;
+    },
+    [runCommandWithSync, scheduleRetryDispatchTask, setDraftItemOptimisticRemoval, showNotification, pushOperationalEvent]
+  );
+
+  const handleRemoveDraftItem = useCallback(
+    (itemId: string) => {
+      if (!activeDraft) return;
+      if (activeDraft.status !== 'DRAFT') {
+        showNotification('Remova os itens apenas com a venda em DRAFT.');
+        return;
+      }
+
+      const normalizedItemId = itemId.trim();
+      if (!normalizedItemId) return;
+      const currentItem = activeDraft.items.find((entry) => entry.id === normalizedItemId);
+      if (!currentItem) return;
+
+      const draftId = activeDraft.id;
+      const pendingEntry =
+        (pendingDraftAddsRef.current[draftId] || []).find(
+          (entry) => entry.localItemId === normalizedItemId
+        ) || null;
+
+      if (pendingEntry) {
+        const pendingRuntimeKey = buildPendingDraftAddRuntimeKey(draftId, pendingEntry.localItemId);
+        const product = products.find((entry) => entry.id === pendingEntry.productId) || null;
+        const unitPriceRaw =
+          pendingEntry.priceOverride !== undefined
+            ? Number(pendingEntry.priceOverride)
+            : Number(product?.price);
+        const unitPriceSnapshot = Number.isFinite(unitPriceRaw) ? roundMoney(unitPriceRaw) : 0;
+
+        const cancelledAt = new Date().toISOString();
+        pendingDraftAddCancellationIntentsRef.current.set(pendingRuntimeKey, {
+          draftId,
+          localItemId: pendingEntry.localItemId,
+          commandId: pendingEntry.commandId,
+          productId: pendingEntry.productId,
+          quantity: Math.max(1, Math.round(pendingEntry.quantity)),
+          recipeSignature: normalizeRecipeSignature(pendingEntry.recipeOverride),
+          noteNormalized: normalizeDraftItemNoteForMatch(pendingEntry.note),
+          unitPriceSnapshot,
+          cancelledAt,
+        });
+
+        const removedVisiblePending = updatePendingDraftAddByItemId(
+          draftId,
+          normalizedItemId,
+          () => null
+        );
+
+        const recoveryEntries = recoveryPendingDraftAddsRef.current[draftId] || [];
+        if (recoveryEntries.length > 0) {
+          const nextRecoveryEntries = recoveryEntries.filter(
+            (entry) => entry.localItemId !== normalizedItemId
+          );
+          if (nextRecoveryEntries.length !== recoveryEntries.length) {
+            const nextRecoveryByDraft = { ...recoveryPendingDraftAddsRef.current };
+            if (nextRecoveryEntries.length === 0) {
+              delete nextRecoveryByDraft[draftId];
+            } else {
+              nextRecoveryByDraft[draftId] = nextRecoveryEntries;
+            }
+            recoveryPendingDraftAddsRef.current = nextRecoveryByDraft;
+          }
+        }
+
+        const wasInFlight = pendingDraftAddsInFlightRef.current.has(pendingRuntimeKey);
+        pushOperationalEvent('CART_REMOVE_LOCAL_PENDING', 'Remoção local de item pendente aplicada.', {
+          draftId,
+          localItemId: normalizedItemId,
+          commandId: pendingEntry.commandId,
+          removedVisiblePending,
+          wasInFlight,
+        });
+        pushOperationalEvent('PENDING_ADD_CANCELLED', 'Pending add cancelado para evitar reaplicação.', {
+          draftId,
+          localItemId: normalizedItemId,
+          commandId: pendingEntry.commandId,
+          transition: wasInFlight,
+        });
+        console.info('[CART_REMOVE]', {
+          type: 'CART_REMOVE_LOCAL_PENDING',
+          draftId,
+          localItemId: normalizedItemId,
+          commandId: pendingEntry.commandId,
+          transition: wasInFlight,
+        });
+
+        if (typeof window !== 'undefined') {
+          window.setTimeout(() => {
+            const currentIntent = pendingDraftAddCancellationIntentsRef.current.get(
+              pendingRuntimeKey
+            );
+            if (!currentIntent || currentIntent.cancelledAt !== cancelledAt) return;
+            if (pendingDraftAddsInFlightRef.current.has(pendingRuntimeKey)) return;
+            pendingDraftAddCancellationIntentsRef.current.delete(pendingRuntimeKey);
+          }, 20_000);
+        }
+        return;
+      }
+
+      if (isLocalPendingDraftItemId(normalizedItemId)) {
+        pushOperationalEvent('COMMAND_SKIPPED_OBSOLETE', 'Remoção local ignorada: item pendente já obsoleto.', {
+          draftId,
+          localItemId: normalizedItemId,
+        });
+        return;
+      }
+
+      void runDraftItemRemoteMutation({
+        draftId,
+        itemId: normalizedItemId,
+        targetQty: 0,
+        source: 'manual',
+        optimisticHide: true,
+      });
+    },
+    [
+      activeDraft,
+      products,
+      pushOperationalEvent,
+      runDraftItemRemoteMutation,
+      showNotification,
+      updatePendingDraftAddByItemId,
+    ]
+  );
+
+  const hasPendingDraftAddCancellationIntentForDraft = useCallback((draftId: string): boolean => {
+    const normalizedDraftId = draftId.trim();
+    if (!normalizedDraftId) return false;
+    for (const intent of pendingDraftAddCancellationIntentsRef.current.values()) {
+      if (intent.draftId === normalizedDraftId) {
+        return true;
+      }
+    }
+    return false;
+  }, []);
+
   const handleOpenCart = () => {
     const draftId = resolveEditableDraftId();
     if (draftId) {
@@ -4541,27 +4978,18 @@ const App: React.FC = () => {
       }
     }
 
+    if (targetQty <= 0) {
+      handleRemoveDraftItem(itemId);
+      return;
+    }
+
     const handledPending = updatePendingDraftAddByItemId(activeDraft.id, itemId, (entry) => {
-      if (targetQty <= 0) return null;
       return {
         ...entry,
         quantity: Math.max(1, targetQty),
       };
     });
     if (handledPending) {
-      return;
-    }
-
-    if (targetQty <= 0) {
-      void runCommandWithSync(
-        {
-          type: 'SALE_DRAFT_REMOVE_ITEM',
-          draftId: activeDraft.id,
-          itemId,
-        },
-        undefined,
-        { silentSuccessNotification: true }
-      );
       return;
     }
 
@@ -5015,6 +5443,81 @@ const App: React.FC = () => {
     }
   };
 
+  const removePendingDraftAddFromSource = useCallback(
+    (
+      draftId: string,
+      source: PendingDraftAddsSource,
+      matcher: (entry: PendingDraftAdd) => boolean
+    ): boolean => {
+      if (source === 'recovery') {
+        const currentEntries = recoveryPendingDraftAddsRef.current[draftId] || [];
+        const nextEntries = currentEntries.filter((entry) => !matcher(entry));
+        if (nextEntries.length === currentEntries.length) return false;
+        const nextRecoveryByDraft = { ...recoveryPendingDraftAddsRef.current };
+        if (nextEntries.length === 0) {
+          delete nextRecoveryByDraft[draftId];
+        } else {
+          nextRecoveryByDraft[draftId] = nextEntries;
+        }
+        recoveryPendingDraftAddsRef.current = nextRecoveryByDraft;
+        return true;
+      }
+
+      const currentEntries = pendingDraftAddsRef.current[draftId] || [];
+      const nextEntries = currentEntries.filter((entry) => !matcher(entry));
+      if (nextEntries.length === currentEntries.length) return false;
+      const nextPendingByDraft = { ...pendingDraftAddsRef.current };
+      if (nextEntries.length === 0) {
+        delete nextPendingByDraft[draftId];
+      } else {
+        nextPendingByDraft[draftId] = nextEntries;
+      }
+      replacePendingDraftAdds(nextPendingByDraft);
+      return true;
+    },
+    [replacePendingDraftAdds]
+  );
+
+  const reconcileCancelledPendingDraftAddIntent = useCallback(
+    async (intent: PendingDraftAddCancellationIntent): Promise<void> => {
+      const matchedItem = findServerDraftItemMatchingPendingIntent(intent);
+      if (!matchedItem) {
+        pushOperationalEvent(
+          'COMMAND_SKIPPED_OBSOLETE',
+          'Pending add cancelado não exigiu remoção remota complementar.',
+          {
+            draftId: intent.draftId,
+            localItemId: intent.localItemId,
+            commandId: intent.commandId,
+            reason: 'no_matching_server_item',
+          }
+        );
+        return;
+      }
+
+      const currentQty = Math.max(1, Math.round(Number(matchedItem.qty) || 0));
+      const nextQty = Math.max(0, currentQty - Math.max(1, Math.round(intent.quantity)));
+      pushOperationalEvent('PENDING_ADD_CANCELLED', 'Aplicando remoção complementar após corrida do pending add.', {
+        draftId: intent.draftId,
+        localItemId: intent.localItemId,
+        commandId: intent.commandId,
+        backendItemId: matchedItem.id,
+        previousQty: currentQty,
+        targetQty: nextQty,
+      });
+
+      await runDraftItemRemoteMutation({
+        draftId: intent.draftId,
+        itemId: matchedItem.id,
+        targetQty: nextQty,
+        source: 'cancelled_pending_add',
+        optimisticHide: nextQty <= 0,
+        silentTerminalErrorNotification: true,
+      });
+    },
+    [findServerDraftItemMatchingPendingIntent, pushOperationalEvent, runDraftItemRemoteMutation]
+  );
+
   const flushPendingDraftAddsCore = useCallback(
     async (
       draftId: string,
@@ -5059,10 +5562,33 @@ const App: React.FC = () => {
         }
 
         const current = currentPendingAdds[0];
-        const product = products.find((entry) => entry.id === current.productId) || null;
-        const ingredientIdSet = new Set<string>(
-          ingredients.map((ingredient) => ingredient.id)
+        const currentRuntimeKey = buildPendingDraftAddRuntimeKey(draftId, current.localItemId);
+        const cancelledBeforeSend = pendingDraftAddCancellationIntentsRef.current.get(
+          currentRuntimeKey
         );
+        if (cancelledBeforeSend && cancelledBeforeSend.commandId === current.commandId) {
+          removePendingDraftAddFromSource(
+            draftId,
+            source,
+            (entry) =>
+              entry.localItemId === current.localItemId && entry.commandId === current.commandId
+          );
+          pendingDraftAddCancellationIntentsRef.current.delete(currentRuntimeKey);
+          pushOperationalEvent(
+            'COMMAND_SKIPPED_OBSOLETE',
+            'Pending add descartado antes do envio por remoção local.',
+            {
+              draftId,
+              localItemId: current.localItemId,
+              commandId: current.commandId,
+              source,
+            }
+          );
+          continue;
+        }
+
+        const product = products.find((entry) => entry.id === current.productId) || null;
+        const ingredientIdSet = new Set<string>(ingredients.map((ingredient) => ingredient.id));
         const recipeValidation = validateDraftItemRecipe(
           product,
           current.recipeOverride ?? product?.recipe,
@@ -5090,42 +5616,55 @@ const App: React.FC = () => {
           note: current.note,
           commandId: current.commandId,
         };
-        const ok = await runCommandWithSync(syncCommand, undefined, {
-          silentSuccessNotification: true,
-          silentErrorNotification: options.silentErrorNotification,
-          errorSink: options.errorSink,
-          trackPendingState: false,
-          failFastOnVersionConflict: options.failFastOnVersionConflict,
-        });
+
+        pendingDraftAddsInFlightRef.current.set(currentRuntimeKey, current);
+        let ok = false;
+        try {
+          ok = await runCommandWithSync(syncCommand, undefined, {
+            silentSuccessNotification: true,
+            silentErrorNotification: options.silentErrorNotification,
+            errorSink: options.errorSink,
+            trackPendingState: false,
+            failFastOnVersionConflict: options.failFastOnVersionConflict,
+          });
+        } finally {
+          const inFlight = pendingDraftAddsInFlightRef.current.get(currentRuntimeKey);
+          if (
+            inFlight &&
+            inFlight.commandId === current.commandId &&
+            inFlight.localItemId === current.localItemId
+          ) {
+            pendingDraftAddsInFlightRef.current.delete(currentRuntimeKey);
+          }
+        }
         if (!ok) return false;
 
-        const remaining = currentPendingAdds.slice(1);
-        if (source === 'recovery') {
-          const nextRecoveryByDraft = { ...recoveryPendingDraftAddsRef.current };
-          if (remaining.length === 0) {
-            delete nextRecoveryByDraft[draftId];
-          } else {
-            nextRecoveryByDraft[draftId] = remaining;
-          }
-          recoveryPendingDraftAddsRef.current = nextRecoveryByDraft;
-        } else {
-          const nextPendingByDraft = { ...pendingDraftAddsRef.current };
-          if (remaining.length === 0) {
-            delete nextPendingByDraft[draftId];
-          } else {
-            nextPendingByDraft[draftId] = remaining;
-          }
-          replacePendingDraftAdds(nextPendingByDraft);
+        const cancelledDuringSync = pendingDraftAddCancellationIntentsRef.current.get(
+          currentRuntimeKey
+        );
+        if (cancelledDuringSync && cancelledDuringSync.commandId === current.commandId) {
+          await reconcileCancelledPendingDraftAddIntent(cancelledDuringSync);
+          pendingDraftAddCancellationIntentsRef.current.delete(currentRuntimeKey);
         }
+
+        removePendingDraftAddFromSource(
+          draftId,
+          source,
+          (entry) =>
+            entry.localItemId === current.localItemId && entry.commandId === current.commandId
+        );
       }
     },
     [
+      findServerDraftItemMatchingPendingIntent,
       hydratePendingDraftAdds,
       ingredients,
       products,
-      replacePendingDraftAdds,
+      reconcileCancelledPendingDraftAddIntent,
+      removePendingDraftAddFromSource,
       runCommandWithSync,
       showNotification,
+      pushOperationalEvent,
     ]
   );
 
@@ -6700,20 +7239,32 @@ const App: React.FC = () => {
     showNotification,
   ]);
 
+  const requestPendingPaidSyncProcessing = useCallback(
+    (source: string, delayMs = 0): void => {
+      void source;
+      const safeDelayMs = Math.max(0, Math.round(delayMs));
+      scheduleRetryDispatchTask('pending-paid-sync-main', safeDelayMs, () =>
+        processPendingPaidSyncQueue()
+      );
+    },
+    [processPendingPaidSyncQueue, scheduleRetryDispatchTask]
+  );
+
   useEffect(() => {
     if (!isAccessVerified || isStateHydrating) return;
     if (pendingPaidSyncJobs === 0) return;
-    void processPendingPaidSyncQueue();
+    requestPendingPaidSyncProcessing('pending-paid-jobs-effect');
   }, [
     isAccessVerified,
     isStateHydrating,
     pendingPaidSyncJobs,
-    processPendingPaidSyncQueue,
+    requestPendingPaidSyncProcessing,
   ]);
 
   useEffect(() => {
     if (!isAccessVerified || isStateHydrating) return;
     if (!isPendingPaidSyncQueueHydratedRef.current) return;
+    if (!ENABLE_AUTO_REENQUEUE_PENDING_PAYMENT) return;
 
     const knownPersistedDraftIds = new Set<string>();
     [...sales, ...globalSales, ...globalCancelledSales].forEach((entry) => {
@@ -6723,6 +7274,7 @@ const App: React.FC = () => {
       }
     });
 
+    const blockedByCancellationIntentDraftIds: string[] = [];
     const draftsToAutoRequeue = saleDraftsRef.current.filter((draft) => {
       if (draft.status !== 'PENDING_PAYMENT') return false;
       if (!Array.isArray(draft.items) || draft.items.length === 0) return false;
@@ -6730,8 +7282,22 @@ const App: React.FC = () => {
       if (syncingPaidDraftIdsRef.current.has(draft.id)) return false;
       if (pendingPaidSyncQueueRef.current.some((job) => job.draftId === draft.id)) return false;
       if (failedPaidSyncQueueRef.current.some((job) => job.draftId === draft.id)) return false;
+      if (hasPendingDraftAddCancellationIntentForDraft(draft.id)) {
+        blockedByCancellationIntentDraftIds.push(draft.id);
+        return false;
+      }
       return true;
     });
+
+    if (blockedByCancellationIntentDraftIds.length > 0) {
+      pushOperationalEvent(
+        'COMMAND_SKIPPED_OBSOLETE',
+        'Auto-reenqueue bloqueado por intenção de remoção pendente no draft.',
+        {
+          draftIds: blockedByCancellationIntentDraftIds,
+        }
+      );
+    }
 
     if (draftsToAutoRequeue.length === 0) return;
 
@@ -6781,15 +7347,16 @@ const App: React.FC = () => {
       });
     });
 
-    enqueueRetryDispatchTask('pending-paid-sync-main', () => processPendingPaidSyncQueue());
+    requestPendingPaidSyncProcessing('auto-reenqueue');
   }, [
+    hasPendingDraftAddCancellationIntentForDraft,
     enqueuePendingPaidSyncJob,
-    enqueueRetryDispatchTask,
     globalCancelledSales,
     globalSales,
     isAccessVerified,
     isStateHydrating,
-    processPendingPaidSyncQueue,
+    pushOperationalEvent,
+    requestPendingPaidSyncProcessing,
     saleDrafts,
     sales,
     setPaidSyncAssistantActivity,
@@ -6801,20 +7368,24 @@ const App: React.FC = () => {
 
     const handleOnline = () => {
       if (pendingPaidSyncQueueRef.current.length === 0) return;
-      enqueueRetryDispatchTask('pending-paid-sync-main', () => processPendingPaidSyncQueue());
+      requestPendingPaidSyncProcessing('online-event');
     };
 
     window.addEventListener('online', handleOnline);
-    const intervalId = window.setInterval(() => {
-      if (pendingPaidSyncQueueRef.current.length === 0) return;
-      enqueueRetryDispatchTask('pending-paid-sync-main', () => processPendingPaidSyncQueue());
-    }, 10000);
+    const intervalId = ENABLE_PENDING_PAID_SYNC_INTERVAL_WAKEUP
+      ? window.setInterval(() => {
+          if (pendingPaidSyncQueueRef.current.length === 0) return;
+          requestPendingPaidSyncProcessing('interval-wakeup');
+        }, 10000)
+      : null;
 
     return () => {
       window.removeEventListener('online', handleOnline);
-      window.clearInterval(intervalId);
+      if (intervalId !== null) {
+        window.clearInterval(intervalId);
+      }
     };
-  }, [enqueueRetryDispatchTask, processPendingPaidSyncQueue]);
+  }, [requestPendingPaidSyncProcessing]);
 
   const handleRetryFailedPaidSyncJob = useCallback(
     async (jobId: string, options: { autoRetry?: boolean } = {}) => {
@@ -6940,16 +7511,15 @@ const App: React.FC = () => {
       if (!isAutoRetry) {
         showNotification('Pedido reenviado para sincronização.');
       }
-      enqueueRetryDispatchTask('pending-paid-sync-main', () => processPendingPaidSyncQueue());
+      requestPendingPaidSyncProcessing('failed-job-requeued');
     },
     [
       clearFailedPaidSyncAutoRetryState,
       completePaymentFlowTelemetry,
-      enqueueRetryDispatchTask,
       enqueuePendingPaidSyncJob,
       hydrateFailedPaidSyncQueue,
       markPaymentFlowTelemetryProgress,
-      processPendingPaidSyncQueue,
+      requestPendingPaidSyncProcessing,
       recoverPendingPaidSyncDraft,
       replaceFailedPaidSyncQueue,
       setPaidSyncAssistantActivity,
@@ -7362,7 +7932,7 @@ const App: React.FC = () => {
         ? `Pedido em fila. Enviando ${pendingItemsCount} item(ns)...`
         : 'Pedido em fila. Confirmando no banco...'
     );
-    enqueueRetryDispatchTask('pending-paid-sync-main', () => processPendingPaidSyncQueue());
+    requestPendingPaidSyncProcessing('confirm-paid-enqueued');
     setIsConfirmingPaid(false);
   };
 
@@ -8686,7 +9256,7 @@ const App: React.FC = () => {
                               +
                             </button>
                             <button
-                              onClick={() => handleUpdateDraftItemQuantity(item.id, 0)}
+                              onClick={() => handleRemoveDraftItem(item.id)}
                               disabled={!canEditItems}
                               className="qb-btn-touch px-2 py-2 rounded-xl bg-red-100 text-red-700 font-black text-[10px] uppercase tracking-widest disabled:opacity-40"
                             >
