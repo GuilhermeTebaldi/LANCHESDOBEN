@@ -180,6 +180,8 @@ interface RunCommandOptions {
   trackPendingState?: boolean;
   failFastOnVersionConflict?: boolean;
   skipSnapshotApply?: boolean;
+  bypassGlobalCommandQueue?: boolean;
+  onSnapshotAppliedMs?: (durationMs: number) => void;
 }
 
 interface BackendExecutionOptions {
@@ -220,6 +222,11 @@ interface PaymentFlowTelemetryEntry {
   clickAtMs: number;
   localPersistedAtMs: number | null;
   processingStartedAtMs: number | null;
+  flushPendingDraftAddsMs: number;
+  finalizeMs: number;
+  confirmMs: number;
+  snapshotApplyMs: number;
+  frontendReconcileMs: number;
   retries: number;
   hadRecovery: boolean;
   hadReconciliation: boolean;
@@ -232,6 +239,11 @@ interface PaymentFlowTelemetryRecord {
   waitInQueueMs: number | null;
   processingMs: number | null;
   totalConfMs: number | null;
+  flushPendingDraftAddsMs: number | null;
+  finalizeMs: number | null;
+  confirmMs: number | null;
+  snapshotApplyMs: number | null;
+  frontendReconcileMs: number | null;
   clickToBackendConfirmMs: number | null;
   retries: number;
   hadRecovery: boolean;
@@ -1810,6 +1822,11 @@ const normalizePaymentFlowTelemetryRecord = (
   const waitInQueueRaw = Number(source.waitInQueueMs);
   const processingRaw = Number(source.processingMs);
   const totalConfRaw = Number(source.totalConfMs);
+  const flushPendingDraftAddsRaw = Number(source.flushPendingDraftAddsMs);
+  const finalizeRaw = Number(source.finalizeMs);
+  const confirmRaw = Number(source.confirmMs);
+  const snapshotApplyRaw = Number(source.snapshotApplyMs);
+  const frontendReconcileRaw = Number(source.frontendReconcileMs);
   const clickToBackendConfirmRaw = Number(source.clickToBackendConfirmMs);
   const retriesRaw = Number(source.retries);
   const timestamp =
@@ -1838,6 +1855,22 @@ const normalizePaymentFlowTelemetryRecord = (
         : Number.isFinite(clickToBackendConfirmRaw) && clickToBackendConfirmRaw >= 0
           ? Math.floor(clickToBackendConfirmRaw)
           : null,
+    flushPendingDraftAddsMs:
+      Number.isFinite(flushPendingDraftAddsRaw) && flushPendingDraftAddsRaw >= 0
+        ? Math.floor(flushPendingDraftAddsRaw)
+        : null,
+    finalizeMs:
+      Number.isFinite(finalizeRaw) && finalizeRaw >= 0 ? Math.floor(finalizeRaw) : null,
+    confirmMs:
+      Number.isFinite(confirmRaw) && confirmRaw >= 0 ? Math.floor(confirmRaw) : null,
+    snapshotApplyMs:
+      Number.isFinite(snapshotApplyRaw) && snapshotApplyRaw >= 0
+        ? Math.floor(snapshotApplyRaw)
+        : null,
+    frontendReconcileMs:
+      Number.isFinite(frontendReconcileRaw) && frontendReconcileRaw >= 0
+        ? Math.floor(frontendReconcileRaw)
+        : null,
     clickToBackendConfirmMs:
       Number.isFinite(clickToBackendConfirmRaw) && clickToBackendConfirmRaw >= 0
         ? Math.floor(clickToBackendConfirmRaw)
@@ -1857,6 +1890,62 @@ const normalizePaymentFlowTelemetryHistory = (parsed: unknown): PaymentFlowTelem
     .map((entry) => normalizePaymentFlowTelemetryRecord(entry))
     .filter((entry): entry is PaymentFlowTelemetryRecord => entry !== null)
     .slice(0, 50);
+};
+
+const getPaymentFlowProcessingBreakdown = (
+  telemetry: PaymentFlowTelemetryRecord | null | undefined
+): {
+  flushPendingDraftAddsMs: number;
+  finalizeMs: number;
+  confirmMs: number;
+  snapshotApplyMs: number;
+  frontendReconcileMs: number;
+  measuredExclusiveMs: number;
+  residualMs: number;
+} | null => {
+  if (!telemetry) return null;
+  const processingMs =
+    typeof telemetry.processingMs === 'number' && Number.isFinite(telemetry.processingMs)
+      ? Math.max(0, telemetry.processingMs)
+      : 0;
+  const flushPendingDraftAddsMs =
+    typeof telemetry.flushPendingDraftAddsMs === 'number' &&
+    Number.isFinite(telemetry.flushPendingDraftAddsMs)
+      ? Math.max(0, telemetry.flushPendingDraftAddsMs)
+      : 0;
+  const finalizeMs =
+    typeof telemetry.finalizeMs === 'number' && Number.isFinite(telemetry.finalizeMs)
+      ? Math.max(0, telemetry.finalizeMs)
+      : 0;
+  const confirmMs =
+    typeof telemetry.confirmMs === 'number' && Number.isFinite(telemetry.confirmMs)
+      ? Math.max(0, telemetry.confirmMs)
+      : 0;
+  const snapshotApplyMs =
+    typeof telemetry.snapshotApplyMs === 'number' && Number.isFinite(telemetry.snapshotApplyMs)
+      ? Math.max(0, telemetry.snapshotApplyMs)
+      : 0;
+  const frontendReconcileMs =
+    typeof telemetry.frontendReconcileMs === 'number' &&
+    Number.isFinite(telemetry.frontendReconcileMs)
+      ? Math.max(0, telemetry.frontendReconcileMs)
+      : 0;
+
+  // snapshotApplyMs is cross-cutting and already included inside finalize/confirm timings.
+  // Keep the residual based on exclusive sequential stages only.
+  const measuredExclusiveMs =
+    flushPendingDraftAddsMs + finalizeMs + confirmMs + frontendReconcileMs;
+  const residualMs = Math.max(0, processingMs - measuredExclusiveMs);
+
+  return {
+    flushPendingDraftAddsMs: Math.round(flushPendingDraftAddsMs),
+    finalizeMs: Math.round(finalizeMs),
+    confirmMs: Math.round(confirmMs),
+    snapshotApplyMs: Math.round(snapshotApplyMs),
+    frontendReconcileMs: Math.round(frontendReconcileMs),
+    measuredExclusiveMs: Math.round(measuredExclusiveMs),
+    residualMs: Math.round(residualMs),
+  };
 };
 
 const loadPaymentFlowTelemetryHistoryLocalFallback = (): PaymentFlowTelemetryRecord[] =>
@@ -2980,6 +3069,11 @@ const App: React.FC = () => {
         clickAtMs,
         localPersistedAtMs: null,
         processingStartedAtMs: null,
+        flushPendingDraftAddsMs: 0,
+        finalizeMs: 0,
+        confirmMs: 0,
+        snapshotApplyMs: 0,
+        frontendReconcileMs: 0,
         retries: 0,
         hadRecovery: false,
         hadReconciliation: false,
@@ -3020,6 +3114,35 @@ const App: React.FC = () => {
       paymentFlowTelemetryByDraftRef.current.set(normalizedDraftId, {
         ...current,
         processingStartedAtMs: Date.now(),
+      });
+    },
+    []
+  );
+
+  const markPaymentFlowTelemetryStageDuration = useCallback(
+    (
+      draftId: string,
+      jobId: string,
+      stage:
+        | 'flushPendingDraftAddsMs'
+        | 'finalizeMs'
+        | 'confirmMs'
+        | 'snapshotApplyMs'
+        | 'frontendReconcileMs',
+      durationMs: number
+    ): void => {
+      const normalizedDraftId = draftId.trim();
+      const normalizedJobId = jobId.trim();
+      if (!normalizedDraftId || !normalizedJobId) return;
+      if (!Number.isFinite(durationMs) || durationMs <= 0) return;
+
+      const current = paymentFlowTelemetryByDraftRef.current.get(normalizedDraftId);
+      if (!current) return;
+      if (current.jobId !== normalizedJobId) return;
+
+      paymentFlowTelemetryByDraftRef.current.set(normalizedDraftId, {
+        ...current,
+        [stage]: Math.max(0, current[stage]) + Math.max(0, Math.round(durationMs)),
       });
     },
     []
@@ -3096,6 +3219,11 @@ const App: React.FC = () => {
         waitInQueueMs,
         processingMs,
         totalConfMs,
+        flushPendingDraftAddsMs: Math.max(0, Math.round(current.flushPendingDraftAddsMs)),
+        finalizeMs: Math.max(0, Math.round(current.finalizeMs)),
+        confirmMs: Math.max(0, Math.round(current.confirmMs)),
+        snapshotApplyMs: Math.max(0, Math.round(current.snapshotApplyMs)),
+        frontendReconcileMs: Math.max(0, Math.round(current.frontendReconcileMs)),
         clickToBackendConfirmMs: totalConfMs,
         retries: normalizedRetries,
         hadRecovery,
@@ -3114,6 +3242,11 @@ const App: React.FC = () => {
         waitInQueueMs: record.waitInQueueMs,
         processingMs: record.processingMs,
         totalConfMs: record.totalConfMs,
+        flushPendingDraftAddsMs: record.flushPendingDraftAddsMs,
+        finalizeMs: record.finalizeMs,
+        confirmMs: record.confirmMs,
+        snapshotApplyMs: record.snapshotApplyMs,
+        frontendReconcileMs: record.frontendReconcileMs,
         clickToBackendConfirmMs: record.clickToBackendConfirmMs,
         retries: record.retries,
         hadRecovery: record.hadRecovery,
@@ -3131,6 +3264,11 @@ const App: React.FC = () => {
           waitInQueueMs: record.waitInQueueMs,
           processingMs: record.processingMs,
           totalConfMs: record.totalConfMs,
+          flushPendingDraftAddsMs: record.flushPendingDraftAddsMs,
+          finalizeMs: record.finalizeMs,
+          confirmMs: record.confirmMs,
+          snapshotApplyMs: record.snapshotApplyMs,
+          frontendReconcileMs: record.frontendReconcileMs,
           clickToBackendConfirmMs: record.clickToBackendConfirmMs,
           retries: record.retries,
           hadRecovery: record.hadRecovery,
@@ -4184,6 +4322,8 @@ const App: React.FC = () => {
         trackPendingState?: boolean;
         failFastOnVersionConflict?: boolean;
         skipSnapshotApply?: boolean;
+        bypassGlobalCommandQueue?: boolean;
+        onSnapshotAppliedMs?: (durationMs: number) => void;
       } = {}
     ): Promise<{ ok: true } | { ok: false; error: unknown }> => {
       const shouldTrackPendingState = options.trackPendingState !== false;
@@ -4232,12 +4372,14 @@ const App: React.FC = () => {
               })
           );
           if (!options.skipSnapshotApply) {
+            const snapshotApplyStartedAt = performance.now();
             applyStateSnapshotIfDraftEpochCurrent(
               nextState,
               commandDraftId,
               expectedDraftEpoch,
               'run_state_command'
             );
+            options.onSnapshotAppliedMs?.(performance.now() - snapshotApplyStartedAt);
           }
           return { ok: true };
         } catch (error) {
@@ -4248,6 +4390,10 @@ const App: React.FC = () => {
           }
         }
       };
+
+      if (options.bypassGlobalCommandQueue) {
+        return executeCommand();
+      }
 
       const scheduledExecution = commandQueueRef.current.then(
         () => executeCommand(),
@@ -4362,6 +4508,8 @@ const App: React.FC = () => {
           trackPendingState: options.trackPendingState,
           failFastOnVersionConflict: options.failFastOnVersionConflict,
           skipSnapshotApply: options.skipSnapshotApply,
+          bypassGlobalCommandQueue: options.bypassGlobalCommandQueue,
+          onSnapshotAppliedMs: options.onSnapshotAppliedMs,
         });
       });
 
@@ -6851,6 +6999,7 @@ const App: React.FC = () => {
       asyncFinalizeCommandId?: string;
       failFastOnVersionConflict?: boolean;
       skipSnapshotApplyOnTerminalFlow?: boolean;
+      onSnapshotAppliedMs?: (durationMs: number) => void;
     } = {}
   ): Promise<boolean> => {
     const notifyError = (message: string) => {
@@ -6894,6 +7043,7 @@ const App: React.FC = () => {
     } = activeSnapshot;
     const shouldSkipFinalizeSnapshotApply =
       options.skipSnapshotApplyOnTerminalFlow === true && !isAppSaleOrigin(snapshotSaleOrigin);
+    const shouldBypassFinalizeGlobalQueue = options.skipSnapshotApplyOnTerminalFlow === true;
     const draftEpochAtFinalizeStart = getDraftOperationEpoch(draft.id);
 
     if (draft.items.length === 0) {
@@ -6995,6 +7145,8 @@ const App: React.FC = () => {
           trackPendingState: options.trackPendingState,
           failFastOnVersionConflict: options.failFastOnVersionConflict,
           skipSnapshotApply: shouldSkipFinalizeSnapshotApply,
+          bypassGlobalCommandQueue: shouldBypassFinalizeGlobalQueue,
+          onSnapshotAppliedMs: options.onSnapshotAppliedMs,
         });
       }
 
@@ -7023,6 +7175,8 @@ const App: React.FC = () => {
             trackPendingState: options.trackPendingState,
             failFastOnVersionConflict: options.failFastOnVersionConflict,
             skipSnapshotApply: shouldSkipFinalizeSnapshotApply,
+            bypassGlobalCommandQueue: shouldBypassFinalizeGlobalQueue,
+            onSnapshotAppliedMs: options.onSnapshotAppliedMs,
           });
         }
 
@@ -7723,6 +7877,25 @@ const App: React.FC = () => {
       }
 
       markPaymentFlowTelemetryProcessingStarted(currentJob.draftId, currentJob.id);
+      const recordSnapshotApplyMs = (durationMs: number): void => {
+        markPaymentFlowTelemetryStageDuration(
+          currentJob.draftId,
+          currentJob.id,
+          'snapshotApplyMs',
+          durationMs
+        );
+      };
+      const applySnapshotForCurrentJob = (state: AppState, source: string): boolean => {
+        const snapshotApplyStartedAt = performance.now();
+        const applied = applyStateSnapshotIfDraftEpochCurrent(
+          state,
+          currentJob.draftId,
+          draftProcessingEpoch,
+          source
+        );
+        recordSnapshotApplyMs(performance.now() - snapshotApplyStartedAt);
+        return applied;
+      };
 
         let currentServerDraft = saleDraftsRef.current.find(
           (draft) => draft.id === currentJob.draftId
@@ -7984,65 +8157,75 @@ const App: React.FC = () => {
           visiblePendingCount > 0 ||
           recoveryPendingCount > 0;
         if (shouldFlushDraftAdds) {
-          const shouldFlushVisibleDraftAdds =
-            !currentServerDraft || currentServerDraft.status === 'DRAFT' || visiblePendingCount > 0;
-          if (shouldFlushVisibleDraftAdds) {
-            const draftAddsErrorSink: RunCommandErrorSink = {};
-            const flushedVisible = await flushPendingDraftAdds(
-              currentJob.draftId,
-              (currentJob.snapshot.draft.customerType || 'BALCAO') as SaleCustomerType,
-              {
-                silentErrorNotification: true,
-                errorSink: draftAddsErrorSink,
-                failFastOnVersionConflict: false,
-                source: 'visible',
+          const flushPendingDraftAddsStartedAt = performance.now();
+          try {
+            const shouldFlushVisibleDraftAdds =
+              !currentServerDraft || currentServerDraft.status === 'DRAFT' || visiblePendingCount > 0;
+            if (shouldFlushVisibleDraftAdds) {
+              const draftAddsErrorSink: RunCommandErrorSink = {};
+              const flushedVisible = await flushPendingDraftAdds(
+                currentJob.draftId,
+                (currentJob.snapshot.draft.customerType || 'BALCAO') as SaleCustomerType,
+                {
+                  silentErrorNotification: true,
+                  errorSink: draftAddsErrorSink,
+                  failFastOnVersionConflict: false,
+                  source: 'visible',
+                }
+              );
+              if (!flushedVisible) {
+                await markJobAsFailed('Falha ao enviar itens pendentes.', draftAddsErrorSink);
+                return;
               }
-            );
-            if (!flushedVisible) {
-              await markJobAsFailed('Falha ao enviar itens pendentes.', draftAddsErrorSink);
-              return;
             }
-          }
 
-          if (recoveryPendingCount > 0) {
-            const recoveryAddsErrorSink: RunCommandErrorSink = {};
-            const flushedRecovery = await flushPendingDraftAdds(
-              currentJob.draftId,
-              (currentJob.snapshot.draft.customerType || 'BALCAO') as SaleCustomerType,
-              {
-                silentErrorNotification: true,
-                errorSink: recoveryAddsErrorSink,
-                failFastOnVersionConflict: false,
-                source: 'recovery',
+            if (recoveryPendingCount > 0) {
+              const recoveryAddsErrorSink: RunCommandErrorSink = {};
+              const flushedRecovery = await flushPendingDraftAdds(
+                currentJob.draftId,
+                (currentJob.snapshot.draft.customerType || 'BALCAO') as SaleCustomerType,
+                {
+                  silentErrorNotification: true,
+                  errorSink: recoveryAddsErrorSink,
+                  failFastOnVersionConflict: false,
+                  source: 'recovery',
+                }
+              );
+              if (!flushedRecovery) {
+                await markJobAsFailed('Falha ao enviar itens pendentes da recuperação.', recoveryAddsErrorSink);
+                return;
               }
-            );
-            if (!flushedRecovery) {
-              await markJobAsFailed('Falha ao enviar itens pendentes da recuperação.', recoveryAddsErrorSink);
+            }
+            currentServerDraft = saleDraftsRef.current.find((entry) => entry.id === currentJob.draftId);
+            if (
+              currentServerDraft &&
+              (currentServerDraft.status === 'PAID' || currentServerDraft.status === 'CANCELLED')
+            ) {
+              setDraftLifecycleStage(
+                currentJob.draftId,
+                currentServerDraft.status === 'PAID' ? 'PAID' : 'CANCELLED',
+                {
+                  reason: 'queue_after_flush_terminal',
+                  bumpEpoch: false,
+                }
+              );
+              completePaymentFlowTelemetry(currentJob.draftId, {
+                retries: currentJob.attempts,
+                hadReconciliation: true,
+              });
+              setDraftSyncInProgress(currentJob.draftId, false);
+              cleanupDraftOperationalArtifacts(currentJob.draftId);
+              clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
+              showCornerSync('success', 'Pedido já estava concluído no banco.', 1800);
               return;
             }
-          }
-          currentServerDraft = saleDraftsRef.current.find((entry) => entry.id === currentJob.draftId);
-          if (
-            currentServerDraft &&
-            (currentServerDraft.status === 'PAID' || currentServerDraft.status === 'CANCELLED')
-          ) {
-            setDraftLifecycleStage(
+          } finally {
+            markPaymentFlowTelemetryStageDuration(
               currentJob.draftId,
-              currentServerDraft.status === 'PAID' ? 'PAID' : 'CANCELLED',
-              {
-                reason: 'queue_after_flush_terminal',
-                bumpEpoch: false,
-              }
+              currentJob.id,
+              'flushPendingDraftAddsMs',
+              performance.now() - flushPendingDraftAddsStartedAt
             );
-            completePaymentFlowTelemetry(currentJob.draftId, {
-              retries: currentJob.attempts,
-              hadReconciliation: true,
-            });
-            setDraftSyncInProgress(currentJob.draftId, false);
-            cleanupDraftOperationalArtifacts(currentJob.draftId);
-            clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
-            showCornerSync('success', 'Pedido já estava concluído no banco.', 1800);
-            return;
           }
         }
 
@@ -8052,10 +8235,8 @@ const App: React.FC = () => {
           if (!currentServerDraft || (currentServerDraft.items || []).length === 0) {
             try {
               const refreshedState = await fetchStateSnapshotControlled(currentJob.draftId);
-              applyStateSnapshotIfDraftEpochCurrent(
+              applySnapshotForCurrentJob(
                 refreshedState,
-                currentJob.draftId,
-                draftProcessingEpoch,
                 'pending_paid_refresh_before_finalize'
               );
             } catch {
@@ -8103,15 +8284,26 @@ const App: React.FC = () => {
         let finalized = currentServerDraft?.status === 'PENDING_PAYMENT';
         if (!finalized) {
           const finalizeErrorSink: RunCommandErrorSink = {};
-          finalized = await handleSavePaymentMethod(currentJob.snapshot, {
-            trackPendingState: false,
-            silentSavedNotification: true,
-            silentErrorNotification: true,
-            errorSink: finalizeErrorSink,
-            preferAsyncFinalize: false,
-            failFastOnVersionConflict: false,
-            skipSnapshotApplyOnTerminalFlow: true,
-          });
+          const finalizeStartedAt = performance.now();
+          try {
+            finalized = await handleSavePaymentMethod(currentJob.snapshot, {
+              trackPendingState: false,
+              silentSavedNotification: true,
+              silentErrorNotification: true,
+              errorSink: finalizeErrorSink,
+              preferAsyncFinalize: false,
+              failFastOnVersionConflict: false,
+              skipSnapshotApplyOnTerminalFlow: true,
+              onSnapshotAppliedMs: recordSnapshotApplyMs,
+            });
+          } finally {
+            markPaymentFlowTelemetryStageDuration(
+              currentJob.draftId,
+              currentJob.id,
+              'finalizeMs',
+              performance.now() - finalizeStartedAt
+            );
+          }
           if (!finalized) {
             const finalizeMessage =
               finalizeErrorSink.message || 'Falha ao salvar forma de pagamento.';
@@ -8122,10 +8314,8 @@ const App: React.FC = () => {
               let stateRefreshed = false;
               try {
                 const refreshedState = await fetchStateSnapshotControlled(currentJob.draftId);
-                applyStateSnapshotIfDraftEpochCurrent(
+                applySnapshotForCurrentJob(
                   refreshedState,
-                  currentJob.draftId,
-                  draftProcessingEpoch,
                   'pending_paid_refresh_finalize_conflict'
                 );
                 stateRefreshed = true;
@@ -8193,164 +8383,178 @@ const App: React.FC = () => {
           commandId: currentJob.confirmCommandId,
         };
 
-        if (!ENABLE_ASYNC_CONFIRM_PAID) {
-          const confirmErrorSink: RunCommandErrorSink = {};
-          const confirmed = await runCommandWithSync(
-            confirmCommand,
-            undefined,
-            {
-              trackPendingState: false,
-              silentSuccessNotification: true,
-              silentErrorNotification: true,
-              errorSink: confirmErrorSink,
-              failFastOnVersionConflict: false,
-            }
-          );
-          if (!confirmed) {
-            await markJobAsFailed('Falha ao confirmar pagamento.', confirmErrorSink);
-            return;
-          }
-        } else {
-          let asyncJobId: string | null = null;
-          try {
-            const queuedAsyncJob = await enqueueStateCommandAsyncControlled(confirmCommand);
-            asyncJobId = queuedAsyncJob.id;
-          } catch (error) {
-            const statusCode =
-              error instanceof StateCommandSyncError ? error.statusCode : undefined;
-            const shouldFallbackToSync =
-              statusCode === 404 ||
-              statusCode === 405 ||
-              statusCode === 422 ||
-              statusCode === 501;
-
-            if (shouldFallbackToSync) {
-              const confirmErrorSink: RunCommandErrorSink = {};
-              const confirmed = await runCommandWithSync(
-                confirmCommand,
-                undefined,
-                {
-                  trackPendingState: false,
-                  silentSuccessNotification: true,
-                  silentErrorNotification: true,
-                  errorSink: confirmErrorSink,
-                  failFastOnVersionConflict: false,
-                }
-              );
-              if (!confirmed) {
-                await markJobAsFailed('Falha ao confirmar pagamento.', confirmErrorSink);
-                return;
+        const confirmStartedAt = performance.now();
+        try {
+          if (!ENABLE_ASYNC_CONFIRM_PAID) {
+            const confirmErrorSink: RunCommandErrorSink = {};
+            const confirmed = await runCommandWithSync(
+              confirmCommand,
+              undefined,
+              {
+                trackPendingState: false,
+                silentSuccessNotification: true,
+                silentErrorNotification: true,
+                errorSink: confirmErrorSink,
+                failFastOnVersionConflict: false,
+                bypassGlobalCommandQueue: true,
+                onSnapshotAppliedMs: recordSnapshotApplyMs,
               }
-            } else {
-              await markJobAsFailed('Falha ao enfileirar confirmação assíncrona.', {
-                error,
-                message: getStateSyncErrorMessage(error),
-                retryable: isRetryableSyncError(error),
-                statusCode,
-              });
+            );
+            if (!confirmed) {
+              await markJobAsFailed('Falha ao confirmar pagamento.', confirmErrorSink);
               return;
             }
-          }
-
-          if (asyncJobId) {
-            let terminalStatus: { status: StateCommandAsyncJobStatus; lastError: string | null } | null = null;
-            let resolvedBySyncFallback = false;
+          } else {
+            let asyncJobId: string | null = null;
             try {
-              terminalStatus = await waitForAsyncCommandJobTerminalStatus(
-                asyncJobId,
-                (queuedJobId) => getStateCommandAsyncJobControlled(queuedJobId, currentJob.draftId)
-              );
+              const queuedAsyncJob = await enqueueStateCommandAsyncControlled(confirmCommand);
+              asyncJobId = queuedAsyncJob.id;
             } catch (error) {
-              const errorMessage = getStateSyncErrorMessage(error);
-              const isTimeoutWhileWaiting =
-                errorMessage.toLowerCase().includes('timeout aguardando processamento assíncrono');
-              if (!isTimeoutWhileWaiting) {
-                await markJobAsFailed('Falha ao aguardar processamento assíncrono.', {
-                  error,
-                  message: errorMessage,
-                  retryable: isRetryableSyncError(error),
-                  statusCode: error instanceof StateCommandSyncError ? error.statusCode : undefined,
-                });
-                return;
-              }
+              const statusCode =
+                error instanceof StateCommandSyncError ? error.statusCode : undefined;
+              const shouldFallbackToSync =
+                statusCode === 404 ||
+                statusCode === 405 ||
+                statusCode === 422 ||
+                statusCode === 501;
 
-              const confirmErrorSink: RunCommandErrorSink = {};
-              const confirmed = await runCommandWithSync(
-                confirmCommand,
-                undefined,
-                {
-                  trackPendingState: false,
-                  silentSuccessNotification: true,
-                  silentErrorNotification: true,
-                  errorSink: confirmErrorSink,
-                  failFastOnVersionConflict: false,
-                }
-              );
-              if (!confirmed) {
-                await markJobAsFailed(
-                  'Falha ao confirmar pagamento após timeout do processamento assíncrono.',
-                  confirmErrorSink
-                );
-                return;
-              }
-              resolvedBySyncFallback = true;
-            }
-
-            if (!resolvedBySyncFallback && (!terminalStatus || terminalStatus.status !== 'COMPLETED')) {
-              const confirmErrorSink: RunCommandErrorSink = {};
-              const confirmed = await runCommandWithSync(
-                confirmCommand,
-                undefined,
-                {
-                  trackPendingState: false,
-                  silentSuccessNotification: true,
-                  silentErrorNotification: true,
-                  errorSink: confirmErrorSink,
-                  failFastOnVersionConflict: false,
-                }
-              );
-              if (!confirmed) {
-                await markJobAsFailed(
-                  terminalStatus?.lastError || 'Falha no processamento assíncrono do pedido.',
+              if (shouldFallbackToSync) {
+                const confirmErrorSink: RunCommandErrorSink = {};
+                const confirmed = await runCommandWithSync(
+                  confirmCommand,
+                  undefined,
                   {
-                    message:
-                      terminalStatus?.lastError ||
-                      confirmErrorSink.message ||
-                      'Falha no processamento assíncrono do pedido.',
-                    retryable: confirmErrorSink.retryable ?? false,
-                    statusCode: confirmErrorSink.statusCode,
+                    trackPendingState: false,
+                    silentSuccessNotification: true,
+                    silentErrorNotification: true,
+                    errorSink: confirmErrorSink,
+                    failFastOnVersionConflict: false,
+                    bypassGlobalCommandQueue: true,
+                    onSnapshotAppliedMs: recordSnapshotApplyMs,
                   }
                 );
-                return;
-              }
-              resolvedBySyncFallback = true;
-            }
-
-            if (!resolvedBySyncFallback) {
-              try {
-                const refreshedState = await fetchStateSnapshotControlled(currentJob.draftId);
-                applyStateSnapshotIfDraftEpochCurrent(
-                  refreshedState,
-                  currentJob.draftId,
-                  draftProcessingEpoch,
-                  'pending_paid_refresh_after_confirm'
-                );
-              } catch (error) {
-                await markJobAsFailed('Pedido confirmado, mas falhou ao atualizar estado local.', {
+                if (!confirmed) {
+                  await markJobAsFailed('Falha ao confirmar pagamento.', confirmErrorSink);
+                  return;
+                }
+              } else {
+                await markJobAsFailed('Falha ao enfileirar confirmação assíncrona.', {
                   error,
                   message: getStateSyncErrorMessage(error),
                   retryable: isRetryableSyncError(error),
-                  statusCode: error instanceof StateCommandSyncError ? error.statusCode : undefined,
+                  statusCode,
                 });
                 return;
               }
             }
+
+            if (asyncJobId) {
+              let terminalStatus: { status: StateCommandAsyncJobStatus; lastError: string | null } | null = null;
+              let resolvedBySyncFallback = false;
+              try {
+                terminalStatus = await waitForAsyncCommandJobTerminalStatus(
+                  asyncJobId,
+                  (queuedJobId) => getStateCommandAsyncJobControlled(queuedJobId, currentJob.draftId)
+                );
+              } catch (error) {
+                const errorMessage = getStateSyncErrorMessage(error);
+                const isTimeoutWhileWaiting =
+                  errorMessage.toLowerCase().includes('timeout aguardando processamento assíncrono');
+                if (!isTimeoutWhileWaiting) {
+                  await markJobAsFailed('Falha ao aguardar processamento assíncrono.', {
+                    error,
+                    message: errorMessage,
+                    retryable: isRetryableSyncError(error),
+                    statusCode: error instanceof StateCommandSyncError ? error.statusCode : undefined,
+                  });
+                  return;
+                }
+
+                const confirmErrorSink: RunCommandErrorSink = {};
+                const confirmed = await runCommandWithSync(
+                  confirmCommand,
+                  undefined,
+                  {
+                    trackPendingState: false,
+                    silentSuccessNotification: true,
+                    silentErrorNotification: true,
+                    errorSink: confirmErrorSink,
+                    failFastOnVersionConflict: false,
+                    bypassGlobalCommandQueue: true,
+                    onSnapshotAppliedMs: recordSnapshotApplyMs,
+                  }
+                );
+                if (!confirmed) {
+                  await markJobAsFailed(
+                    'Falha ao confirmar pagamento após timeout do processamento assíncrono.',
+                    confirmErrorSink
+                  );
+                  return;
+                }
+                resolvedBySyncFallback = true;
+              }
+
+              if (!resolvedBySyncFallback && (!terminalStatus || terminalStatus.status !== 'COMPLETED')) {
+                const confirmErrorSink: RunCommandErrorSink = {};
+                const confirmed = await runCommandWithSync(
+                  confirmCommand,
+                  undefined,
+                  {
+                    trackPendingState: false,
+                    silentSuccessNotification: true,
+                    silentErrorNotification: true,
+                    errorSink: confirmErrorSink,
+                    failFastOnVersionConflict: false,
+                    bypassGlobalCommandQueue: true,
+                    onSnapshotAppliedMs: recordSnapshotApplyMs,
+                  }
+                );
+                if (!confirmed) {
+                  await markJobAsFailed(
+                    terminalStatus?.lastError || 'Falha no processamento assíncrono do pedido.',
+                    {
+                      message:
+                        terminalStatus?.lastError ||
+                        confirmErrorSink.message ||
+                        'Falha no processamento assíncrono do pedido.',
+                      retryable: confirmErrorSink.retryable ?? false,
+                      statusCode: confirmErrorSink.statusCode,
+                    }
+                  );
+                  return;
+                }
+                resolvedBySyncFallback = true;
+              }
+
+              if (!resolvedBySyncFallback) {
+                try {
+                  const refreshedState = await fetchStateSnapshotControlled(currentJob.draftId);
+                  applySnapshotForCurrentJob(
+                    refreshedState,
+                    'pending_paid_refresh_after_confirm'
+                  );
+                } catch (error) {
+                  await markJobAsFailed('Pedido confirmado, mas falhou ao atualizar estado local.', {
+                    error,
+                    message: getStateSyncErrorMessage(error),
+                    retryable: isRetryableSyncError(error),
+                    statusCode: error instanceof StateCommandSyncError ? error.statusCode : undefined,
+                  });
+                  return;
+                }
+              }
+            }
           }
+        } finally {
+          markPaymentFlowTelemetryStageDuration(
+            currentJob.draftId,
+            currentJob.id,
+            'confirmMs',
+            performance.now() - confirmStartedAt
+          );
         }
 
-        completePaymentFlowTelemetry(currentJob.draftId, {
-          retries: currentJob.attempts,
-        });
+        const frontendReconcileStartedAt = performance.now();
         const latestDraftAfterConfirm = saleDraftsRef.current.find(
           (entry) => entry.id === currentJob.draftId
         );
@@ -8373,6 +8577,15 @@ const App: React.FC = () => {
         cleanupDraftOperationalArtifacts(currentJob.draftId);
         clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
         showCornerSync('success', 'Banco OK', 1400);
+        markPaymentFlowTelemetryStageDuration(
+          currentJob.draftId,
+          currentJob.id,
+          'frontendReconcileMs',
+          performance.now() - frontendReconcileStartedAt
+        );
+        completePaymentFlowTelemetry(currentJob.draftId, {
+          retries: currentJob.attempts,
+        });
     } finally {
       if (currentJob) {
         pendingPaidSyncRunningDraftIdsRef.current.delete(currentJob.draftId);
@@ -8434,6 +8647,7 @@ const App: React.FC = () => {
     recoverPendingPaidSyncDraft,
     completePaymentFlowTelemetry,
     markPaymentFlowTelemetryProcessingStarted,
+    markPaymentFlowTelemetryStageDuration,
     markPaymentFlowTelemetryProgress,
     runCommandWithSync,
     setDraftLifecycleStage,
@@ -9913,6 +10127,8 @@ const App: React.FC = () => {
   );
   const hasPaidSyncQueueCards = paidSyncQueueCards.length > 0;
   const latestPaymentFlowTelemetry = paymentFlowTelemetryHistory[0] || null;
+  const latestPaymentFlowBreakdown =
+    getPaymentFlowProcessingBreakdown(latestPaymentFlowTelemetry);
   const cornerSyncToneClass =
     cornerSyncState.status === 'success'
       ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
@@ -10030,6 +10246,11 @@ const App: React.FC = () => {
                   pgto local:{latestPaymentFlowTelemetry.clickToLocalPersistMs ?? '-'}ms w:{latestPaymentFlowTelemetry.waitInQueueMs ?? '-'}ms p:{latestPaymentFlowTelemetry.processingMs ?? '-'}ms conf:{latestPaymentFlowTelemetry.totalConfMs ?? latestPaymentFlowTelemetry.clickToBackendConfirmMs ?? '-'}ms r:{latestPaymentFlowTelemetry.retries}
                 </p>
               )}
+              {latestPaymentFlowBreakdown && (
+                <p className="truncate">
+                  f:{latestPaymentFlowBreakdown.flushPendingDraftAddsMs} fi:{latestPaymentFlowBreakdown.finalizeMs} cf:{latestPaymentFlowBreakdown.confirmMs} sn:{latestPaymentFlowBreakdown.snapshotApplyMs} fr:{latestPaymentFlowBreakdown.frontendReconcileMs} oth:{latestPaymentFlowBreakdown.residualMs}
+                </p>
+              )}
             </div>
             {paidSyncAssistantState.active && (
               <div className="mt-1 flex items-center gap-1 rounded-full border border-sky-200 bg-sky-50 px-1.5 py-0.5 text-[8px] font-black uppercase tracking-wide text-sky-700">
@@ -10133,7 +10354,10 @@ const App: React.FC = () => {
               <div className="mt-1 max-h-[120px] space-y-1 overflow-y-auto">
                 {paymentFlowTelemetryHistory.slice(0, 10).map((entry) => (
                   <p key={entry.jobId} className="truncate font-mono text-[9px] text-slate-200">
-                    {entry.draftId.slice(-8).toUpperCase()} local:{entry.clickToLocalPersistMs ?? '-'}ms w:{entry.waitInQueueMs ?? '-'}ms p:{entry.processingMs ?? '-'}ms conf:{entry.totalConfMs ?? entry.clickToBackendConfirmMs ?? '-'}ms r:{entry.retries} rec:{entry.hadRecovery ? '1' : '0'} rc:{entry.hadReconciliation ? '1' : '0'}
+                    {(() => {
+                      const breakdown = getPaymentFlowProcessingBreakdown(entry);
+                      return `${entry.draftId.slice(-8).toUpperCase()} local:${entry.clickToLocalPersistMs ?? '-'}ms w:${entry.waitInQueueMs ?? '-'}ms p:${entry.processingMs ?? '-'}ms conf:${entry.totalConfMs ?? entry.clickToBackendConfirmMs ?? '-'}ms f:${breakdown?.flushPendingDraftAddsMs ?? '-'} fi:${breakdown?.finalizeMs ?? '-'} cf:${breakdown?.confirmMs ?? '-'} sn:${breakdown?.snapshotApplyMs ?? '-'} fr:${breakdown?.frontendReconcileMs ?? '-'} oth:${breakdown?.residualMs ?? '-'} r:${entry.retries} rec:${entry.hadRecovery ? '1' : '0'} rc:${entry.hadReconciliation ? '1' : '0'}`;
+                    })()}
                   </p>
                 ))}
                 {paymentFlowTelemetryHistory.length === 0 && (
