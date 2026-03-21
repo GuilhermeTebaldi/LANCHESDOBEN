@@ -137,6 +137,17 @@ interface HotStatePatch {
   cashRegisterAmount: FrontAppState['cashRegisterAmount'];
 }
 
+// SALE_DRAFT_CONFIRM_PAID mutates only these top-level keys in AppState.
+// Keeping this patch explicit avoids hot-path full JSON rewrites while preserving semantics.
+interface ConfirmPaidStatePatch {
+  ingredients: FrontAppState['ingredients'];
+  sales: FrontAppState['sales'];
+  stockEntries: FrontAppState['stockEntries'];
+  saleDrafts: FrontAppState['saleDrafts'];
+  globalSales: FrontAppState['globalSales'];
+  globalStockEntries: FrontAppState['globalStockEntries'];
+}
+
 interface PersistedStateRow {
   stateJson: Prisma.JsonValue;
   updatedAt: Date;
@@ -151,6 +162,15 @@ const toHotStatePatch = (state: FrontAppState): HotStatePatch => ({
   cleaningStockEntries: state.cleaningStockEntries,
   saleDrafts: state.saleDrafts,
   cashRegisterAmount: state.cashRegisterAmount,
+});
+
+const toConfirmPaidStatePatch = (state: FrontAppState): ConfirmPaidStatePatch => ({
+  ingredients: state.ingredients,
+  sales: state.sales,
+  stockEntries: state.stockEntries,
+  saleDrafts: state.saleDrafts,
+  globalSales: state.globalSales,
+  globalStockEntries: state.globalStockEntries,
 });
 
 export interface AppStateSnapshot {
@@ -591,26 +611,32 @@ export class StateService {
       // This preserves full history while avoiding heavy JSON writes on frequent cart operations.
       const shouldUpdateArchive = commandTouchesArchiveState(command.type);
       const persistStartedAt = shouldTrackPerf ? Date.now() : 0;
+      const shouldPersistConfirmPaidPatch =
+        !!current && command.type === 'SALE_DRAFT_CONFIRM_PAID' && shouldUpdateArchive;
       const shouldPersistFinalizeDraftOnly =
         !!current && command.type === 'SALE_DRAFT_FINALIZE' && !shouldUpdateArchive;
       const persistMode = !current
         ? 'create_full'
-        : shouldUpdateArchive
-          ? 'archive_full'
-          : shouldPersistFinalizeDraftOnly
+        : shouldPersistConfirmPaidPatch
+          ? 'confirm_paid_patch'
+          : shouldUpdateArchive
+            ? 'archive_full'
+            : shouldPersistFinalizeDraftOnly
             ? 'finalize_saleDrafts_only'
             : 'hot_patch';
       const saved: PersistedStateRow = current
-        ? shouldUpdateArchive
+        ? shouldPersistConfirmPaidPatch
+          ? await this.updateConfirmPaidStateTx(tx, nextState)
+          : shouldUpdateArchive
           ? await tx.appState.update({
               where: { id: 1 },
               data: {
                 stateJson: nextState as unknown as Prisma.InputJsonValue,
               },
             })
-          : shouldPersistFinalizeDraftOnly
-            ? await this.updateSaleDraftsOnlyTx(tx, nextState.saleDrafts)
-            : await this.updateHotStateTx(tx, nextState)
+            : shouldPersistFinalizeDraftOnly
+              ? await this.updateSaleDraftsOnlyTx(tx, nextState.saleDrafts)
+              : await this.updateHotStateTx(tx, nextState)
         : await tx.appState.create({
             data: {
               id: 1,
@@ -701,6 +727,32 @@ export class StateService {
     const row = rows[0];
     if (!row) {
       throw new HttpError(500, 'Falha ao persistir estado operacional.');
+    }
+
+    return {
+      stateJson: row.state_json,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  private async updateConfirmPaidStateTx(
+    tx: Prisma.TransactionClient,
+    state: FrontAppState
+  ): Promise<PersistedStateRow> {
+    const patch = JSON.stringify(toConfirmPaidStatePatch(state));
+    const rows = await tx.$queryRaw<Array<{ state_json: Prisma.JsonValue; updated_at: Date }>>(
+      Prisma.sql`
+        UPDATE app_state
+        SET state_json = state_json || ${patch}::jsonb,
+            updated_at = now()
+        WHERE id = 1
+        RETURNING state_json, updated_at
+      `
+    );
+
+    const row = rows[0];
+    if (!row) {
+      throw new HttpError(500, 'Falha ao persistir estado de confirmação de pagamento.');
     }
 
     return {
