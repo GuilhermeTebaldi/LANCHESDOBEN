@@ -82,6 +82,7 @@ const ADMIN_SESSION_KEY = 'lanchesdoben_admin_session';
 const ADMIN_SESSION_BACKUP_KEY = 'lanchesdoben_admin_session_backup';
 const OFFLINE_SALE_QUEUE_KEY = 'qb_offline_sale_queue_v1';
 const PENDING_DRAFT_ADDS_KEY = 'qb_pending_draft_adds_v1';
+const DRAFT_LIFECYCLE_STATE_KEY = 'qb_draft_lifecycle_state_v1';
 const PENDING_PAID_SYNC_QUEUE_KEY = 'qb_pending_paid_sync_queue_v1';
 const FAILED_PAID_SYNC_QUEUE_KEY = 'qb_failed_paid_sync_queue_v1';
 const PAYMENT_FLOW_TELEMETRY_HISTORY_KEY = 'qb_payment_flow_telemetry_history_v1';
@@ -106,6 +107,8 @@ type PendingDraftAddStatus =
   | 'APPLIED'
   | 'RECONCILED'
   | 'FAILED_TERMINAL';
+
+type DraftLifecycleStage = 'OPEN' | 'FINALIZING' | 'PENDING_CONFIRM' | 'PAID' | 'CANCELLED';
 
 interface OfflineQueuedSale {
   command: SaleRegisterCommand;
@@ -143,6 +146,14 @@ interface PendingDraftAddCancellationIntent {
 
 type PendingDraftAddsByDraftId = Record<string, PendingDraftAdd[]>;
 type PendingDraftAddsSource = 'visible' | 'recovery';
+
+interface DraftLifecycleStateRecord {
+  stage: DraftLifecycleStage;
+  epoch: number;
+  updatedAt: string;
+}
+
+type DraftLifecycleStateByDraftId = Record<string, DraftLifecycleStateRecord>;
 
 type CornerSyncState =
   | { visible: false; status: 'idle'; message: string }
@@ -699,6 +710,20 @@ const normalizePendingDraftAddStatus = (value: unknown): PendingDraftAddStatus =
     return normalized;
   }
   return 'ACTIVE';
+};
+
+const normalizeDraftLifecycleStage = (value: unknown): DraftLifecycleStage => {
+  const normalized = typeof value === 'string' ? value.trim().toUpperCase() : '';
+  if (
+    normalized === 'OPEN' ||
+    normalized === 'FINALIZING' ||
+    normalized === 'PENDING_CONFIRM' ||
+    normalized === 'PAID' ||
+    normalized === 'CANCELLED'
+  ) {
+    return normalized;
+  }
+  return 'OPEN';
 };
 
 const isPendingDraftAddTerminalStatus = (status: PendingDraftAddStatus): boolean =>
@@ -1567,6 +1592,42 @@ const savePendingDraftAdds = (pendingAdds: PendingDraftAddsByDraftId): void => {
   void operationalStorage.setCritical(PENDING_DRAFT_ADDS_KEY, pendingAdds);
 };
 
+const normalizeDraftLifecycleStateRecord = (value: unknown): DraftLifecycleStateRecord | null => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const source = value as Record<string, unknown>;
+  const stage = normalizeDraftLifecycleStage(source.stage);
+  const epochRaw = Number(source.epoch);
+  const epoch = Number.isFinite(epochRaw) && epochRaw >= 0 ? Math.floor(epochRaw) : 0;
+  const updatedAt =
+    typeof source.updatedAt === 'string' && !Number.isNaN(Date.parse(source.updatedAt))
+      ? source.updatedAt
+      : new Date().toISOString();
+  return { stage, epoch, updatedAt };
+};
+
+const normalizeDraftLifecycleStateMap = (parsed: unknown): DraftLifecycleStateByDraftId => {
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+  const record = parsed as Record<string, unknown>;
+  const next: DraftLifecycleStateByDraftId = {};
+  Object.entries(record).forEach(([draftId, value]) => {
+    const normalizedDraftId = draftId.trim();
+    if (!normalizedDraftId) return;
+    const normalized = normalizeDraftLifecycleStateRecord(value);
+    if (!normalized || normalized.stage === 'OPEN') return;
+    next[normalizedDraftId] = normalized;
+  });
+  return next;
+};
+
+const loadDraftLifecycleStateLocalFallback = (): DraftLifecycleStateByDraftId =>
+  normalizeDraftLifecycleStateMap(
+    operationalStorage.getLocalFallback<unknown>(DRAFT_LIFECYCLE_STATE_KEY)
+  );
+
+const saveDraftLifecycleState = (value: DraftLifecycleStateByDraftId): void => {
+  void operationalStorage.setCritical(DRAFT_LIFECYCLE_STATE_KEY, value);
+};
+
 const clonePaymentCommitSnapshot = (snapshot: PaymentCommitSnapshot): PaymentCommitSnapshot => ({
   draft: {
     ...snapshot.draft,
@@ -2196,6 +2257,9 @@ const App: React.FC = () => {
   const operationalEventLogRef = useRef<OperationalEventLogEntry[]>([]);
   const optimisticRemovedDraftItemsRef = useRef<Map<string, Set<string>>>(new Map());
   const draftItemRemoteMutationRetryAttemptsRef = useRef<Map<string, number>>(new Map());
+  const draftLifecycleStageRef = useRef<Map<string, DraftLifecycleStage>>(new Map());
+  const draftOperationEpochRef = useRef<Map<string, number>>(new Map());
+  const isDraftLifecycleHydratedRef = useRef(false);
   const lastOperationalHealthReportAtRef = useRef(0);
 
   if (!backendCommandSchedulerRef.current) {
@@ -2281,6 +2345,7 @@ const App: React.FC = () => {
     useState<PaymentFlowTelemetryRecord[]>([]);
   const [operationalEventLog, setOperationalEventLog] = useState<OperationalEventLogEntry[]>([]);
   const [optimisticRemovedDraftItemsRevision, setOptimisticRemovedDraftItemsRevision] = useState(0);
+  const [draftLifecycleRevision, setDraftLifecycleRevision] = useState(0);
   const [isTechnicalPanelOpen, setIsTechnicalPanelOpen] = useState(false);
   
   const [isAddProductModalOpen, setIsAddProductModalOpen] = useState(false);
@@ -2714,6 +2779,149 @@ const App: React.FC = () => {
       saveOperationalEventLog(nextList);
     },
     []
+  );
+
+  const persistDraftLifecycleState = useCallback((): void => {
+    const next: DraftLifecycleStateByDraftId = {};
+    draftLifecycleStageRef.current.forEach((stage, draftId) => {
+      if (stage === 'OPEN') return;
+      const normalizedDraftId = draftId.trim();
+      if (!normalizedDraftId) return;
+      next[normalizedDraftId] = {
+        stage,
+        epoch: draftOperationEpochRef.current.get(normalizedDraftId) || 0,
+        updatedAt: new Date().toISOString(),
+      };
+    });
+    saveDraftLifecycleState(next);
+  }, []);
+
+  const hydrateDraftLifecycleState = useCallback((): void => {
+    if (isDraftLifecycleHydratedRef.current) return;
+    const loaded = loadDraftLifecycleStateLocalFallback();
+    const nextStages = new Map<string, DraftLifecycleStage>();
+    const nextEpochs = new Map<string, number>();
+    Object.entries(loaded).forEach(([draftId, value]) => {
+      const normalizedDraftId = draftId.trim();
+      if (!normalizedDraftId) return;
+      const stage = normalizeDraftLifecycleStage(value.stage);
+      const epochRaw = Number(value.epoch);
+      const epoch = Number.isFinite(epochRaw) && epochRaw >= 0 ? Math.floor(epochRaw) : 0;
+      if (stage !== 'OPEN') {
+        nextStages.set(normalizedDraftId, stage);
+      }
+      nextEpochs.set(normalizedDraftId, epoch);
+    });
+    draftLifecycleStageRef.current = nextStages;
+    draftOperationEpochRef.current = nextEpochs;
+    isDraftLifecycleHydratedRef.current = true;
+    if (nextStages.size > 0 || nextEpochs.size > 0) {
+      setDraftLifecycleRevision((current) => current + 1);
+    }
+  }, []);
+
+  const getDraftOperationEpoch = useCallback((draftId: string): number => {
+    hydrateDraftLifecycleState();
+    const normalizedDraftId = draftId.trim();
+    if (!normalizedDraftId) return 0;
+    return draftOperationEpochRef.current.get(normalizedDraftId) || 0;
+  }, [hydrateDraftLifecycleState]);
+
+  const resolveDraftLifecycleStage = useCallback((draftId: string): DraftLifecycleStage => {
+    hydrateDraftLifecycleState();
+    const normalizedDraftId = draftId.trim();
+    if (!normalizedDraftId) return 'OPEN';
+
+    const explicitStage = draftLifecycleStageRef.current.get(normalizedDraftId);
+    if (explicitStage) {
+      return explicitStage;
+    }
+    if (syncingPaidDraftIdsRef.current.has(normalizedDraftId)) {
+      return 'PENDING_CONFIRM';
+    }
+    if (pendingPaidSyncQueueRef.current.some((job) => job.draftId === normalizedDraftId)) {
+      return 'PENDING_CONFIRM';
+    }
+    if (failedPaidSyncQueueRef.current.some((job) => job.draftId === normalizedDraftId)) {
+      return 'PENDING_CONFIRM';
+    }
+
+    const serverDraft = saleDraftsRef.current.find((entry) => entry.id === normalizedDraftId);
+    if (!serverDraft) return 'OPEN';
+    if (serverDraft.status === 'PAID') return 'PAID';
+    if (serverDraft.status === 'CANCELLED') return 'CANCELLED';
+    if (serverDraft.status === 'PENDING_PAYMENT') return 'PENDING_CONFIRM';
+    return 'OPEN';
+  }, [hydrateDraftLifecycleState]);
+
+  const isDraftLifecycleLocked = useCallback(
+    (draftId: string): boolean => resolveDraftLifecycleStage(draftId) !== 'OPEN',
+    [resolveDraftLifecycleStage]
+  );
+
+  const setDraftLifecycleStage = useCallback(
+    (
+      draftId: string,
+      stage: DraftLifecycleStage,
+      options: { reason?: string; bumpEpoch?: boolean } = {}
+    ): number => {
+      const normalizedDraftId = draftId.trim();
+      if (!normalizedDraftId) return 0;
+
+      const previousStage = draftLifecycleStageRef.current.get(normalizedDraftId) || null;
+      const previousEpoch = draftOperationEpochRef.current.get(normalizedDraftId) || 0;
+      const shouldBumpEpoch = options.bumpEpoch ?? previousStage !== stage;
+      const nextEpoch = shouldBumpEpoch ? previousEpoch + 1 : previousEpoch;
+
+      if (stage === 'OPEN') {
+        draftLifecycleStageRef.current.delete(normalizedDraftId);
+      } else {
+        draftLifecycleStageRef.current.set(normalizedDraftId, stage);
+      }
+      if (shouldBumpEpoch) {
+        draftOperationEpochRef.current.set(normalizedDraftId, nextEpoch);
+      } else if (!draftOperationEpochRef.current.has(normalizedDraftId)) {
+        draftOperationEpochRef.current.set(normalizedDraftId, 0);
+      }
+
+      if (previousStage !== stage || shouldBumpEpoch) {
+        setDraftLifecycleRevision((current) => current + 1);
+      }
+
+      if (previousStage !== stage) {
+        pushOperationalEvent(
+          'QUEUE_HEALTH',
+          stage === 'OPEN'
+            ? 'Draft voltou para estado editável.'
+            : `Draft travado em ${stage}.`,
+          {
+            draftId: normalizedDraftId,
+            previousStage,
+            stage,
+            reason: options.reason || null,
+            epoch: shouldBumpEpoch ? nextEpoch : previousEpoch,
+          }
+        );
+      }
+
+      persistDraftLifecycleState();
+      return shouldBumpEpoch ? nextEpoch : previousEpoch;
+    },
+    [persistDraftLifecycleState, pushOperationalEvent]
+  );
+
+  useEffect(() => {
+    hydrateDraftLifecycleState();
+  }, [hydrateDraftLifecycleState]);
+
+  const isDraftEpochCurrent = useCallback(
+    (draftId: string, expectedEpoch: number | null | undefined): boolean => {
+      const normalizedDraftId = draftId.trim();
+      if (!normalizedDraftId) return true;
+      if (expectedEpoch === null || expectedEpoch === undefined) return true;
+      return getDraftOperationEpoch(normalizedDraftId) === expectedEpoch;
+    },
+    [getDraftOperationEpoch]
   );
 
   const registerPaymentFlowTelemetryStart = useCallback(
@@ -3412,6 +3620,9 @@ const App: React.FC = () => {
       retryDispatchQueuedKeysRef.current.clear();
       backendCommandSchedulerRef.current?.clear();
       commandDraftLocksRef.current.clear();
+      draftLifecycleStageRef.current.clear();
+      draftOperationEpochRef.current.clear();
+      isDraftLifecycleHydratedRef.current = false;
     };
   }, []);
 
@@ -3497,6 +3708,27 @@ const App: React.FC = () => {
     const nextRecoveryByDraft = { ...recoveryPendingDraftAddsRef.current };
     delete nextRecoveryByDraft[normalizedDraftId];
     recoveryPendingDraftAddsRef.current = nextRecoveryByDraft;
+  }, []);
+
+  const cleanupDraftOperationalArtifacts = useCallback((draftId: string): void => {
+    const normalizedDraftId = draftId.trim();
+    if (!normalizedDraftId) return;
+
+    const timerMap = pendingDraftBackgroundSyncTimerRef.current;
+    const activeTimer = timerMap.get(normalizedDraftId);
+    if (activeTimer !== undefined) {
+      window.clearTimeout(activeTimer);
+      timerMap.delete(normalizedDraftId);
+    }
+    pendingDraftBackgroundRetryAttemptsRef.current.delete(normalizedDraftId);
+
+    const optimisticMap = optimisticRemovedDraftItemsRef.current;
+    if (optimisticMap.has(normalizedDraftId)) {
+      const nextMap = new Map(optimisticMap);
+      nextMap.delete(normalizedDraftId);
+      optimisticRemovedDraftItemsRef.current = nextMap;
+      setOptimisticRemovedDraftItemsRevision((current) => current + 1);
+    }
   }, []);
 
   useEffect(() => {
@@ -3811,6 +4043,53 @@ const App: React.FC = () => {
     applyCashHistorySnapshot(state);
   }, [applyCashHistorySnapshot]);
 
+  const applyStateSnapshotIfDraftEpochCurrent = useCallback(
+    (
+      state: AppState,
+      draftId: string | null | undefined,
+      expectedEpoch: number | null | undefined,
+      source: string
+    ): boolean => {
+      const normalizedDraftId = (draftId || '').trim();
+      if (!normalizedDraftId) {
+        applyStateSnapshot(state);
+        return true;
+      }
+
+      if (!isDraftEpochCurrent(normalizedDraftId, expectedEpoch)) {
+        const currentEpoch = getDraftOperationEpoch(normalizedDraftId);
+        pushOperationalEvent(
+          'COMMAND_SKIPPED_OBSOLETE',
+          'Resultado assíncrono obsoleto ignorado por mismatch de epoch.',
+          {
+            draftId: normalizedDraftId,
+            source,
+            expectedEpoch: expectedEpoch ?? null,
+            currentEpoch,
+          }
+        );
+        console.info('[COMMAND_EXECUTION]', {
+          type: 'COMMAND_EXECUTION',
+          commandId: null,
+          draftId: normalizedDraftId,
+          commandType: source,
+          duration: 0,
+          success: true,
+          retryCount: 0,
+          result: 'ignored_as_obsolete',
+          obsoleteReason: 'draft_epoch_mismatch',
+          expectedEpoch: expectedEpoch ?? null,
+          currentEpoch,
+        });
+        return false;
+      }
+
+      applyStateSnapshot(state);
+      return true;
+    },
+    [applyStateSnapshot, getDraftOperationEpoch, isDraftEpochCurrent, pushOperationalEvent]
+  );
+
   const executeSyncedCommand = useCallback(
     async (
       command: StateCommand,
@@ -3823,6 +4102,10 @@ const App: React.FC = () => {
 
       const executeCommand = async (): Promise<{ ok: true } | { ok: false; error: unknown }> => {
         try {
+          const commandDraftId = getCommandDraftId(command);
+          const expectedDraftEpoch = commandDraftId
+            ? getDraftOperationEpoch(commandDraftId)
+            : null;
           const obsoleteReason = getObsoleteCommandReason(command);
           if (obsoleteReason) {
             console.info('[COMMAND_EXECUTION]', {
@@ -3849,7 +4132,7 @@ const App: React.FC = () => {
             {
               operationType: 'RUN_STATE_COMMAND',
               command,
-              draftId: getCommandDraftId(command),
+              draftId: commandDraftId,
               retryCount: 0,
             },
             () =>
@@ -3857,7 +4140,12 @@ const App: React.FC = () => {
                 failFastOnVersionConflict: options.failFastOnVersionConflict,
               })
           );
-          applyStateSnapshot(nextState);
+          applyStateSnapshotIfDraftEpochCurrent(
+            nextState,
+            commandDraftId,
+            expectedDraftEpoch,
+            'run_state_command'
+          );
           return { ok: true };
         } catch (error) {
           return { ok: false, error };
@@ -3880,7 +4168,13 @@ const App: React.FC = () => {
 
       return scheduledExecution;
     },
-    [applyStateSnapshot, getObsoleteCommandReason, pushOperationalEvent, runBackendExecution]
+    [
+      applyStateSnapshotIfDraftEpochCurrent,
+      getDraftOperationEpoch,
+      getObsoleteCommandReason,
+      pushOperationalEvent,
+      runBackendExecution,
+    ]
   );
 
   const fetchStateSnapshotControlled = useCallback(
@@ -4210,7 +4504,10 @@ const App: React.FC = () => {
     };
 
     const mergedServerDrafts = saleDrafts.map((draft) =>
-      mergeDraft(draft, pendingDraftAddsByDraft[draft.id] || [])
+      mergeDraft(
+        draft,
+        isDraftLifecycleLocked(draft.id) ? [] : pendingDraftAddsByDraft[draft.id] || []
+      )
     );
 
     const serverDraftIds = new Set(saleDrafts.map((draft) => draft.id));
@@ -4228,6 +4525,7 @@ const App: React.FC = () => {
       .filter(
         ([draftId, entries]) =>
           countVisiblePendingDraftAdds(entries) > 0 &&
+          !isDraftLifecycleLocked(draftId) &&
           !serverDraftIds.has(draftId) &&
           !knownPersistedDraftIds.has(draftId)
       )
@@ -4272,6 +4570,8 @@ const App: React.FC = () => {
     globalCancelledSales,
     globalSales,
     optimisticRemovedDraftItemsRevision,
+    draftLifecycleRevision,
+    isDraftLifecycleLocked,
     pendingDraftAddsByDraft,
     products,
     saleDrafts,
@@ -4414,6 +4714,7 @@ const App: React.FC = () => {
 
       return saleDraftsWithPendingAdds.filter((draft) => {
         if (queuedDraftIds.has(draft.id)) return false;
+        if (isDraftLifecycleLocked(draft.id)) return false;
         if (draft.status !== 'DRAFT' && draft.status !== 'PENDING_PAYMENT') return false;
         const pendingLocalItemsCount = countVisiblePendingDraftAdds(
           pendingDraftAddsByDraft[draft.id] || []
@@ -4422,7 +4723,9 @@ const App: React.FC = () => {
       });
     },
     [
+      draftLifecycleRevision,
       failedPaidSyncQueue,
+      isDraftLifecycleLocked,
       pendingDraftAddsByDraft,
       pendingPaidSyncQueueSnapshot,
       saleDraftsWithPendingAdds,
@@ -4435,6 +4738,60 @@ const App: React.FC = () => {
   useEffect(() => {
     saleDraftsRef.current = saleDrafts;
   }, [saleDrafts]);
+  useEffect(() => {
+    const syncingDraftIds = new Set<string>();
+    syncingPaidDraftIds.forEach((draftId) => {
+      const normalizedDraftId = draftId.trim();
+      if (normalizedDraftId) {
+        syncingDraftIds.add(normalizedDraftId);
+      }
+    });
+    const queuedDraftIds = new Set<string>();
+    pendingPaidSyncQueueSnapshot.forEach((job) => {
+      const normalizedDraftId = job.draftId.trim();
+      if (normalizedDraftId) {
+        queuedDraftIds.add(normalizedDraftId);
+      }
+    });
+    failedPaidSyncQueue.forEach((job) => {
+      const normalizedDraftId = job.draftId.trim();
+      if (normalizedDraftId) {
+        queuedDraftIds.add(normalizedDraftId);
+      }
+    });
+
+    saleDrafts.forEach((draft) => {
+      if (draft.status === 'PAID' || draft.status === 'CANCELLED') {
+        setDraftLifecycleStage(draft.id, draft.status === 'PAID' ? 'PAID' : 'CANCELLED', {
+          reason: 'server_terminal_state',
+          bumpEpoch: false,
+        });
+      } else if (draft.status === 'PENDING_PAYMENT') {
+        setDraftLifecycleStage(draft.id, 'PENDING_CONFIRM', {
+          reason: 'server_pending_payment_state',
+          bumpEpoch: false,
+        });
+      } else if (draft.status === 'DRAFT') {
+        const normalizedDraftId = draft.id.trim();
+        if (!normalizedDraftId) return;
+        const hasTerminalProcessingInFlight =
+          syncingDraftIds.has(normalizedDraftId) || queuedDraftIds.has(normalizedDraftId);
+        if (hasTerminalProcessingInFlight) return;
+        if (resolveDraftLifecycleStage(normalizedDraftId) === 'OPEN') return;
+        setDraftLifecycleStage(normalizedDraftId, 'OPEN', {
+          reason: 'server_reopened_draft',
+          bumpEpoch: false,
+        });
+      }
+    });
+  }, [
+    failedPaidSyncQueue,
+    pendingPaidSyncQueueSnapshot,
+    resolveDraftLifecycleStage,
+    saleDrafts,
+    setDraftLifecycleStage,
+    syncingPaidDraftIds,
+  ]);
   useEffect(() => {
     const currentMap = optimisticRemovedDraftItemsRef.current;
     if (currentMap.size === 0) return;
@@ -4499,6 +4856,7 @@ const App: React.FC = () => {
 
   const resolveEditableDraftId = useCallback((): string | null => {
     const isDraftQueuedForPaidSync = (draftId: string): boolean => {
+      if (isDraftLifecycleLocked(draftId)) return true;
       if (syncingPaidDraftIdsRef.current.has(draftId)) return true;
       if (pendingPaidSyncQueueRef.current.some((job) => job.draftId === draftId)) return true;
       if (failedPaidSyncQueueRef.current.some((job) => job.draftId === draftId)) return true;
@@ -4548,7 +4906,7 @@ const App: React.FC = () => {
     }
 
     return null;
-  }, []);
+  }, [isDraftLifecycleLocked]);
 
   const ensureActiveDraft = useCallback(
     async (customerType: SaleCustomerType = 'BALCAO'): Promise<string | null> => {
@@ -4660,6 +5018,10 @@ const App: React.FC = () => {
       recipeOverride?: RecipeItem[],
       priceOverride?: number
     ): boolean => {
+      if (isDraftLifecycleLocked(draftId)) {
+        showNotification('Esta venda está em processamento e não aceita novos itens.');
+        return false;
+      }
       const ingressBlockedMs = Math.max(
         0,
         pendingDraftAddsIngressBlockedUntilRef.current - Date.now()
@@ -4754,6 +5116,7 @@ const App: React.FC = () => {
       notifyDraftItemStockIssue,
       resolveDraftItemStockIssue,
       showNotification,
+      isDraftLifecycleLocked,
       updatePendingDraftAddsForDraft,
     ]
   );
@@ -5002,6 +5365,10 @@ const App: React.FC = () => {
         showNotification('Remova os itens apenas com a venda em DRAFT.');
         return;
       }
+      if (isDraftLifecycleLocked(activeDraft.id)) {
+        showNotification('Esta venda está em processamento e não pode mais ser editada.');
+        return;
+      }
 
       const normalizedItemId = itemId.trim();
       if (!normalizedItemId) return;
@@ -5133,6 +5500,7 @@ const App: React.FC = () => {
       runDraftItemRemoteMutation,
       showNotification,
       updatePendingDraftAddByItemId,
+      isDraftLifecycleLocked,
     ]
   );
 
@@ -5181,16 +5549,31 @@ const App: React.FC = () => {
         setActiveDraftId(draftId);
       }
 
+      if (isDraftLifecycleLocked(draftId)) {
+        showNotification('Esta venda já entrou em processamento e não pode mais ser editada.');
+        return;
+      }
+
       const queued = queuePendingDraftAdd(draftId, product, recipeOverride, priceOverride);
       if (!queued) return;
 
       showNotification(`${product.name} adicionado ao carrinho!`);
       triggerCartEntryEffect(product.name);
     })();
-  }, [queuePendingDraftAdd, resolveEditableDraftId, showNotification, triggerCartEntryEffect]);
+  }, [
+    isDraftLifecycleLocked,
+    queuePendingDraftAdd,
+    resolveEditableDraftId,
+    showNotification,
+    triggerCartEntryEffect,
+  ]);
 
   const handleUpdateDraftCustomerType = (customerType: SaleCustomerType) => {
     if (!activeDraft) return;
+    if (isDraftLifecycleLocked(activeDraft.id)) {
+      showNotification('Esta venda está em processamento e não pode mais ser editada.');
+      return;
+    }
     void runCommandWithSync(
       {
         type: 'SALE_DRAFT_SET_CUSTOMER_TYPE',
@@ -5206,6 +5589,10 @@ const App: React.FC = () => {
     if (!activeDraft) return;
     if (activeDraft.status !== 'DRAFT') {
       showNotification('Edite os itens apenas com a venda em DRAFT.');
+      return;
+    }
+    if (isDraftLifecycleLocked(activeDraft.id)) {
+      showNotification('Esta venda está em processamento e não pode mais ser editada.');
       return;
     }
 
@@ -5250,6 +5637,10 @@ const App: React.FC = () => {
 
   const handleUpdateDraftItemNote = (itemId: string, note: string) => {
     if (!activeDraft || activeDraft.status !== 'DRAFT') return;
+    if (isDraftLifecycleLocked(activeDraft.id)) {
+      showNotification('Esta venda está em processamento e não pode mais ser editada.');
+      return;
+    }
     const normalizedNote = note.trim();
     const handledPending = updatePendingDraftAddByItemId(activeDraft.id, itemId, (entry) => ({
       ...entry,
@@ -6036,13 +6427,36 @@ const App: React.FC = () => {
           }
         }
         if (!ok) {
+          const shouldReturnToActive = !isDraftLifecycleLocked(draftId);
           updatePendingDraftAddInSource(
             draftId,
             source,
             (entry) =>
               entry.localItemId === current.localItemId && entry.commandId === current.commandId,
-            (entry) => withPendingDraftAddStatus(entry, 'ACTIVE')
+            (entry) =>
+              shouldReturnToActive
+                ? withPendingDraftAddStatus(entry, 'ACTIVE')
+                : withPendingDraftAddStatus(
+                    {
+                      ...entry,
+                      terminalReason: 'failed_while_draft_locked',
+                    },
+                    'FAILED_TERMINAL',
+                    'failed_while_draft_locked'
+                  )
           );
+          if (!shouldReturnToActive) {
+            pushOperationalEvent(
+              'COMMAND_SKIPPED_OBSOLETE',
+              'Pending add falhou com draft travado e foi terminalizado sem reexecução.',
+              {
+                draftId,
+                localItemId: current.localItemId,
+                commandId: current.commandId,
+                source,
+              }
+            );
+          }
           return false;
         }
 
@@ -6103,6 +6517,7 @@ const App: React.FC = () => {
       findServerDraftItemMatchingPendingIntent,
       hydratePendingDraftAdds,
       ingredients,
+      isDraftLifecycleLocked,
       products,
       reconcileCancelledPendingDraftAddIntent,
       updatePendingDraftAddInSource,
@@ -6157,6 +6572,17 @@ const App: React.FC = () => {
       if (!isAccessVerified || isStateHydrating) return;
       if (!isPendingDraftAddsHydratedRef.current) return;
       if (syncingPaidDraftIdsRef.current.has(normalizedDraftId)) return;
+      if (isDraftLifecycleLocked(normalizedDraftId)) {
+        pushOperationalEvent(
+          'COMMAND_SKIPPED_OBSOLETE',
+          'Background sync ignorado porque o draft está em lock terminal.',
+          {
+            draftId: normalizedDraftId,
+            stage: resolveDraftLifecycleStage(normalizedDraftId),
+          }
+        );
+        return;
+      }
 
       const draftEntries = pendingDraftAddsRef.current[normalizedDraftId] || [];
       if (!hasPendingDraftAddBackgroundSyncWork(draftEntries)) {
@@ -6230,8 +6656,11 @@ const App: React.FC = () => {
     },
     [
       flushPendingDraftAdds,
+      isDraftLifecycleLocked,
       isAccessVerified,
       isStateHydrating,
+      pushOperationalEvent,
+      resolveDraftLifecycleStage,
       resolveDraftCustomerType,
       showNotification,
     ]
@@ -6263,7 +6692,7 @@ const App: React.FC = () => {
       }, safeDelayMs);
       timers.set(normalizedDraftId, timerId);
     },
-    [isAccessVerified, isStateHydrating, runPendingDraftBackgroundSync]
+    [isAccessVerified, isDraftLifecycleLocked, isStateHydrating, runPendingDraftBackgroundSync]
   );
 
   useEffect(() => {
@@ -6295,6 +6724,7 @@ const App: React.FC = () => {
       if (!isAccessVerified || isStateHydrating) return;
       Object.entries(pendingDraftAddsRef.current).forEach(([draftId, entries]) => {
         if (!Array.isArray(entries) || countVisiblePendingDraftAdds(entries) === 0) return;
+        if (isDraftLifecycleLocked(draftId)) return;
         schedulePendingDraftBackgroundSync(draftId, 120);
       });
     };
@@ -6314,7 +6744,7 @@ const App: React.FC = () => {
       window.removeEventListener('online', handleOnline);
       window.clearInterval(intervalId);
     };
-  }, [isAccessVerified, isStateHydrating, schedulePendingDraftBackgroundSync]);
+  }, [isAccessVerified, isDraftLifecycleLocked, isStateHydrating, schedulePendingDraftBackgroundSync]);
 
   const handleSavePaymentMethod = async (
     snapshot: PaymentCommitSnapshot | null,
@@ -6367,6 +6797,7 @@ const App: React.FC = () => {
       splitCommitted: snapshotSplitCommitted,
       effectivePaymentTotal: snapshotEffectivePaymentTotal,
     } = activeSnapshot;
+    const draftEpochAtFinalizeStart = getDraftOperationEpoch(draft.id);
 
     if (draft.items.length === 0) {
       notifyError('Carrinho vazio. Não é possível finalizar.');
@@ -6547,7 +6978,12 @@ const App: React.FC = () => {
 
       try {
         const refreshedState = await fetchStateSnapshotControlled(draft.id);
-        applyStateSnapshot(refreshedState);
+        applyStateSnapshotIfDraftEpochCurrent(
+          refreshedState,
+          draft.id,
+          draftEpochAtFinalizeStart,
+          'finalize_async_refresh'
+        );
       } catch (error) {
         const message = getStateSyncErrorMessage(error);
         updateRunCommandErrorSink(options.errorSink, {
@@ -6612,7 +7048,7 @@ const App: React.FC = () => {
     (jobInput: PendingPaidSyncJob) => {
       hydratePendingPaidSyncQueue();
       const normalizedJob = normalizePendingPaidSyncJob(jobInput);
-      if (!normalizedJob) return;
+      if (!normalizedJob) return false;
 
       const existingIndex = pendingPaidSyncQueueRef.current.findIndex(
         (entry) => entry.draftId === normalizedJob.draftId
@@ -6630,8 +7066,12 @@ const App: React.FC = () => {
           lastError: undefined,
         };
         replacePendingPaidSyncQueue(nextQueue);
+        setDraftLifecycleStage(normalizedJob.draftId, 'FINALIZING', {
+          reason: 'pending_paid_job_replaced',
+          bumpEpoch: false,
+        });
         setDraftSyncInProgress(normalizedJob.draftId, true);
-        return;
+        return true;
       }
 
       const ingressBlockedMs = Math.max(
@@ -6642,7 +7082,7 @@ const App: React.FC = () => {
         showNotification(
           `Fila de sincronização ocupada. Aguarde ${Math.ceil(ingressBlockedMs / 1000)}s e tente novamente.`
         );
-        return;
+        return false;
       }
 
       if (pendingPaidSyncQueueRef.current.length >= PENDING_PAID_SYNC_QUEUE_MAX_SIZE) {
@@ -6650,16 +7090,22 @@ const App: React.FC = () => {
         showNotification(
           'Fila de sincronização no limite. Novos envios foram pausados temporariamente.'
         );
-        return;
+        return false;
       }
 
       replacePendingPaidSyncQueue([...pendingPaidSyncQueueRef.current, normalizedJob]);
+      setDraftLifecycleStage(normalizedJob.draftId, 'FINALIZING', {
+        reason: 'pending_paid_job_enqueued',
+        bumpEpoch: false,
+      });
       setDraftSyncInProgress(normalizedJob.draftId, true);
+      return true;
     },
     [
       activatePendingPaidSyncIngressBackpressure,
       hydratePendingPaidSyncQueue,
       replacePendingPaidSyncQueue,
+      setDraftLifecycleStage,
       setDraftSyncInProgress,
       showNotification,
     ]
@@ -6808,7 +7254,11 @@ const App: React.FC = () => {
       });
       return true;
     },
-    [collectRestoreBlockedPendingSemanticKeysForDraft, hydratePendingDraftAdds, pushOperationalEvent]
+    [
+      collectRestoreBlockedPendingSemanticKeysForDraft,
+      hydratePendingDraftAdds,
+      pushOperationalEvent,
+    ]
   );
 
   const recoverPendingPaidSyncDraft = useCallback(
@@ -6831,6 +7281,7 @@ const App: React.FC = () => {
           statusCode: 422,
         };
       }
+      const recoveryEpoch = getDraftOperationEpoch(normalizedDraftId);
 
       const localServerDraft = saleDraftsRef.current.find((draft) => draft.id === normalizedDraftId);
       const recoverySource: PendingDraftAddsSource = 'recovery';
@@ -6888,7 +7339,20 @@ const App: React.FC = () => {
         };
       }
 
-      applyStateSnapshot(refreshedState);
+      const appliedRecoveredSnapshot = applyStateSnapshotIfDraftEpochCurrent(
+        refreshedState,
+        normalizedDraftId,
+        recoveryEpoch,
+        'recover_pending_paid_sync_draft'
+      );
+      if (!appliedRecoveredSnapshot) {
+        return {
+          ok: false,
+          retryable: true,
+          message: 'Resultado de recovery obsoleto; aguardando operação mais nova.',
+          statusCode: 409,
+        };
+      }
       const refreshedDraft = refreshedState.saleDrafts.find((draft) => draft.id === normalizedDraftId);
       if (!refreshedDraft) {
         return {
@@ -6916,10 +7380,11 @@ const App: React.FC = () => {
       return { ok: true, reconciledOnServer: false };
     },
     [
-      applyStateSnapshot,
+      applyStateSnapshotIfDraftEpochCurrent,
       clearRecoveryPendingDraftAddsForDraft,
       fetchStateSnapshotControlled,
       flushPendingDraftAdds,
+      getDraftOperationEpoch,
       hydratePendingDraftAdds,
       restorePendingDraftAddsFromSnapshot,
     ]
@@ -7049,7 +7514,7 @@ const App: React.FC = () => {
           retries: failedJob.attempts,
           hadRecovery: true,
         });
-        enqueuePendingPaidSyncJob({
+        const requeued = enqueuePendingPaidSyncJob({
           ...failedJob,
           finalizeCommandId: createClientId('cmd'),
           confirmCommandId: createClientId('cmd'),
@@ -7057,6 +7522,14 @@ const App: React.FC = () => {
           nextAttemptAt: undefined,
           lastError: undefined,
         });
+        if (!requeued) {
+          replaceFailedPaidSyncQueue([failedJob, ...failedPaidSyncQueueRef.current]);
+          showCornerSync('error', 'Pedido recuperado, mas falhou ao reenfileirar agora.', 2600);
+          if (!options.silentNotification) {
+            showNotification('Pedido recuperado, mas o reenvio falhou. Ele voltou para a fila de falhas.');
+          }
+          return false;
+        }
         showCornerSync('syncing', 'Pedido recuperado e reenviado automaticamente.', 2200);
         if (!options.silentNotification) {
           showNotification('Pedido recuperado e reenviado automaticamente.');
@@ -7150,17 +7623,31 @@ const App: React.FC = () => {
           currentServerDraft &&
           (currentServerDraft.status === 'PAID' || currentServerDraft.status === 'CANCELLED')
         ) {
+          setDraftLifecycleStage(
+            currentJob.draftId,
+            currentServerDraft.status === 'PAID' ? 'PAID' : 'CANCELLED',
+            {
+              reason: 'queue_head_already_terminal',
+              bumpEpoch: false,
+            }
+          );
           completePaymentFlowTelemetry(currentJob.draftId, {
             retries: currentJob.attempts,
             hadReconciliation: true,
           });
           replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
           setDraftSyncInProgress(currentJob.draftId, false);
+          cleanupDraftOperationalArtifacts(currentJob.draftId);
           clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
           continue;
         }
 
         setDraftSyncInProgress(currentJob.draftId, true);
+        setDraftLifecycleStage(currentJob.draftId, 'FINALIZING', {
+          reason: 'pending_paid_processing',
+          bumpEpoch: false,
+        });
+        const draftProcessingEpoch = getDraftOperationEpoch(currentJob.draftId);
         setPaidSyncAssistantActivity(
           'reconciling',
           describePaidSyncAssistantMode(
@@ -7238,6 +7725,17 @@ const App: React.FC = () => {
 
             if (recoveryResult.ok) {
               if (recoveryResult.reconciledOnServer) {
+                const recoveredServerDraft = saleDraftsRef.current.find(
+                  (entry) => entry.id === currentJob.draftId
+                );
+                setDraftLifecycleStage(
+                  currentJob.draftId,
+                  recoveredServerDraft?.status === 'CANCELLED' ? 'CANCELLED' : 'PAID',
+                  {
+                    reason: 'recovery_reconciled_on_server',
+                    bumpEpoch: false,
+                  }
+                );
                 markPaymentFlowTelemetryProgress(currentJob.draftId, {
                   retries: currentJob.attempts + 1,
                   hadRecovery: true,
@@ -7250,6 +7748,7 @@ const App: React.FC = () => {
                 });
                 replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
                 setDraftSyncInProgress(currentJob.draftId, false);
+                cleanupDraftOperationalArtifacts(currentJob.draftId);
                 clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
                 showCornerSync('success', 'Pedido já estava resolvido no banco.', 1800);
                 return;
@@ -7405,12 +7904,21 @@ const App: React.FC = () => {
             currentServerDraft &&
             (currentServerDraft.status === 'PAID' || currentServerDraft.status === 'CANCELLED')
           ) {
+            setDraftLifecycleStage(
+              currentJob.draftId,
+              currentServerDraft.status === 'PAID' ? 'PAID' : 'CANCELLED',
+              {
+                reason: 'queue_after_flush_terminal',
+                bumpEpoch: false,
+              }
+            );
             completePaymentFlowTelemetry(currentJob.draftId, {
               retries: currentJob.attempts,
               hadReconciliation: true,
             });
             replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
             setDraftSyncInProgress(currentJob.draftId, false);
+            cleanupDraftOperationalArtifacts(currentJob.draftId);
             clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
             showCornerSync('success', 'Pedido já estava concluído no banco.', 1800);
             continue;
@@ -7423,7 +7931,12 @@ const App: React.FC = () => {
           if (!currentServerDraft || (currentServerDraft.items || []).length === 0) {
             try {
               const refreshedState = await fetchStateSnapshotControlled(currentJob.draftId);
-              applyStateSnapshot(refreshedState);
+              applyStateSnapshotIfDraftEpochCurrent(
+                refreshedState,
+                currentJob.draftId,
+                draftProcessingEpoch,
+                'pending_paid_refresh_before_finalize'
+              );
             } catch {
               // best-effort refresh; fallback to local view below
             }
@@ -7434,12 +7947,21 @@ const App: React.FC = () => {
             currentServerDraft &&
             (currentServerDraft.status === 'PAID' || currentServerDraft.status === 'CANCELLED')
           ) {
+            setDraftLifecycleStage(
+              currentJob.draftId,
+              currentServerDraft.status === 'PAID' ? 'PAID' : 'CANCELLED',
+              {
+                reason: 'queue_after_refresh_terminal',
+                bumpEpoch: false,
+              }
+            );
             completePaymentFlowTelemetry(currentJob.draftId, {
               retries: currentJob.attempts,
               hadReconciliation: true,
             });
             replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
             setDraftSyncInProgress(currentJob.draftId, false);
+            cleanupDraftOperationalArtifacts(currentJob.draftId);
             clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
             showCornerSync('success', 'Pedido já estava concluído no banco.', 1800);
             continue;
@@ -7479,7 +8001,12 @@ const App: React.FC = () => {
               let stateRefreshed = false;
               try {
                 const refreshedState = await fetchStateSnapshotControlled(currentJob.draftId);
-                applyStateSnapshot(refreshedState);
+                applyStateSnapshotIfDraftEpochCurrent(
+                  refreshedState,
+                  currentJob.draftId,
+                  draftProcessingEpoch,
+                  'pending_paid_refresh_finalize_conflict'
+                );
                 stateRefreshed = true;
               } catch {
                 // best-effort: if refresh fails we still evaluate local snapshot below
@@ -7492,12 +8019,21 @@ const App: React.FC = () => {
                 latestDraft.status === 'PAID' ||
                 latestDraft.status === 'CANCELLED'
               ) {
+                setDraftLifecycleStage(
+                  currentJob.draftId,
+                  latestDraft?.status === 'CANCELLED' ? 'CANCELLED' : 'PAID',
+                  {
+                    reason: 'queue_finalize_conflict_terminal',
+                    bumpEpoch: false,
+                  }
+                );
                 completePaymentFlowTelemetry(currentJob.draftId, {
                   retries: currentJob.attempts,
                   hadReconciliation: true,
                 });
                 replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
                 setDraftSyncInProgress(currentJob.draftId, false);
+                cleanupDraftOperationalArtifacts(currentJob.draftId);
                 clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
                 showCornerSync('success', 'Pedido já estava concluído no banco.', 1800);
                 continue;
@@ -7522,6 +8058,13 @@ const App: React.FC = () => {
               return;
             }
           }
+        }
+
+        if (finalized) {
+          setDraftLifecycleStage(currentJob.draftId, 'PENDING_CONFIRM', {
+            reason: 'finalize_completed_awaiting_confirm',
+            bumpEpoch: false,
+          });
         }
 
         const confirmCommand: StateCommand = {
@@ -7648,7 +8191,12 @@ const App: React.FC = () => {
           if (!resolvedBySyncFallback) {
             try {
               const refreshedState = await fetchStateSnapshotControlled(currentJob.draftId);
-              applyStateSnapshot(refreshedState);
+              applyStateSnapshotIfDraftEpochCurrent(
+                refreshedState,
+                currentJob.draftId,
+                draftProcessingEpoch,
+                'pending_paid_refresh_after_confirm'
+              );
             } catch (error) {
               await markJobAsFailed('Pedido confirmado, mas falhou ao atualizar estado local.', {
                 error,
@@ -7665,7 +8213,26 @@ const App: React.FC = () => {
           retries: currentJob.attempts,
         });
         replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
+        const latestDraftAfterConfirm = saleDraftsRef.current.find(
+          (entry) => entry.id === currentJob.draftId
+        );
+        if (latestDraftAfterConfirm?.status === 'PAID' || latestDraftAfterConfirm?.status === 'CANCELLED') {
+          setDraftLifecycleStage(
+            currentJob.draftId,
+            latestDraftAfterConfirm.status === 'PAID' ? 'PAID' : 'CANCELLED',
+            {
+              reason: 'confirm_completed_terminal',
+              bumpEpoch: false,
+            }
+          );
+        } else {
+          setDraftLifecycleStage(currentJob.draftId, 'PENDING_CONFIRM', {
+            reason: 'confirm_completed_waiting_terminal_snapshot',
+            bumpEpoch: false,
+          });
+        }
         setDraftSyncInProgress(currentJob.draftId, false);
+        cleanupDraftOperationalArtifacts(currentJob.draftId);
         clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
         showCornerSync('success', 'Banco OK', 1400);
       }
@@ -7687,13 +8254,15 @@ const App: React.FC = () => {
       }
     }
   }, [
-    applyStateSnapshot,
+    applyStateSnapshotIfDraftEpochCurrent,
+    cleanupDraftOperationalArtifacts,
     enqueueFailedPaidSyncJob,
     enqueueRetryDispatchTask,
     enqueueStateCommandAsyncControlled,
     fetchStateSnapshotControlled,
     flushPendingDraftAdds,
     getBackendFailsafeRemainingMs,
+    getDraftOperationEpoch,
     getStateCommandAsyncJobControlled,
     handleSavePaymentMethod,
     hydratePendingPaidSyncQueue,
@@ -7706,6 +8275,7 @@ const App: React.FC = () => {
     completePaymentFlowTelemetry,
     markPaymentFlowTelemetryProgress,
     runCommandWithSync,
+    setDraftLifecycleStage,
     setPaidSyncAssistantActivity,
     setDraftSyncInProgress,
     scheduleRetryDispatchTask,
@@ -7792,7 +8362,7 @@ const App: React.FC = () => {
         return;
       }
 
-      enqueuePendingPaidSyncJob({
+      const requeued = enqueuePendingPaidSyncJob({
         id: createClientId('paid-sync-job'),
         draftId: draft.id,
         snapshot,
@@ -7801,6 +8371,16 @@ const App: React.FC = () => {
         createdAt: new Date().toISOString(),
         attempts: 0,
       });
+      if (!requeued) {
+        pushOperationalEvent(
+          'BACKPRESSURE',
+          'Auto-reenqueue não conseguiu reenfileirar o draft por limitação de fila.',
+          {
+            draftId: draft.id,
+          }
+        );
+        return;
+      }
       setPaidSyncAssistantActivity(
         'retrying',
         describePaidSyncAssistantMode('retrying', `pedido ${draft.id.slice(-8).toUpperCase()} (auto)`),
@@ -8286,6 +8866,10 @@ const App: React.FC = () => {
     if (isConfirmingPaid) return;
 
     const draftId = activeDraft.id;
+    if (isDraftLifecycleLocked(draftId)) {
+      showNotification('Esta venda já está em processamento de pagamento.');
+      return;
+    }
     const paymentSnapshot: PaymentCommitSnapshot = {
       draft: activeDraft,
       paymentMethod,
@@ -8405,7 +8989,16 @@ const App: React.FC = () => {
     }
     setActiveDraftId(null);
 
-    enqueuePendingPaidSyncJob(queuedJob);
+    const queued = enqueuePendingPaidSyncJob(queuedJob);
+    if (!queued) {
+      setDraftSyncInProgress(draftId, false);
+      setDraftLifecycleStage(draftId, 'OPEN', {
+        reason: 'pending_paid_enqueue_rejected',
+        bumpEpoch: false,
+      });
+      setIsConfirmingPaid(false);
+      return;
+    }
     markPaymentFlowTelemetryLocalPersisted(draftId, queuedJob.id);
     showCornerSync(
       'syncing',
