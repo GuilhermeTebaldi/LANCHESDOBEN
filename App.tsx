@@ -219,6 +219,7 @@ interface PaymentFlowTelemetryEntry {
   jobId: string;
   clickAtMs: number;
   localPersistedAtMs: number | null;
+  processingStartedAtMs: number | null;
   retries: number;
   hadRecovery: boolean;
   hadReconciliation: boolean;
@@ -228,6 +229,9 @@ interface PaymentFlowTelemetryRecord {
   draftId: string;
   jobId: string;
   clickToLocalPersistMs: number | null;
+  waitInQueueMs: number | null;
+  processingMs: number | null;
+  totalConfMs: number | null;
   clickToBackendConfirmMs: number | null;
   retries: number;
   hadRecovery: boolean;
@@ -1803,6 +1807,9 @@ const normalizePaymentFlowTelemetryRecord = (
   const jobId = typeof source.jobId === 'string' ? source.jobId.trim() : '';
   if (!draftId || !jobId) return null;
   const clickToLocalPersistRaw = Number(source.clickToLocalPersistMs);
+  const waitInQueueRaw = Number(source.waitInQueueMs);
+  const processingRaw = Number(source.processingMs);
+  const totalConfRaw = Number(source.totalConfMs);
   const clickToBackendConfirmRaw = Number(source.clickToBackendConfirmMs);
   const retriesRaw = Number(source.retries);
   const timestamp =
@@ -1817,10 +1824,26 @@ const normalizePaymentFlowTelemetryRecord = (
       Number.isFinite(clickToLocalPersistRaw) && clickToLocalPersistRaw >= 0
         ? Math.floor(clickToLocalPersistRaw)
         : null,
+    waitInQueueMs:
+      Number.isFinite(waitInQueueRaw) && waitInQueueRaw >= 0
+        ? Math.floor(waitInQueueRaw)
+        : null,
+    processingMs:
+      Number.isFinite(processingRaw) && processingRaw >= 0
+        ? Math.floor(processingRaw)
+        : null,
+    totalConfMs:
+      Number.isFinite(totalConfRaw) && totalConfRaw >= 0
+        ? Math.floor(totalConfRaw)
+        : Number.isFinite(clickToBackendConfirmRaw) && clickToBackendConfirmRaw >= 0
+          ? Math.floor(clickToBackendConfirmRaw)
+          : null,
     clickToBackendConfirmMs:
       Number.isFinite(clickToBackendConfirmRaw) && clickToBackendConfirmRaw >= 0
         ? Math.floor(clickToBackendConfirmRaw)
-        : null,
+        : Number.isFinite(totalConfRaw) && totalConfRaw >= 0
+          ? Math.floor(totalConfRaw)
+          : null,
     retries: Number.isFinite(retriesRaw) && retriesRaw >= 0 ? Math.floor(retriesRaw) : 0,
     hadRecovery: source.hadRecovery === true,
     hadReconciliation: source.hadReconciliation === true,
@@ -2954,6 +2977,7 @@ const App: React.FC = () => {
         jobId: normalizedJobId,
         clickAtMs,
         localPersistedAtMs: null,
+        processingStartedAtMs: null,
         retries: 0,
         hadRecovery: false,
         hadReconciliation: false,
@@ -2975,6 +2999,25 @@ const App: React.FC = () => {
       paymentFlowTelemetryByDraftRef.current.set(normalizedDraftId, {
         ...current,
         localPersistedAtMs: Date.now(),
+      });
+    },
+    []
+  );
+
+  const markPaymentFlowTelemetryProcessingStarted = useCallback(
+    (draftId: string, jobId: string): void => {
+      const normalizedDraftId = draftId.trim();
+      const normalizedJobId = jobId.trim();
+      if (!normalizedDraftId || !normalizedJobId) return;
+
+      const current = paymentFlowTelemetryByDraftRef.current.get(normalizedDraftId);
+      if (!current) return;
+      if (current.jobId !== normalizedJobId) return;
+      if (current.processingStartedAtMs !== null) return;
+
+      paymentFlowTelemetryByDraftRef.current.set(normalizedDraftId, {
+        ...current,
+        processingStartedAtMs: Date.now(),
       });
     },
     []
@@ -3034,13 +3077,24 @@ const App: React.FC = () => {
         current.localPersistedAtMs !== null
           ? Math.max(0, current.localPersistedAtMs - current.clickAtMs)
           : null;
-      const clickToBackendConfirmMs = Math.max(0, nowMs - current.clickAtMs);
+      const waitInQueueMs =
+        current.processingStartedAtMs !== null
+          ? Math.max(0, current.processingStartedAtMs - current.clickAtMs)
+          : null;
+      const processingMs =
+        current.processingStartedAtMs !== null
+          ? Math.max(0, nowMs - current.processingStartedAtMs)
+          : null;
+      const totalConfMs = Math.max(0, nowMs - current.clickAtMs);
 
       const record: PaymentFlowTelemetryRecord = {
         draftId: current.draftId,
         jobId: current.jobId,
         clickToLocalPersistMs,
-        clickToBackendConfirmMs,
+        waitInQueueMs,
+        processingMs,
+        totalConfMs,
+        clickToBackendConfirmMs: totalConfMs,
         retries: normalizedRetries,
         hadRecovery,
         hadReconciliation,
@@ -3055,6 +3109,9 @@ const App: React.FC = () => {
       pushOperationalEvent('PAYMENT_FLOW', 'Fluxo de pagamento concluído.', {
         draftId: record.draftId,
         jobId: record.jobId,
+        waitInQueueMs: record.waitInQueueMs,
+        processingMs: record.processingMs,
+        totalConfMs: record.totalConfMs,
         clickToBackendConfirmMs: record.clickToBackendConfirmMs,
         retries: record.retries,
         hadRecovery: record.hadRecovery,
@@ -3069,6 +3126,9 @@ const App: React.FC = () => {
           draftId: record.draftId,
           jobId: record.jobId,
           clickToLocalPersistMs: record.clickToLocalPersistMs,
+          waitInQueueMs: record.waitInQueueMs,
+          processingMs: record.processingMs,
+          totalConfMs: record.totalConfMs,
           clickToBackendConfirmMs: record.clickToBackendConfirmMs,
           retries: record.retries,
           hadRecovery: record.hadRecovery,
@@ -7653,6 +7713,8 @@ const App: React.FC = () => {
           return;
         }
 
+        markPaymentFlowTelemetryProcessingStarted(currentJob.draftId, currentJob.id);
+
         let currentServerDraft = saleDraftsRef.current.find(
           (draft) => draft.id === currentJob.draftId
         );
@@ -8347,6 +8409,7 @@ const App: React.FC = () => {
     replacePendingPaidSyncQueue,
     recoverPendingPaidSyncDraft,
     completePaymentFlowTelemetry,
+    markPaymentFlowTelemetryProcessingStarted,
     markPaymentFlowTelemetryProgress,
     runCommandWithSync,
     setDraftLifecycleStage,
@@ -9940,7 +10003,7 @@ const App: React.FC = () => {
               </p>
               {latestPaymentFlowTelemetry && (
                 <p className="truncate">
-                  pgto local:{latestPaymentFlowTelemetry.clickToLocalPersistMs ?? '-'}ms conf:{latestPaymentFlowTelemetry.clickToBackendConfirmMs ?? '-'}ms r:{latestPaymentFlowTelemetry.retries}
+                  pgto local:{latestPaymentFlowTelemetry.clickToLocalPersistMs ?? '-'}ms w:{latestPaymentFlowTelemetry.waitInQueueMs ?? '-'}ms p:{latestPaymentFlowTelemetry.processingMs ?? '-'}ms conf:{latestPaymentFlowTelemetry.totalConfMs ?? latestPaymentFlowTelemetry.clickToBackendConfirmMs ?? '-'}ms r:{latestPaymentFlowTelemetry.retries}
                 </p>
               )}
             </div>
@@ -10046,7 +10109,7 @@ const App: React.FC = () => {
               <div className="mt-1 max-h-[120px] space-y-1 overflow-y-auto">
                 {paymentFlowTelemetryHistory.slice(0, 10).map((entry) => (
                   <p key={entry.jobId} className="truncate font-mono text-[9px] text-slate-200">
-                    {entry.draftId.slice(-8).toUpperCase()} local:{entry.clickToLocalPersistMs ?? '-'}ms conf:{entry.clickToBackendConfirmMs ?? '-'}ms r:{entry.retries} rec:{entry.hadRecovery ? '1' : '0'} rc:{entry.hadReconciliation ? '1' : '0'}
+                    {entry.draftId.slice(-8).toUpperCase()} local:{entry.clickToLocalPersistMs ?? '-'}ms w:{entry.waitInQueueMs ?? '-'}ms p:{entry.processingMs ?? '-'}ms conf:{entry.totalConfMs ?? entry.clickToBackendConfirmMs ?? '-'}ms r:{entry.retries} rec:{entry.hadRecovery ? '1' : '0'} rc:{entry.hadReconciliation ? '1' : '0'}
                   </p>
                 ))}
                 {paymentFlowTelemetryHistory.length === 0 && (

@@ -591,6 +591,15 @@ export class StateService {
       // This preserves full history while avoiding heavy JSON writes on frequent cart operations.
       const shouldUpdateArchive = commandTouchesArchiveState(command.type);
       const persistStartedAt = shouldTrackPerf ? Date.now() : 0;
+      const shouldPersistFinalizeDraftOnly =
+        !!current && command.type === 'SALE_DRAFT_FINALIZE' && !shouldUpdateArchive;
+      const persistMode = !current
+        ? 'create_full'
+        : shouldUpdateArchive
+          ? 'archive_full'
+          : shouldPersistFinalizeDraftOnly
+            ? 'finalize_saleDrafts_only'
+            : 'hot_patch';
       const saved: PersistedStateRow = current
         ? shouldUpdateArchive
           ? await tx.appState.update({
@@ -599,7 +608,9 @@ export class StateService {
                 stateJson: nextState as unknown as Prisma.InputJsonValue,
               },
             })
-          : await this.updateHotStateTx(tx, nextState)
+          : shouldPersistFinalizeDraftOnly
+            ? await this.updateSaleDraftsOnlyTx(tx, nextState.saleDrafts)
+            : await this.updateHotStateTx(tx, nextState)
         : await tx.appState.create({
             data: {
               id: 1,
@@ -630,6 +641,7 @@ export class StateService {
           commandId: command.commandId ?? null,
           requestId: context?.requestId || null,
           shouldUpdateArchive,
+          persistMode,
           readStateMs,
           applyCommandMs,
           persistMs,
@@ -689,6 +701,37 @@ export class StateService {
     const row = rows[0];
     if (!row) {
       throw new HttpError(500, 'Falha ao persistir estado operacional.');
+    }
+
+    return {
+      stateJson: row.state_json,
+      updatedAt: row.updated_at,
+    };
+  }
+
+  private async updateSaleDraftsOnlyTx(
+    tx: Prisma.TransactionClient,
+    saleDrafts: FrontAppState['saleDrafts']
+  ): Promise<PersistedStateRow> {
+    const patch = JSON.stringify(saleDrafts);
+    const rows = await tx.$queryRaw<Array<{ state_json: Prisma.JsonValue; updated_at: Date }>>(
+      Prisma.sql`
+        UPDATE app_state
+        SET state_json = jsonb_set(
+              COALESCE(state_json, '{}'::jsonb),
+              '{saleDrafts}',
+              ${patch}::jsonb,
+              true
+            ),
+            updated_at = now()
+        WHERE id = 1
+        RETURNING state_json, updated_at
+      `
+    );
+
+    const row = rows[0];
+    if (!row) {
+      throw new HttpError(500, 'Falha ao persistir drafts de venda.');
     }
 
     return {
