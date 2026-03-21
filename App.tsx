@@ -7878,6 +7878,37 @@ const App: React.FC = () => {
   const processPendingPaidSyncQueue = useCallback(async (): Promise<void> => {
     hydratePendingPaidSyncQueue();
     if (isStateHydrating) return;
+    const pendingEmptyDraftJobs = pendingPaidSyncQueueRef.current.filter((job) =>
+      isDraftEmptyErrorMessage(job.lastError || '')
+    );
+    if (pendingEmptyDraftJobs.length > 0) {
+      const nextPendingQueue = pendingPaidSyncQueueRef.current.filter(
+        (job) => !isDraftEmptyErrorMessage(job.lastError || '')
+      );
+      replacePendingPaidSyncQueue(nextPendingQueue);
+      pendingEmptyDraftJobs.forEach((job) => {
+        const alreadyFailed = failedPaidSyncQueueRef.current.some((entry) => entry.id === job.id);
+        if (!alreadyFailed) {
+          enqueueFailedPaidSyncJob({
+            ...job,
+            nextAttemptAt: undefined,
+            lastError: job.lastError || 'O carrinho está vazio. (HTTP 422)',
+          });
+        }
+        setDraftSyncInProgress(job.draftId, false);
+      });
+      pushOperationalEvent(
+        'QUEUE_HEALTH',
+        'Pedido com carrinho vazio foi removido do retry automático e movido para falha terminal.',
+        {
+          movedJobs: pendingEmptyDraftJobs.map((job) => ({
+            id: job.id,
+            draftId: job.draftId,
+          })),
+        }
+      );
+      if (nextPendingQueue.length === 0) return;
+    }
     if (pendingPaidSyncActiveWorkersRef.current >= PENDING_PAID_SYNC_MAX_WORKERS) return;
     if (pendingPaidSyncQueueRef.current.length === 0) return;
 
@@ -8037,8 +8068,7 @@ const App: React.FC = () => {
           const message = errorSink?.message || fallbackMessage;
           const retryable = errorSink?.retryable ?? true;
           const statusCode = errorSink?.statusCode;
-          const isEmptyDraftFailure =
-            statusCode === 422 && isDraftEmptyErrorMessage(message);
+          const isEmptyDraftFailure = isDraftEmptyErrorMessage(message);
 
           if (isEmptyDraftFailure) {
             try {
