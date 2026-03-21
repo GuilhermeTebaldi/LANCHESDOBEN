@@ -65,6 +65,12 @@ import {
   type OperationalStorageResolvedResult,
 } from './data/operationalStorage';
 import {
+  CommandSchedulerBackpressureError,
+  createCommandScheduler,
+  type CommandPriority,
+  type CommandScheduler,
+} from './data/commandScheduler';
+import {
   describePaidSyncAssistantMode,
   getPaidSyncAssistantRecoverDelayMs,
   getPaidSyncAssistantRetryDelayMs,
@@ -1569,7 +1575,6 @@ const mergeFailedPaidSyncQueue = (
   return Array.from(mergedByIdentity.values());
 };
 
-const PENDING_PAID_SYNC_RETRY_BASE_MS = 5000;
 const PENDING_PAID_SYNC_RETRY_STEPS_MS = [
   5_000,
   10_000,
@@ -1595,6 +1600,111 @@ const PENDING_DRAFT_ADDS_MAX_SIZE = 100;
 const BACKEND_FAILSAFE_MIN_PAUSE_MS = 10_000;
 const BACKEND_FAILSAFE_MAX_PAUSE_MS = 30_000;
 const QUEUE_BACKPRESSURE_PAUSE_MS = 15_000;
+const BACKEND_COMMAND_SCHEDULER_MAX_QUEUE_SIZE = 220;
+const rawCommandSchedulerFlag = (
+  import.meta as ImportMeta & { env?: Record<string, string | undefined> }
+).env?.VITE_ENABLE_COMMAND_SCHEDULER;
+const ENABLE_COMMAND_SCHEDULER =
+  rawCommandSchedulerFlag === undefined
+    ? true
+    : !['0', 'false', 'off', 'no'].includes(rawCommandSchedulerFlag.trim().toLowerCase());
+
+const getLowerPriority = (priority: CommandPriority): CommandPriority => {
+  if (priority === 'CRITICAL') return 'CRITICAL';
+  if (priority === 'HIGH') return 'NORMAL';
+  if (priority === 'NORMAL') return 'LOW';
+  return 'LOW';
+};
+
+const getCommandExecutionPriority = (command: StateCommand): CommandPriority => {
+  if (command.type === 'SALE_DRAFT_CONFIRM_PAID' || command.type === 'SALE_DRAFT_FINALIZE') {
+    return 'CRITICAL';
+  }
+  if (
+    command.type === 'SALE_DRAFT_ADD_ITEM' ||
+    command.type === 'SALE_DRAFT_UPDATE_ITEM' ||
+    command.type === 'SALE_DRAFT_REMOVE_ITEM'
+  ) {
+    return 'HIGH';
+  }
+  if (
+    command.type === 'SALE_DRAFT_CREATE' ||
+    command.type === 'SALE_DRAFT_SET_CUSTOMER_TYPE' ||
+    command.type === 'SALE_DRAFT_CANCEL'
+  ) {
+    return 'HIGH';
+  }
+  if (command.type === 'SALE_REGISTER') {
+    return 'NORMAL';
+  }
+  return 'NORMAL';
+};
+
+const isSafeCommandTypeForFallbackDedupe = (commandType: StateCommand['type']): boolean =>
+  commandType === 'SALE_DRAFT_FINALIZE' ||
+  commandType === 'SALE_DRAFT_CONFIRM_PAID' ||
+  commandType === 'SALE_DRAFT_REMOVE_ITEM' ||
+  commandType === 'SALE_DRAFT_CANCEL';
+
+const resolveBackendExecutionPriority = (options: BackendExecutionOptions): CommandPriority => {
+  let priority: CommandPriority = 'NORMAL';
+  if (options.command) {
+    priority = getCommandExecutionPriority(options.command);
+  } else if (options.operationType === 'ENQUEUE_STATE_COMMAND_ASYNC') {
+    priority = 'HIGH';
+  } else if (options.operationType === 'GET_STATE_COMMAND_ASYNC_JOB') {
+    priority = 'LOW';
+  } else if (options.operationType === 'FETCH_STATE_SNAPSHOT') {
+    priority = 'NORMAL';
+  }
+
+  const retryCount = Math.max(0, Math.floor(options.retryCount ?? 0));
+  if (retryCount > 0) {
+    priority = getLowerPriority(priority);
+    if (retryCount >= 3) {
+      priority = getLowerPriority(priority);
+    }
+  }
+  return priority;
+};
+
+const resolveBackendExecutionDedupeKey = (
+  options: BackendExecutionOptions
+): string | undefined => {
+  const normalizedDraftId =
+    typeof options.draftId === 'string' && options.draftId.trim() ? options.draftId.trim() : null;
+
+  if (options.operationType === 'FETCH_STATE_SNAPSHOT') {
+    return normalizedDraftId
+      ? `FETCH_STATE_SNAPSHOT::${normalizedDraftId}`
+      : 'FETCH_STATE_SNAPSHOT::global';
+  }
+
+  if (options.operationType === 'GET_STATE_COMMAND_ASYNC_JOB' && options.commandId) {
+    return `GET_STATE_COMMAND_ASYNC_JOB::${options.commandId}`;
+  }
+
+  if (options.command) {
+    const commandId = options.command.commandId?.trim();
+    if (commandId) {
+      return `RUN_STATE_COMMAND::${normalizedDraftId || 'global'}::${options.command.type}::${commandId}`;
+    }
+    if (normalizedDraftId && isSafeCommandTypeForFallbackDedupe(options.command.type)) {
+      return `RUN_STATE_COMMAND::${normalizedDraftId}::${options.command.type}`;
+    }
+  }
+
+  return undefined;
+};
+
+const resolveBackendExecutionGroupKey = (
+  options: BackendExecutionOptions
+): string | undefined => {
+  const fromOptions = options.draftId?.trim();
+  if (fromOptions) return fromOptions;
+  const fromCommand = options.command ? getCommandDraftId(options.command) : null;
+  return fromCommand || undefined;
+};
 
 const getPendingPaidSyncJobNextAttemptAtMs = (job: PendingPaidSyncJob): number => {
   if (!job.nextAttemptAt) return Number.NaN;
@@ -1655,8 +1765,7 @@ const App: React.FC = () => {
   const pendingDraftAddsRevisionRef = useRef(0);
   const pendingPaidSyncQueueRevisionRef = useRef(0);
   const failedPaidSyncQueueRevisionRef = useRef(0);
-  const backendActiveCommandsRef = useRef(0);
-  const backendCommandQueueRef = useRef<Array<() => void>>([]);
+  const backendCommandSchedulerRef = useRef<CommandScheduler | null>(null);
   const backendFailsafeBlockedUntilRef = useRef(0);
   const backendFailsafeStreakRef = useRef(0);
   const retryDispatchQueueRef = useRef<Array<{ key: string; run: () => Promise<void> }>>([]);
@@ -1683,6 +1792,23 @@ const App: React.FC = () => {
   const pendingDraftBackgroundSyncTimerRef = useRef<Map<string, number>>(new Map());
   const pendingDraftBackgroundSyncRunningRef = useRef<Set<string>>(new Set());
   const pendingDraftBackgroundRetryAttemptsRef = useRef<Map<string, number>>(new Map());
+
+  if (!backendCommandSchedulerRef.current) {
+    backendCommandSchedulerRef.current = createCommandScheduler({
+      maxConcurrent: MAX_CONCURRENT_COMMANDS,
+      maxQueueSize: BACKEND_COMMAND_SCHEDULER_MAX_QUEUE_SIZE,
+      onBackpressure: (payload) => {
+        reportErrorMonitorEvent({
+          source: 'sistema:command-scheduler:backpressure',
+          level: 'warn',
+          message: 'Scheduler global de comandos atingiu o limite de fila.',
+          context: {
+            ...payload,
+          },
+        });
+      },
+    });
+  }
   
   const [ingredients, setIngredients] = useState<Ingredient[]>(DEFAULT_APP_STATE.ingredients);
   const [products, setProducts] = useState<Product[]>(DEFAULT_APP_STATE.products);
@@ -2138,12 +2264,19 @@ const App: React.FC = () => {
   }, []);
 
   const logQueueHealth = useCallback((source: string): void => {
+    const schedulerSnapshot = backendCommandSchedulerRef.current?.getSnapshot();
     console.info('[QUEUE_HEALTH]', {
       type: 'QUEUE_HEALTH',
       source,
       pendingDraftAdds: countPendingDraftAdds(pendingDraftAddsRef.current),
       pendingPaidQueue: pendingPaidSyncQueueRef.current.length,
       failedQueue: failedPaidSyncQueueRef.current.length,
+      schedulerActive: schedulerSnapshot?.active ?? 0,
+      schedulerQueued: schedulerSnapshot?.queued ?? 0,
+      schedulerCriticalQueued: schedulerSnapshot?.queuedByPriority.CRITICAL ?? 0,
+      schedulerHighQueued: schedulerSnapshot?.queuedByPriority.HIGH ?? 0,
+      schedulerNormalQueued: schedulerSnapshot?.queuedByPriority.NORMAL ?? 0,
+      schedulerLowQueued: schedulerSnapshot?.queuedByPriority.LOW ?? 0,
       timestamp: new Date().toISOString(),
     });
   }, []);
@@ -2181,26 +2314,6 @@ const App: React.FC = () => {
     backendFailsafeBlockedUntilRef.current = 0;
   }, []);
 
-  const acquireBackendCommandSlot = useCallback(async (): Promise<void> => {
-    if (backendActiveCommandsRef.current < MAX_CONCURRENT_COMMANDS) {
-      backendActiveCommandsRef.current += 1;
-      return;
-    }
-
-    await new Promise<void>((resolve) => {
-      backendCommandQueueRef.current.push(() => {
-        backendActiveCommandsRef.current += 1;
-        resolve();
-      });
-    });
-  }, []);
-
-  const releaseBackendCommandSlot = useCallback((): void => {
-    backendActiveCommandsRef.current = Math.max(0, backendActiveCommandsRef.current - 1);
-    const next = backendCommandQueueRef.current.shift();
-    if (next) next();
-  }, []);
-
   const runBackendExecution = useCallback(
     async <T,>(
       options: BackendExecutionOptions,
@@ -2217,30 +2330,57 @@ const App: React.FC = () => {
         );
       }
 
-      await acquireBackendCommandSlot();
       const startedAt = Date.now();
-      let timeoutId: ReturnType<typeof globalThis.setTimeout> | null = null;
+      const commandDraftId = options.command ? getCommandDraftId(options.command) : null;
+      const effectiveDraftId = options.draftId || commandDraftId || null;
+      const priority = resolveBackendExecutionPriority(options);
+      const dedupeKey = resolveBackendExecutionDedupeKey(options);
+      const groupKey = resolveBackendExecutionGroupKey(options);
+      const executeWithTimeout = async (): Promise<T> => {
+        let timeoutId: ReturnType<typeof globalThis.setTimeout> | null = null;
+        try {
+          return await Promise.race([
+            task(),
+            new Promise<T>((_resolve, reject) => {
+              timeoutId = globalThis.setTimeout(() => {
+                reject(
+                  new StateCommandSyncError('Timeout aguardando resposta do backend.', {
+                    statusCode: 408,
+                    retryable: true,
+                  })
+                );
+              }, BACKEND_OPERATION_TIMEOUT_MS);
+            }),
+          ]);
+        } finally {
+          if (timeoutId !== null) {
+            globalThis.clearTimeout(timeoutId);
+          }
+        }
+      };
 
       try {
-        const commandDraftId = options.command ? getCommandDraftId(options.command) : null;
-        const result = await Promise.race([
-          task(),
-          new Promise<T>((_resolve, reject) => {
-            timeoutId = globalThis.setTimeout(() => {
-              reject(
-                new StateCommandSyncError('Timeout aguardando resposta do backend.', {
-                  statusCode: 408,
-                  retryable: true,
-                })
-              );
-            }, BACKEND_OPERATION_TIMEOUT_MS);
-          }),
-        ]);
+        const scheduler = backendCommandSchedulerRef.current;
+        if (ENABLE_COMMAND_SCHEDULER && !scheduler) {
+          throw new StateCommandSyncError('Scheduler de comandos não inicializado.', {
+            statusCode: 500,
+            retryable: true,
+          });
+        }
+
+        const result = ENABLE_COMMAND_SCHEDULER
+          ? await scheduler!.enqueue({
+              key: dedupeKey,
+              priority,
+              groupKey,
+              run: executeWithTimeout,
+            })
+          : await executeWithTimeout();
 
         console.info('[COMMAND_EXECUTION]', {
           type: 'COMMAND_EXECUTION',
           commandId: options.command?.commandId || options.commandId || null,
-          draftId: options.draftId || commandDraftId || null,
+          draftId: effectiveDraftId,
           commandType: options.command?.type || options.operationType,
           duration: Date.now() - startedAt,
           success: true,
@@ -2249,35 +2389,42 @@ const App: React.FC = () => {
         clearBackendFailsafe();
         return result;
       } catch (error) {
+        if (error instanceof CommandSchedulerBackpressureError) {
+          console.info('[COMMAND_EXECUTION]', {
+            type: 'COMMAND_EXECUTION',
+            commandId: options.command?.commandId || options.commandId || null,
+            draftId: effectiveDraftId,
+            commandType: options.command?.type || options.operationType,
+            duration: Date.now() - startedAt,
+            success: false,
+            retryCount: options.retryCount ?? 0,
+            backpressure: true,
+          });
+          throw new StateCommandSyncError(
+            'Fila operacional ocupada. Aguarde alguns segundos e tente novamente.',
+            {
+              statusCode: 429,
+              retryable: true,
+            }
+          );
+        }
         const message = getStateSyncErrorMessage(error);
         if (isDatabaseUnavailableErrorMessage(message)) {
           activateBackendFailsafe(message);
         }
-        const commandDraftId = options.command ? getCommandDraftId(options.command) : null;
         console.info('[COMMAND_EXECUTION]', {
           type: 'COMMAND_EXECUTION',
           commandId: options.command?.commandId || options.commandId || null,
-          draftId: options.draftId || commandDraftId || null,
+          draftId: effectiveDraftId,
           commandType: options.command?.type || options.operationType,
           duration: Date.now() - startedAt,
           success: false,
           retryCount: options.retryCount ?? 0,
         });
         throw error;
-      } finally {
-        if (timeoutId !== null) {
-          globalThis.clearTimeout(timeoutId);
-        }
-        releaseBackendCommandSlot();
       }
     },
-    [
-      acquireBackendCommandSlot,
-      activateBackendFailsafe,
-      clearBackendFailsafe,
-      getBackendFailsafeRemainingMs,
-      releaseBackendCommandSlot,
-    ]
+    [activateBackendFailsafe, clearBackendFailsafe, getBackendFailsafeRemainingMs]
   );
 
   const runWithDraftLock = useCallback(
@@ -2463,7 +2610,7 @@ const App: React.FC = () => {
       retryDispatchTimersRef.current.clear();
       retryDispatchQueueRef.current = [];
       retryDispatchQueuedKeysRef.current.clear();
-      backendCommandQueueRef.current = [];
+      backendCommandSchedulerRef.current?.clear();
       commandDraftLocksRef.current.clear();
     };
   }, []);
