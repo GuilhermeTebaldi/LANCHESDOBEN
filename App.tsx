@@ -99,6 +99,13 @@ const AUTO_UPDATE_FORCE_RELOAD_AFTER_MS = 10 * 60 * 1000;
 
 type SaleRegisterCommand = Extract<StateCommand, { type: 'SALE_REGISTER' }>;
 type SaleDraftAddItemCommand = Extract<StateCommand, { type: 'SALE_DRAFT_ADD_ITEM' }>;
+type PendingDraftAddStatus =
+  | 'ACTIVE'
+  | 'IN_FLIGHT'
+  | 'CANCELLED'
+  | 'APPLIED'
+  | 'RECONCILED'
+  | 'FAILED_TERMINAL';
 
 interface OfflineQueuedSale {
   command: SaleRegisterCommand;
@@ -117,6 +124,9 @@ interface PendingDraftAdd {
   priceOverride?: number;
   note?: string;
   queuedAt: string;
+  updatedAt: string;
+  status: PendingDraftAddStatus;
+  terminalReason?: string;
 }
 
 interface PendingDraftAddCancellationIntent {
@@ -651,6 +661,126 @@ const isLocalPendingDraftItemId = (itemId: string): boolean =>
 
 const buildPendingDraftAddRuntimeKey = (draftId: string, localItemId: string): string =>
   `${draftId.trim()}::${localItemId.trim()}`;
+
+const PENDING_DRAFT_ADD_TERMINAL_STATUSES = new Set<PendingDraftAddStatus>([
+  'CANCELLED',
+  'RECONCILED',
+  'FAILED_TERMINAL',
+]);
+
+const PENDING_DRAFT_ADD_RESTORE_BLOCK_STATUSES = new Set<PendingDraftAddStatus>([
+  'CANCELLED',
+  'RECONCILED',
+  'FAILED_TERMINAL',
+]);
+
+const PENDING_DRAFT_ADD_STATUS_PRIORITY: Record<PendingDraftAddStatus, number> = {
+  CANCELLED: 600,
+  RECONCILED: 500,
+  FAILED_TERMINAL: 400,
+  APPLIED: 300,
+  IN_FLIGHT: 200,
+  ACTIVE: 100,
+};
+const PENDING_DRAFT_ADD_TERMINAL_RETENTION_MS = 12 * 60 * 60 * 1000;
+const PENDING_DRAFT_ADD_APPLIED_RETENTION_MS = 2 * 60 * 60 * 1000;
+const PENDING_DRAFT_ADD_IN_FLIGHT_STALE_MS = 90 * 1000;
+
+const normalizePendingDraftAddStatus = (value: unknown): PendingDraftAddStatus => {
+  const normalized = typeof value === 'string' ? value.trim().toUpperCase() : '';
+  if (
+    normalized === 'ACTIVE' ||
+    normalized === 'IN_FLIGHT' ||
+    normalized === 'CANCELLED' ||
+    normalized === 'APPLIED' ||
+    normalized === 'RECONCILED' ||
+    normalized === 'FAILED_TERMINAL'
+  ) {
+    return normalized;
+  }
+  return 'ACTIVE';
+};
+
+const isPendingDraftAddTerminalStatus = (status: PendingDraftAddStatus): boolean =>
+  PENDING_DRAFT_ADD_TERMINAL_STATUSES.has(status);
+
+const isPendingDraftAddVisible = (entry: PendingDraftAdd): boolean =>
+  entry.status === 'ACTIVE' || entry.status === 'IN_FLIGHT';
+
+const isPendingDraftAddExecutable = (entry: PendingDraftAdd): boolean =>
+  entry.status === 'ACTIVE';
+
+const shouldBlockPendingDraftAddRestore = (entry: PendingDraftAdd): boolean =>
+  PENDING_DRAFT_ADD_RESTORE_BLOCK_STATUSES.has(entry.status);
+
+const withPendingDraftAddStatus = (
+  entry: PendingDraftAdd,
+  status: PendingDraftAddStatus,
+  terminalReason?: string
+): PendingDraftAdd => {
+  const normalizedReason = terminalReason?.trim();
+  return {
+    ...entry,
+    status,
+    updatedAt: new Date().toISOString(),
+    terminalReason:
+      normalizedReason !== undefined
+        ? normalizedReason || undefined
+        : isPendingDraftAddTerminalStatus(status)
+          ? entry.terminalReason
+          : undefined,
+  };
+};
+
+const countVisiblePendingDraftAdds = (entries: PendingDraftAdd[]): number =>
+  entries.reduce((total, entry) => (isPendingDraftAddVisible(entry) ? total + 1 : total), 0);
+
+const isPendingDraftAddInFlightStale = (entry: PendingDraftAdd, nowMs = Date.now()): boolean => {
+  if (entry.status !== 'IN_FLIGHT') return false;
+  const updatedAtMs = Date.parse(entry.updatedAt);
+  if (!Number.isFinite(updatedAtMs)) return true;
+  return nowMs - updatedAtMs >= PENDING_DRAFT_ADD_IN_FLIGHT_STALE_MS;
+};
+
+const hasPendingDraftAddBackgroundSyncWork = (
+  entries: PendingDraftAdd[],
+  nowMs = Date.now()
+): boolean => {
+  return entries.some((entry) => isPendingDraftAddExecutable(entry) || isPendingDraftAddInFlightStale(entry, nowMs));
+};
+
+const shouldRetainPendingDraftAddEntry = (
+  entry: PendingDraftAdd,
+  nowMs = Date.now()
+): boolean => {
+  const updatedAtMs = Date.parse(entry.updatedAt);
+  const fallbackAgeMs = 0;
+  const ageMs = Number.isFinite(updatedAtMs) ? Math.max(0, nowMs - updatedAtMs) : fallbackAgeMs;
+  if (entry.status === 'APPLIED') {
+    return ageMs <= PENDING_DRAFT_ADD_APPLIED_RETENTION_MS;
+  }
+  if (isPendingDraftAddTerminalStatus(entry.status)) {
+    return ageMs <= PENDING_DRAFT_ADD_TERMINAL_RETENTION_MS;
+  }
+  return true;
+};
+
+const buildPendingDraftAddSemanticKey = (params: {
+  draftId: string;
+  productId: string;
+  recipeSignature: string;
+  noteNormalized: string;
+}): string => {
+  return `${params.draftId.trim()}::${params.productId.trim()}::${params.recipeSignature}::${params.noteNormalized}`;
+};
+
+const buildPendingDraftAddSemanticKeyFromEntry = (entry: PendingDraftAdd): string =>
+  buildPendingDraftAddSemanticKey({
+    draftId: entry.draftId,
+    productId: entry.productId,
+    recipeSignature: normalizeRecipeSignature(entry.recipeOverride),
+    noteNormalized: normalizeDraftItemNoteForMatch(entry.note),
+  });
 
 const normalizeDraftItemNoteForMatch = (note: string | undefined): string =>
   typeof note === 'string' ? note.trim() : '';
@@ -1369,6 +1499,13 @@ const normalizePendingDraftAdd = (value: unknown): PendingDraftAdd | null => {
     typeof source.queuedAt === 'string' && !Number.isNaN(Date.parse(source.queuedAt))
       ? source.queuedAt
       : new Date().toISOString();
+  const updatedAtCandidate =
+    typeof source.updatedAt === 'string' && !Number.isNaN(Date.parse(source.updatedAt))
+      ? source.updatedAt
+      : queuedAtCandidate;
+  const status = normalizePendingDraftAddStatus(source.status);
+  const terminalReasonCandidate =
+    typeof source.terminalReason === 'string' ? source.terminalReason.trim() : '';
 
   return {
     draftId,
@@ -1380,6 +1517,12 @@ const normalizePendingDraftAdd = (value: unknown): PendingDraftAdd | null => {
     priceOverride,
     note: noteCandidate || undefined,
     queuedAt: queuedAtCandidate,
+    updatedAt: updatedAtCandidate,
+    status,
+    terminalReason:
+      isPendingDraftAddTerminalStatus(status) && terminalReasonCandidate
+        ? terminalReasonCandidate
+        : undefined,
   };
 };
 
@@ -1717,7 +1860,7 @@ const saveOperationalEventLog = (events: OperationalEventLogEntry[]): void => {
 };
 
 const countPendingDraftAdds = (value: PendingDraftAddsByDraftId): number =>
-  Object.values(value).reduce((total, entries) => total + entries.length, 0);
+  Object.values(value).reduce((total, entries) => total + countVisiblePendingDraftAdds(entries), 0);
 
 const mergePendingDraftAdds = (
   current: PendingDraftAddsByDraftId,
@@ -1732,18 +1875,40 @@ const mergePendingDraftAdds = (
   draftIds.forEach((draftId) => {
     const currentEntries = current[draftId] || [];
     const recoveredEntries = recovered[draftId] || [];
-    const nextEntries: PendingDraftAdd[] = [];
-    const seen = new Set<string>();
+    const mergedByKey = new Map<string, PendingDraftAdd>();
 
     [...currentEntries, ...recoveredEntries].forEach((entry) => {
       const normalized = normalizePendingDraftAdd({ ...entry, draftId });
       if (!normalized) return;
       const dedupeKey = `${normalized.commandId}::${normalized.localItemId}`;
-      if (seen.has(dedupeKey)) return;
-      seen.add(dedupeKey);
-      nextEntries.push(normalized);
+      const previous = mergedByKey.get(dedupeKey);
+      if (!previous) {
+        mergedByKey.set(dedupeKey, normalized);
+        return;
+      }
+
+      const previousPriority = PENDING_DRAFT_ADD_STATUS_PRIORITY[previous.status];
+      const currentPriority = PENDING_DRAFT_ADD_STATUS_PRIORITY[normalized.status];
+      if (currentPriority > previousPriority) {
+        mergedByKey.set(dedupeKey, normalized);
+        return;
+      }
+      if (currentPriority < previousPriority) {
+        return;
+      }
+
+      const previousUpdatedAt = Date.parse(previous.updatedAt);
+      const currentUpdatedAt = Date.parse(normalized.updatedAt);
+      const previousUpdatedAtMs = Number.isFinite(previousUpdatedAt) ? previousUpdatedAt : 0;
+      const currentUpdatedAtMs = Number.isFinite(currentUpdatedAt) ? currentUpdatedAt : 0;
+      if (currentUpdatedAtMs >= previousUpdatedAtMs) {
+        mergedByKey.set(dedupeKey, normalized);
+      }
     });
 
+    const nextEntries = Array.from(mergedByKey.values()).sort((left, right) =>
+      left.queuedAt.localeCompare(right.queuedAt)
+    );
     if (nextEntries.length > 0) {
       merged[draftId] = nextEntries;
     }
@@ -3252,11 +3417,20 @@ const App: React.FC = () => {
 
   const replacePendingDraftAdds = useCallback((nextPendingAdds: PendingDraftAddsByDraftId) => {
     const normalized: PendingDraftAddsByDraftId = {};
+    const nowMs = Date.now();
+    let discardedTerminalEntries = 0;
     Object.entries(nextPendingAdds).forEach(([draftId, entries]) => {
       if (!Array.isArray(entries) || entries.length === 0) return;
       const safeEntries = entries
         .map((entry) => normalizePendingDraftAdd(entry))
-        .filter((entry): entry is PendingDraftAdd => entry !== null);
+        .filter((entry): entry is PendingDraftAdd => entry !== null)
+        .filter((entry) => {
+          const keep = shouldRetainPendingDraftAddEntry(entry, nowMs);
+          if (!keep && isPendingDraftAddTerminalStatus(entry.status)) {
+            discardedTerminalEntries += 1;
+          }
+          return keep;
+        });
       if (safeEntries.length > 0) {
         normalized[draftId] = safeEntries;
       }
@@ -3267,17 +3441,23 @@ const App: React.FC = () => {
     savePendingDraftAdds(normalized);
     pendingDraftAddsRevisionRef.current += 1;
     logQueueHealth('pending-draft-adds');
+    if (discardedTerminalEntries > 0) {
+      pushOperationalEvent(
+        'COMMAND_SKIPPED_OBSOLETE',
+        'Pending adds terminais antigos descartados durante compactação segura.',
+        {
+          discardedTerminalEntries,
+        }
+      );
+    }
     isPendingDraftAddsHydratedRef.current = true;
-  }, [logQueueHealth]);
+  }, [logQueueHealth, pushOperationalEvent]);
 
   const hydratePendingDraftAdds = useCallback(() => {
     if (isPendingDraftAddsHydratedRef.current) return;
 
     const fallbackPendingAdds = loadPendingDraftAddsLocalFallback();
-    pendingDraftAddsRef.current = fallbackPendingAdds;
-    setPendingDraftAddsByDraft(fallbackPendingAdds);
-    pendingDraftAddsRevisionRef.current += 1;
-    isPendingDraftAddsHydratedRef.current = true;
+    replacePendingDraftAdds(fallbackPendingAdds);
 
     if (pendingDraftAddsRecoveryLoadRef.current) return;
     const hydrationRevision = pendingDraftAddsRevisionRef.current;
@@ -3286,19 +3466,23 @@ const App: React.FC = () => {
       const recoveredPendingAdds = resolved.value || {};
 
       if (pendingDraftAddsRevisionRef.current === hydrationRevision) {
-        pendingDraftAddsRef.current = recoveredPendingAdds;
-        setPendingDraftAddsByDraft(recoveredPendingAdds);
-        savePendingDraftAdds(recoveredPendingAdds);
-        pendingDraftAddsRevisionRef.current += 1;
+        replacePendingDraftAdds(recoveredPendingAdds);
         return;
       }
 
-      const beforeCount = countPendingDraftAdds(pendingDraftAddsRef.current);
       const mergedPendingAdds = mergePendingDraftAdds(
         pendingDraftAddsRef.current,
         recoveredPendingAdds
       );
-      if (countPendingDraftAdds(mergedPendingAdds) <= beforeCount) return;
+      try {
+        const currentSerialized = JSON.stringify(pendingDraftAddsRef.current);
+        const mergedSerialized = JSON.stringify(mergedPendingAdds);
+        if (currentSerialized === mergedSerialized) return;
+      } catch {
+        if (countPendingDraftAdds(mergedPendingAdds) <= countPendingDraftAdds(pendingDraftAddsRef.current)) {
+          return;
+        }
+      }
 
       replacePendingDraftAdds(mergedPendingAdds);
     })().finally(() => {
@@ -3977,7 +4161,9 @@ const App: React.FC = () => {
 
   const saleDraftsWithPendingAdds = useMemo(() => {
     const buildPendingItems = (pendingAdds: PendingDraftAdd[]) =>
-      pendingAdds.map((entry) => {
+      pendingAdds
+        .filter((entry) => isPendingDraftAddVisible(entry))
+        .map((entry) => {
         const product = products.find((candidate) => candidate.id === entry.productId);
         const unitPrice =
           Number.isFinite(entry.priceOverride) && entry.priceOverride !== undefined
@@ -3992,7 +4178,7 @@ const App: React.FC = () => {
           note: entry.note,
           recipe: entry.recipeOverride || product?.recipe || [],
         };
-      });
+        });
 
     const mergeDraft = (draft: SaleDraft, pendingAdds: PendingDraftAdd[]): SaleDraft => {
       const optimisticRemovedItems = optimisticRemovedDraftItemsRef.current.get(draft.id);
@@ -4001,8 +4187,8 @@ const App: React.FC = () => {
           ? draft.items.filter((item) => !optimisticRemovedItems.has(item.id))
           : draft.items;
 
-      if ((!pendingAdds || pendingAdds.length === 0) && baseItems === draft.items) return draft;
       const pendingItems = buildPendingItems(pendingAdds);
+      if (pendingItems.length === 0 && baseItems === draft.items) return draft;
       const serverTotal = roundMoney(
         baseItems.reduce(
           (sum, item) => sum + (Number(item.unitPriceSnapshot) || 0) * (Number(item.qty) || 0),
@@ -4041,20 +4227,21 @@ const App: React.FC = () => {
     ) as Array<[string, PendingDraftAdd[]]>)
       .filter(
         ([draftId, entries]) =>
-          entries.length > 0 &&
+          countVisiblePendingDraftAdds(entries) > 0 &&
           !serverDraftIds.has(draftId) &&
           !knownPersistedDraftIds.has(draftId)
       )
       .map(([draftId, entries]) => {
-        const pendingItems = buildPendingItems(entries);
+        const visibleEntries = entries.filter((entry) => isPendingDraftAddVisible(entry));
+        const pendingItems = buildPendingItems(visibleEntries);
         const total = roundMoney(
           pendingItems.reduce(
             (sum, item) => sum + (Number(item.unitPriceSnapshot) || 0) * (Number(item.qty) || 0),
             0
           )
         );
-        const firstQueuedAt = entries[0]?.queuedAt || new Date().toISOString();
-        const lastQueuedAt = entries[entries.length - 1]?.queuedAt || firstQueuedAt;
+        const firstQueuedAt = visibleEntries[0]?.queuedAt || new Date().toISOString();
+        const lastQueuedAt = visibleEntries[visibleEntries.length - 1]?.queuedAt || firstQueuedAt;
 
         const virtualDraft: SaleDraft = {
           id: draftId,
@@ -4228,7 +4415,9 @@ const App: React.FC = () => {
       return saleDraftsWithPendingAdds.filter((draft) => {
         if (queuedDraftIds.has(draft.id)) return false;
         if (draft.status !== 'DRAFT' && draft.status !== 'PENDING_PAYMENT') return false;
-        const pendingLocalItemsCount = (pendingDraftAddsByDraft[draft.id] || []).length;
+        const pendingLocalItemsCount = countVisiblePendingDraftAdds(
+          pendingDraftAddsByDraft[draft.id] || []
+        );
         return draft.items.length > 0 || pendingLocalItemsCount > 0;
       });
     },
@@ -4324,7 +4513,8 @@ const App: React.FC = () => {
     );
     const pendingLocalDraftIds = Object.keys(pendingDraftAddsRef.current).filter((draftId) => {
       if (isDraftQueuedForPaidSync(draftId)) return false;
-      const hasPendingEntries = (pendingDraftAddsRef.current[draftId] || []).length > 0;
+      const hasPendingEntries =
+        countVisiblePendingDraftAdds(pendingDraftAddsRef.current[draftId] || []) > 0;
       if (!hasPendingEntries) return false;
       return !serverOpenDrafts.some((draft) => draft.id === draftId);
     });
@@ -4520,6 +4710,7 @@ const App: React.FC = () => {
       updatePendingDraftAddsForDraft(draftId, (current) => {
         const existingIndex = current.findIndex(
           (entry) =>
+            entry.status === 'ACTIVE' &&
             entry.productId === product.id &&
             entry.note === undefined &&
             normalizeRecipeSignature(entry.recipeOverride) === recipeSignature &&
@@ -4532,10 +4723,12 @@ const App: React.FC = () => {
           next[existingIndex] = {
             ...next[existingIndex],
             quantity: Math.max(1, currentQty + 1),
+            updatedAt: new Date().toISOString(),
           };
           return next;
         }
 
+        const nowIso = new Date().toISOString();
         return [
           ...current,
           {
@@ -4546,7 +4739,9 @@ const App: React.FC = () => {
             quantity: 1,
             recipeOverride: normalizedRecipe,
             priceOverride: normalizedPriceOverride,
-            queuedAt: new Date().toISOString(),
+            queuedAt: nowIso,
+            updatedAt: nowIso,
+            status: 'ACTIVE',
           },
         ];
       });
@@ -4571,7 +4766,11 @@ const App: React.FC = () => {
     ): boolean => {
       let found = false;
       updatePendingDraftAddsForDraft(draftId, (current) => {
-        const index = current.findIndex((entry) => entry.localItemId === itemId);
+        const index = current.findIndex(
+          (entry) =>
+            entry.localItemId === itemId &&
+            !isPendingDraftAddTerminalStatus(entry.status)
+        );
         if (index < 0) return current;
         found = true;
         const next = [...current];
@@ -4580,9 +4779,20 @@ const App: React.FC = () => {
           next.splice(index, 1);
           return next;
         }
+        const normalizedStatus = normalizePendingDraftAddStatus(updated.status);
+        const normalizedUpdatedAt =
+          typeof updated.updatedAt === 'string' && !Number.isNaN(Date.parse(updated.updatedAt))
+            ? updated.updatedAt
+            : new Date().toISOString();
         next[index] = {
           ...updated,
           quantity: Math.max(1, Math.round(updated.quantity)),
+          status: normalizedStatus,
+          updatedAt: normalizedUpdatedAt,
+          terminalReason:
+            isPendingDraftAddTerminalStatus(normalizedStatus) && updated.terminalReason
+              ? updated.terminalReason
+              : undefined,
         };
         return next;
       });
@@ -4801,7 +5011,9 @@ const App: React.FC = () => {
       const draftId = activeDraft.id;
       const pendingEntry =
         (pendingDraftAddsRef.current[draftId] || []).find(
-          (entry) => entry.localItemId === normalizedItemId
+          (entry) =>
+            entry.localItemId === normalizedItemId &&
+            !isPendingDraftAddTerminalStatus(entry.status)
         ) || null;
 
       if (pendingEntry) {
@@ -4826,24 +5038,39 @@ const App: React.FC = () => {
           cancelledAt,
         });
 
-        const removedVisiblePending = updatePendingDraftAddByItemId(
+        const cancelledVisiblePending = updatePendingDraftAddByItemId(
           draftId,
           normalizedItemId,
-          () => null
+          (entry) =>
+            withPendingDraftAddStatus(
+              {
+                ...entry,
+                terminalReason: 'manual_remove',
+              },
+              'CANCELLED',
+              'manual_remove'
+            )
         );
 
         const recoveryEntries = recoveryPendingDraftAddsRef.current[draftId] || [];
         if (recoveryEntries.length > 0) {
-          const nextRecoveryEntries = recoveryEntries.filter(
-            (entry) => entry.localItemId !== normalizedItemId
-          );
-          if (nextRecoveryEntries.length !== recoveryEntries.length) {
+          let changedRecovery = false;
+          const nextRecoveryEntries = recoveryEntries.map((entry) => {
+            if (entry.localItemId !== normalizedItemId) return entry;
+            if (isPendingDraftAddTerminalStatus(entry.status)) return entry;
+            changedRecovery = true;
+            return withPendingDraftAddStatus(
+              {
+                ...entry,
+                terminalReason: 'manual_remove',
+              },
+              'CANCELLED',
+              'manual_remove'
+            );
+          });
+          if (changedRecovery) {
             const nextRecoveryByDraft = { ...recoveryPendingDraftAddsRef.current };
-            if (nextRecoveryEntries.length === 0) {
-              delete nextRecoveryByDraft[draftId];
-            } else {
-              nextRecoveryByDraft[draftId] = nextRecoveryEntries;
-            }
+            nextRecoveryByDraft[draftId] = nextRecoveryEntries;
             recoveryPendingDraftAddsRef.current = nextRecoveryByDraft;
           }
         }
@@ -4853,7 +5080,7 @@ const App: React.FC = () => {
           draftId,
           localItemId: normalizedItemId,
           commandId: pendingEntry.commandId,
-          removedVisiblePending,
+          removedVisiblePending: cancelledVisiblePending,
           wasInFlight,
         });
         pushOperationalEvent('PENDING_ADD_CANCELLED', 'Pending add cancelado para evitar reaplicação.', {
@@ -4916,6 +5143,22 @@ const App: React.FC = () => {
       if (intent.draftId === normalizedDraftId) {
         return true;
       }
+    }
+    const nowMs = Date.now();
+    const cancellationGuardWindowMs = 2 * 60 * 1000;
+    const isRecentCancellation = (entry: PendingDraftAdd): boolean => {
+      if (entry.status !== 'CANCELLED') return false;
+      const updatedAtMs = Date.parse(entry.updatedAt);
+      if (!Number.isFinite(updatedAtMs)) return true;
+      return nowMs - updatedAtMs <= cancellationGuardWindowMs;
+    };
+    const visibleEntries = pendingDraftAddsRef.current[normalizedDraftId] || [];
+    if (visibleEntries.some((entry) => isRecentCancellation(entry))) {
+      return true;
+    }
+    const recoveryEntries = recoveryPendingDraftAddsRef.current[normalizedDraftId] || [];
+    if (recoveryEntries.some((entry) => isRecentCancellation(entry))) {
+      return true;
     }
     return false;
   }, []);
@@ -5033,7 +5276,8 @@ const App: React.FC = () => {
     const draftId = activeDraft.id;
     const serverDraft = saleDraftsRef.current.find((draft) => draft.id === draftId) || null;
     const hasServerDraft = saleDraftsRef.current.some((draft) => draft.id === draftId);
-    const hasPendingLocalAdds = (pendingDraftAddsRef.current[draftId] || []).length > 0;
+    const hasPendingLocalAdds =
+      countVisiblePendingDraftAdds(pendingDraftAddsRef.current[draftId] || []) > 0;
     if (!hasServerDraft) {
       const nextPendingByDraft = { ...pendingDraftAddsRef.current };
       delete nextPendingByDraft[draftId];
@@ -5081,7 +5325,7 @@ const App: React.FC = () => {
         );
         if (!ok) return;
 
-        if (pendingDraftAddsRef.current[draftId]?.length) {
+        if (countVisiblePendingDraftAdds(pendingDraftAddsRef.current[draftId] || []) > 0) {
           const nextPendingByDraft = { ...pendingDraftAddsRef.current };
           delete nextPendingByDraft[draftId];
           replacePendingDraftAdds(nextPendingByDraft);
@@ -5167,7 +5411,9 @@ const App: React.FC = () => {
       return;
     }
 
-    const pendingLocalItems = pendingDraftAddsRef.current[activeDraft.id] || [];
+    const pendingLocalItems = (pendingDraftAddsRef.current[activeDraft.id] || []).filter((entry) =>
+      isPendingDraftAddVisible(entry)
+    );
     if (pendingLocalItems.length === 0) {
       showNotification('Nenhum item pendente local para limpar.');
       return;
@@ -5443,43 +5689,62 @@ const App: React.FC = () => {
     }
   };
 
-  const removePendingDraftAddFromSource = useCallback(
+  const updatePendingDraftAddInSource = useCallback(
     (
       draftId: string,
       source: PendingDraftAddsSource,
-      matcher: (entry: PendingDraftAdd) => boolean
+      matcher: (entry: PendingDraftAdd) => boolean,
+      updater: (entry: PendingDraftAdd) => PendingDraftAdd
     ): boolean => {
       if (source === 'recovery') {
         const currentEntries = recoveryPendingDraftAddsRef.current[draftId] || [];
-        const nextEntries = currentEntries.filter((entry) => !matcher(entry));
-        if (nextEntries.length === currentEntries.length) return false;
+        let changed = false;
+        const nextEntries = currentEntries.map((entry) => {
+          if (!matcher(entry)) return entry;
+          changed = true;
+          return updater(entry);
+        });
+        if (!changed) return false;
         const nextRecoveryByDraft = { ...recoveryPendingDraftAddsRef.current };
-        if (nextEntries.length === 0) {
-          delete nextRecoveryByDraft[draftId];
-        } else {
-          nextRecoveryByDraft[draftId] = nextEntries;
-        }
+        nextRecoveryByDraft[draftId] = nextEntries;
         recoveryPendingDraftAddsRef.current = nextRecoveryByDraft;
         return true;
       }
 
       const currentEntries = pendingDraftAddsRef.current[draftId] || [];
-      const nextEntries = currentEntries.filter((entry) => !matcher(entry));
-      if (nextEntries.length === currentEntries.length) return false;
+      let changed = false;
+      const nextEntries = currentEntries.map((entry) => {
+        if (!matcher(entry)) return entry;
+        changed = true;
+        return updater(entry);
+      });
+      if (!changed) return false;
       const nextPendingByDraft = { ...pendingDraftAddsRef.current };
-      if (nextEntries.length === 0) {
-        delete nextPendingByDraft[draftId];
-      } else {
-        nextPendingByDraft[draftId] = nextEntries;
-      }
+      nextPendingByDraft[draftId] = nextEntries;
       replacePendingDraftAdds(nextPendingByDraft);
       return true;
     },
     [replacePendingDraftAdds]
   );
 
+  const collectRestoreBlockedPendingSemanticKeysForDraft = useCallback((draftId: string): Set<string> => {
+    const normalizedDraftId = draftId.trim();
+    if (!normalizedDraftId) return new Set<string>();
+
+    const keys = new Set<string>();
+    const collectFrom = (entries: PendingDraftAdd[]) => {
+      entries.forEach((entry) => {
+        if (!shouldBlockPendingDraftAddRestore(entry)) return;
+        keys.add(buildPendingDraftAddSemanticKeyFromEntry(entry));
+      });
+    };
+    collectFrom(pendingDraftAddsRef.current[normalizedDraftId] || []);
+    collectFrom(recoveryPendingDraftAddsRef.current[normalizedDraftId] || []);
+    return keys;
+  }, []);
+
   const reconcileCancelledPendingDraftAddIntent = useCallback(
-    async (intent: PendingDraftAddCancellationIntent): Promise<void> => {
+    async (intent: PendingDraftAddCancellationIntent): Promise<boolean> => {
       const matchedItem = findServerDraftItemMatchingPendingIntent(intent);
       if (!matchedItem) {
         pushOperationalEvent(
@@ -5492,7 +5757,7 @@ const App: React.FC = () => {
             reason: 'no_matching_server_item',
           }
         );
-        return;
+        return true;
       }
 
       const currentQty = Math.max(1, Math.round(Number(matchedItem.qty) || 0));
@@ -5506,7 +5771,7 @@ const App: React.FC = () => {
         targetQty: nextQty,
       });
 
-      await runDraftItemRemoteMutation({
+      return runDraftItemRemoteMutation({
         draftId: intent.draftId,
         itemId: matchedItem.id,
         targetQty: nextQty,
@@ -5561,17 +5826,110 @@ const App: React.FC = () => {
           return true;
         }
 
-        const current = currentPendingAdds[0];
+        const current = currentPendingAdds.find((entry) => isPendingDraftAddExecutable(entry));
+        if (!current) {
+          const staleInFlight = currentPendingAdds.find((entry) =>
+            isPendingDraftAddInFlightStale(entry)
+          );
+          if (staleInFlight) {
+            const staleRuntimeKey = buildPendingDraftAddRuntimeKey(
+              draftId,
+              staleInFlight.localItemId
+            );
+            const staleCancelIntent = pendingDraftAddCancellationIntentsRef.current.get(staleRuntimeKey);
+            pushOperationalEvent(
+              'QUEUE_HEALTH',
+              'Pending add IN_FLIGHT stale detectado; reexecução automática bloqueada.',
+              {
+                draftId,
+                localItemId: staleInFlight.localItemId,
+                commandId: staleInFlight.commandId,
+                source,
+                staleTimeoutMs: PENDING_DRAFT_ADD_IN_FLIGHT_STALE_MS,
+                blockedReexecution: true,
+              }
+            );
+
+            if (staleCancelIntent && staleCancelIntent.commandId === staleInFlight.commandId) {
+              const reconciled = await reconcileCancelledPendingDraftAddIntent(staleCancelIntent);
+              pendingDraftAddCancellationIntentsRef.current.delete(staleRuntimeKey);
+              updatePendingDraftAddInSource(
+                draftId,
+                source,
+                (entry) =>
+                  entry.localItemId === staleInFlight.localItemId &&
+                  entry.commandId === staleInFlight.commandId,
+                (entry) =>
+                  withPendingDraftAddStatus(
+                    {
+                      ...entry,
+                      terminalReason: reconciled
+                        ? 'stale_in_flight_cancelled_reconciled'
+                        : 'stale_in_flight_cancelled_reconcile_failed',
+                    },
+                    reconciled ? 'RECONCILED' : 'FAILED_TERMINAL',
+                    reconciled
+                      ? 'stale_in_flight_cancelled_reconciled'
+                      : 'stale_in_flight_cancelled_reconcile_failed'
+                  )
+              );
+              pushOperationalEvent(
+                reconciled ? 'PENDING_ADD_CANCELLED' : 'COMMAND_SKIPPED_OBSOLETE',
+                reconciled
+                  ? 'Pending add IN_FLIGHT stale reconciliado sem reexecução.'
+                  : 'Pending add IN_FLIGHT stale falhou na reconciliação e foi terminalizado.',
+                {
+                  draftId,
+                  localItemId: staleInFlight.localItemId,
+                  commandId: staleInFlight.commandId,
+                  source,
+                }
+              );
+              continue;
+            }
+
+            updatePendingDraftAddInSource(
+              draftId,
+              source,
+              (entry) =>
+                entry.localItemId === staleInFlight.localItemId &&
+                entry.commandId === staleInFlight.commandId,
+              (entry) =>
+                withPendingDraftAddStatus(
+                  {
+                    ...entry,
+                    terminalReason: 'stale_in_flight_without_cancel_intent',
+                  },
+                  'FAILED_TERMINAL',
+                  'stale_in_flight_without_cancel_intent'
+                )
+            );
+            pushOperationalEvent(
+              'COMMAND_SKIPPED_OBSOLETE',
+              'Pending add IN_FLIGHT stale descartado sem retorno a ACTIVE.',
+              {
+                draftId,
+                localItemId: staleInFlight.localItemId,
+                commandId: staleInFlight.commandId,
+                source,
+              }
+            );
+            continue;
+          }
+          return true;
+        }
+
         const currentRuntimeKey = buildPendingDraftAddRuntimeKey(draftId, current.localItemId);
         const cancelledBeforeSend = pendingDraftAddCancellationIntentsRef.current.get(
           currentRuntimeKey
         );
         if (cancelledBeforeSend && cancelledBeforeSend.commandId === current.commandId) {
-          removePendingDraftAddFromSource(
+          updatePendingDraftAddInSource(
             draftId,
             source,
             (entry) =>
-              entry.localItemId === current.localItemId && entry.commandId === current.commandId
+              entry.localItemId === current.localItemId && entry.commandId === current.commandId,
+            (entry) => withPendingDraftAddStatus(entry, 'CANCELLED', 'cancelled_before_send')
           );
           pendingDraftAddCancellationIntentsRef.current.delete(currentRuntimeKey);
           pushOperationalEvent(
@@ -5595,6 +5953,32 @@ const App: React.FC = () => {
           ingredientIdSet
         );
         if (recipeValidation.ok === false) {
+          updatePendingDraftAddInSource(
+            draftId,
+            source,
+            (entry) =>
+              entry.localItemId === current.localItemId && entry.commandId === current.commandId,
+            (entry) =>
+              withPendingDraftAddStatus(
+                {
+                  ...entry,
+                  terminalReason: 'invalid_recipe',
+                },
+                'FAILED_TERMINAL',
+                'invalid_recipe'
+              )
+          );
+          pushOperationalEvent(
+            'COMMAND_SKIPPED_OBSOLETE',
+            'Pending add marcado como terminal por receita inválida.',
+            {
+              draftId,
+              localItemId: current.localItemId,
+              commandId: current.commandId,
+              source,
+              reason: 'invalid_recipe',
+            }
+          );
           updateRunCommandErrorSink(options.errorSink, {
             message: recipeValidation.message,
             retryable: false,
@@ -5605,6 +5989,20 @@ const App: React.FC = () => {
           }
           return false;
         }
+
+        updatePendingDraftAddInSource(
+          draftId,
+          source,
+          (entry) =>
+            entry.localItemId === current.localItemId && entry.commandId === current.commandId,
+          (entry) => withPendingDraftAddStatus(entry, 'IN_FLIGHT')
+        );
+        pushOperationalEvent('QUEUE_HEALTH', 'Pending add entrou em execução (IN_FLIGHT).', {
+          draftId,
+          localItemId: current.localItemId,
+          commandId: current.commandId,
+          source,
+        });
 
         const syncCommand: SaleDraftAddItemCommand = {
           type: 'SALE_DRAFT_ADD_ITEM',
@@ -5637,22 +6035,68 @@ const App: React.FC = () => {
             pendingDraftAddsInFlightRef.current.delete(currentRuntimeKey);
           }
         }
-        if (!ok) return false;
+        if (!ok) {
+          updatePendingDraftAddInSource(
+            draftId,
+            source,
+            (entry) =>
+              entry.localItemId === current.localItemId && entry.commandId === current.commandId,
+            (entry) => withPendingDraftAddStatus(entry, 'ACTIVE')
+          );
+          return false;
+        }
 
         const cancelledDuringSync = pendingDraftAddCancellationIntentsRef.current.get(
           currentRuntimeKey
         );
         if (cancelledDuringSync && cancelledDuringSync.commandId === current.commandId) {
-          await reconcileCancelledPendingDraftAddIntent(cancelledDuringSync);
+          const reconciled = await reconcileCancelledPendingDraftAddIntent(cancelledDuringSync);
           pendingDraftAddCancellationIntentsRef.current.delete(currentRuntimeKey);
+          updatePendingDraftAddInSource(
+            draftId,
+            source,
+            (entry) =>
+              entry.localItemId === current.localItemId && entry.commandId === current.commandId,
+            (entry) =>
+              withPendingDraftAddStatus(
+                {
+                  ...entry,
+                  terminalReason: reconciled
+                    ? 'cancelled_reconciled'
+                    : 'cancelled_reconcile_failed',
+                },
+                reconciled ? 'RECONCILED' : 'FAILED_TERMINAL',
+                reconciled ? 'cancelled_reconciled' : 'cancelled_reconcile_failed'
+              )
+          );
+          pushOperationalEvent(
+            reconciled ? 'PENDING_ADD_CANCELLED' : 'COMMAND_SKIPPED_OBSOLETE',
+            reconciled
+              ? 'Pending add reconciliado e finalizado.'
+              : 'Pending add falhou ao reconciliar e foi terminalizado.',
+            {
+              draftId,
+              localItemId: current.localItemId,
+              commandId: current.commandId,
+              source,
+            }
+          );
+          continue;
         }
 
-        removePendingDraftAddFromSource(
+        updatePendingDraftAddInSource(
           draftId,
           source,
           (entry) =>
-            entry.localItemId === current.localItemId && entry.commandId === current.commandId
+            entry.localItemId === current.localItemId && entry.commandId === current.commandId,
+          (entry) => withPendingDraftAddStatus(entry, 'APPLIED')
         );
+        pushOperationalEvent('QUEUE_HEALTH', 'Pending add aplicado com sucesso.', {
+          draftId,
+          localItemId: current.localItemId,
+          commandId: current.commandId,
+          source,
+        });
       }
     },
     [
@@ -5661,7 +6105,7 @@ const App: React.FC = () => {
       ingredients,
       products,
       reconcileCancelledPendingDraftAddIntent,
-      removePendingDraftAddFromSource,
+      updatePendingDraftAddInSource,
       runCommandWithSync,
       showNotification,
       pushOperationalEvent,
@@ -5714,11 +6158,12 @@ const App: React.FC = () => {
       if (!isPendingDraftAddsHydratedRef.current) return;
       if (syncingPaidDraftIdsRef.current.has(normalizedDraftId)) return;
 
-      const pendingEntries = pendingDraftAddsRef.current[normalizedDraftId] || [];
-      if (pendingEntries.length === 0) {
+      const draftEntries = pendingDraftAddsRef.current[normalizedDraftId] || [];
+      if (!hasPendingDraftAddBackgroundSyncWork(draftEntries)) {
         pendingDraftBackgroundRetryAttemptsRef.current.delete(normalizedDraftId);
         return;
       }
+      const pendingEntries = draftEntries.filter((entry) => isPendingDraftAddExecutable(entry));
 
       const runningSet = pendingDraftBackgroundSyncRunningRef.current;
       if (runningSet.has(normalizedDraftId)) return;
@@ -5801,7 +6246,7 @@ const App: React.FC = () => {
       if (syncingPaidDraftIdsRef.current.has(normalizedDraftId)) return;
 
       const pendingEntries = pendingDraftAddsRef.current[normalizedDraftId] || [];
-      if (pendingEntries.length === 0) return;
+      if (!hasPendingDraftAddBackgroundSyncWork(pendingEntries)) return;
 
       const timers = pendingDraftBackgroundSyncTimerRef.current;
       const existingTimer = timers.get(normalizedDraftId);
@@ -5833,7 +6278,7 @@ const App: React.FC = () => {
     });
 
     Object.entries(pendingDraftAddsByDraft).forEach(([draftId, entries]) => {
-      if (!Array.isArray(entries) || entries.length === 0) return;
+      if (!Array.isArray(entries) || countVisiblePendingDraftAdds(entries) === 0) return;
       schedulePendingDraftBackgroundSync(draftId);
     });
   }, [
@@ -5849,7 +6294,7 @@ const App: React.FC = () => {
     const syncAllPendingDrafts = () => {
       if (!isAccessVerified || isStateHydrating) return;
       Object.entries(pendingDraftAddsRef.current).forEach(([draftId, entries]) => {
-        if (!Array.isArray(entries) || entries.length === 0) return;
+        if (!Array.isArray(entries) || countVisiblePendingDraftAdds(entries) === 0) return;
         schedulePendingDraftBackgroundSync(draftId, 120);
       });
     };
@@ -6266,6 +6711,8 @@ const App: React.FC = () => {
         : [];
       if (snapshotItems.length === 0) return false;
 
+      const restoreBlockedKeys = collectRestoreBlockedPendingSemanticKeysForDraft(normalizedDraftId);
+
       const serverDraft = saleDraftsRef.current.find((draft) => draft.id === normalizedDraftId);
       if (serverDraft && (serverDraft.status === 'PAID' || serverDraft.status === 'CANCELLED')) {
         return false;
@@ -6284,12 +6731,34 @@ const App: React.FC = () => {
           if (quantity <= 0) return null;
 
           const recipeOverride = normalizeRecipeOverride(item.recipe);
+          const semanticKey = buildPendingDraftAddSemanticKey({
+            draftId: normalizedDraftId,
+            productId,
+            recipeSignature: normalizeRecipeSignature(recipeOverride),
+            noteNormalized: normalizeDraftItemNoteForMatch(
+              typeof item.note === 'string' ? item.note : undefined
+            ),
+          });
+          if (restoreBlockedKeys.has(semanticKey)) {
+            pushOperationalEvent(
+              'COMMAND_SKIPPED_OBSOLETE',
+              'Restore de pending add bloqueado por terminalidade prévia.',
+              {
+                draftId: normalizedDraftId,
+                productId,
+                semanticKey,
+                trigger: options.trigger || 'unknown',
+              }
+            );
+            return null;
+          }
           const unitPriceRaw = Number(item.unitPriceSnapshot);
           const priceOverride =
             Number.isFinite(unitPriceRaw) && unitPriceRaw >= 0
               ? roundMoney(unitPriceRaw)
               : undefined;
           const note = typeof item.note === 'string' && item.note.trim() ? item.note.trim() : undefined;
+          const nowIso = new Date().toISOString();
 
           const rebuiltEntry: PendingDraftAdd = {
             draftId: normalizedDraftId,
@@ -6297,7 +6766,9 @@ const App: React.FC = () => {
             commandId: createClientId('cmd'),
             productId,
             quantity,
-            queuedAt: new Date().toISOString(),
+            queuedAt: nowIso,
+            updatedAt: nowIso,
+            status: 'ACTIVE',
           };
           if (recipeOverride) {
             rebuiltEntry.recipeOverride = recipeOverride;
@@ -6337,7 +6808,7 @@ const App: React.FC = () => {
       });
       return true;
     },
-    [hydratePendingDraftAdds, replacePendingDraftAdds]
+    [collectRestoreBlockedPendingSemanticKeysForDraft, hydratePendingDraftAdds, pushOperationalEvent]
   );
 
   const recoverPendingPaidSyncDraft = useCallback(
@@ -6879,9 +7350,13 @@ const App: React.FC = () => {
           );
         };
 
-        const visiblePendingCount = (pendingDraftAddsRef.current[currentJob.draftId] || []).length;
+        const visiblePendingCount = (pendingDraftAddsRef.current[currentJob.draftId] || []).filter((entry) =>
+          isPendingDraftAddExecutable(entry)
+        ).length;
         const recoveryPendingCount =
-          (recoveryPendingDraftAddsRef.current[currentJob.draftId] || []).length;
+          (recoveryPendingDraftAddsRef.current[currentJob.draftId] || []).filter((entry) =>
+            isPendingDraftAddExecutable(entry)
+          ).length;
         const shouldFlushDraftAdds =
           !currentServerDraft ||
           currentServerDraft.status === 'DRAFT' ||
@@ -7743,7 +8218,8 @@ const App: React.FC = () => {
       const execute = async (): Promise<boolean> => {
         hydratePendingDraftAdds();
 
-        const visibleEntries = pendingDraftAddsRef.current[normalizedDraftId] || [];
+        const allEntries = pendingDraftAddsRef.current[normalizedDraftId] || [];
+        const visibleEntries = allEntries.filter((entry) => isPendingDraftAddVisible(entry));
         movedEntriesCount = visibleEntries.length;
         if (visibleEntries.length === 0) return true;
 
@@ -7760,8 +8236,13 @@ const App: React.FC = () => {
         nextRecoveryByDraft[normalizedDraftId] = Array.from(dedupedEntriesByKey.values());
         recoveryPendingDraftAddsRef.current = nextRecoveryByDraft;
 
+        const retainedLocalEntries = allEntries.filter((entry) => !isPendingDraftAddVisible(entry));
         const nextVisibleByDraft = { ...pendingDraftAddsRef.current };
-        delete nextVisibleByDraft[normalizedDraftId];
+        if (retainedLocalEntries.length > 0) {
+          nextVisibleByDraft[normalizedDraftId] = retainedLocalEntries;
+        } else {
+          delete nextVisibleByDraft[normalizedDraftId];
+        }
         replacePendingDraftAdds(nextVisibleByDraft);
 
         return true;
@@ -7888,7 +8369,7 @@ const App: React.FC = () => {
       );
     }
 
-    const pendingItemsCount = pendingDraftAddsRef.current[draftId]?.length || 0;
+    const pendingItemsCount = countVisiblePendingDraftAdds(pendingDraftAddsRef.current[draftId] || []);
     const paymentClickAtMs = Date.now();
     setIsConfirmingPaid(true);
     void moveVisiblePendingDraftAddsToRecovery(draftId).catch((error) => {
