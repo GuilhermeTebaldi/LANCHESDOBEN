@@ -8040,6 +8040,78 @@ const App: React.FC = () => {
           const isEmptyDraftFailure =
             statusCode === 422 && isDraftEmptyErrorMessage(message);
 
+          if (isEmptyDraftFailure) {
+            try {
+              const stateRefreshStartedAt = performance.now();
+              const refreshedState = await fetchStateSnapshotControlled(currentJob.draftId);
+              applySnapshotForCurrentJob(
+                refreshedState,
+                'pending_paid_refresh_empty_draft_terminal_check'
+              );
+              recordStateRefreshMs(performance.now() - stateRefreshStartedAt);
+            } catch {
+              // best-effort refresh before deciding terminal outcome
+            }
+
+            const latestDraft = saleDraftsRef.current.find(
+              (entry) => entry.id === currentJob.draftId
+            );
+            const isServerTerminal =
+              !latestDraft || latestDraft.status === 'PAID' || latestDraft.status === 'CANCELLED';
+
+            if (isServerTerminal) {
+              setDraftLifecycleStage(
+                currentJob.draftId,
+                latestDraft?.status === 'CANCELLED' ? 'CANCELLED' : 'PAID',
+                {
+                  reason: 'queue_empty_draft_reconciled_terminal',
+                  bumpEpoch: false,
+                }
+              );
+              completePaymentFlowTelemetry(currentJob.draftId, {
+                retries: currentJob.attempts,
+                hadReconciliation: true,
+              });
+              setDraftSyncInProgress(currentJob.draftId, false);
+              cleanupDraftOperationalArtifacts(currentJob.draftId);
+              clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
+              showCornerSync('success', 'Pedido já estava resolvido no banco.', 1800);
+              return;
+            }
+
+            const nextPendingByDraft = { ...pendingDraftAddsRef.current };
+            if ((nextPendingByDraft[currentJob.draftId] || []).length > 0) {
+              delete nextPendingByDraft[currentJob.draftId];
+              replacePendingDraftAdds(nextPendingByDraft);
+            }
+            clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
+
+            const terminalEmptyMessage = statusCode
+              ? `${message} (HTTP ${statusCode})`
+              : message;
+            const failedJob: PendingPaidSyncJob = {
+              ...currentJob,
+              attempts: currentJob.attempts + 1,
+              nextAttemptAt: undefined,
+              lastError: terminalEmptyMessage,
+            };
+            markPaymentFlowTelemetryProgress(currentJob.draftId, {
+              retries: failedJob.attempts,
+            });
+            enqueueFailedPaidSyncJob(failedJob);
+            setDraftSyncInProgress(currentJob.draftId, false);
+            showCornerSync(
+              'error',
+              'Carrinho vazio no servidor. Falha terminal sem nova tentativa automática.',
+              3200
+            );
+            showNotification(`Erro ao enviar pedido: ${terminalEmptyMessage}`);
+            scheduleRetryDispatchTask('pending-paid-sync-main', 60, () =>
+              processPendingPaidSyncQueue()
+            );
+            return;
+          }
+
           const scheduleRecoveryRetry = (
             recoveryMessage: string,
             recoveryStatusCode?: number
@@ -9121,10 +9193,27 @@ const App: React.FC = () => {
     });
 
     failedPaidSyncQueue.forEach((job) => {
+      const isEmptyDraftFailure = isDraftEmptyErrorMessage(job.lastError || '');
+      if (isEmptyDraftFailure) {
+        const retryTimer = failedPaidSyncAutoRetryTimersRef.current.get(job.id);
+        if (retryTimer !== undefined) {
+          window.clearTimeout(retryTimer);
+          failedPaidSyncAutoRetryTimersRef.current.delete(job.id);
+        }
+        const recoverTimer = failedPaidSyncAutoRecoverTimersRef.current.get(job.id);
+        if (recoverTimer !== undefined) {
+          window.clearTimeout(recoverTimer);
+          failedPaidSyncAutoRecoverTimersRef.current.delete(job.id);
+        }
+        if (failedPaidSyncAutoRetryAttemptsRef.current.has(job.id)) {
+          failedPaidSyncAutoRetryAttemptsRef.current.delete(job.id);
+          shouldRefreshAutoRetryUi = true;
+        }
+        return;
+      }
+
       const autoAttempts = failedPaidSyncAutoRetryAttemptsRef.current.get(job.id) || 0;
-      const recoverableError =
-        isDraftEmptyErrorMessage(job.lastError || '') ||
-        isAutoRecoverableFailedQueueMessage(job.lastError || '');
+      const recoverableError = isAutoRecoverableFailedQueueMessage(job.lastError || '');
       const shouldRunRecovery = shouldPaidSyncAssistantRunRecovery(
         autoAttempts,
         recoverableError
@@ -10194,16 +10283,18 @@ const App: React.FC = () => {
       const failedCards = failedPaidSyncQueue.map((job) => {
         const autoRetryAttempts =
           failedPaidSyncAutoRetryAttemptsRef.current.get(job.id) || 0;
+        const isEmptyDraftFailure = isDraftEmptyErrorMessage(job.lastError || '');
         const recoverableError =
-          isDraftEmptyErrorMessage(job.lastError || '') ||
-          isAutoRecoverableFailedQueueMessage(job.lastError || '');
+          !isEmptyDraftFailure && isAutoRecoverableFailedQueueMessage(job.lastError || '');
         const shouldRecoverSoon = shouldPaidSyncAssistantRunRecovery(
           autoRetryAttempts,
           recoverableError
         );
-        const assistantLabel = shouldRecoverSoon
-          ? 'Robô: reconstruindo snapshot'
-          : 'Robô: nova tentativa automática';
+        const assistantLabel = isEmptyDraftFailure
+          ? 'Robô: aguardando ação manual'
+          : shouldRecoverSoon
+            ? 'Robô: reconstruindo snapshot'
+            : 'Robô: nova tentativa automática';
         return {
           id: job.id,
           draftId: job.draftId,
