@@ -8380,94 +8380,92 @@ const App: React.FC = () => {
           }
         }
 
-        let finalized = currentServerDraft?.status === 'PENDING_PAYMENT';
+        let finalized = false;
+        const finalizeErrorSink: RunCommandErrorSink = {};
+        const finalizeStartedAt = performance.now();
+        try {
+          finalized = await handleSavePaymentMethod(currentJob.snapshot, {
+            trackPendingState: false,
+            silentSavedNotification: true,
+            silentErrorNotification: true,
+            errorSink: finalizeErrorSink,
+            preferAsyncFinalize: false,
+            failFastOnVersionConflict: false,
+            skipSnapshotApplyOnTerminalFlow: true,
+            onSnapshotAppliedMs: recordSnapshotApplyMs,
+          });
+        } finally {
+          markPaymentFlowTelemetryStageDuration(
+            currentJob.draftId,
+            currentJob.id,
+            'finalizeMs',
+            performance.now() - finalizeStartedAt
+          );
+        }
         if (!finalized) {
-          const finalizeErrorSink: RunCommandErrorSink = {};
-          const finalizeStartedAt = performance.now();
-          try {
-            finalized = await handleSavePaymentMethod(currentJob.snapshot, {
-              trackPendingState: false,
-              silentSavedNotification: true,
-              silentErrorNotification: true,
-              errorSink: finalizeErrorSink,
-              preferAsyncFinalize: false,
-              failFastOnVersionConflict: false,
-              skipSnapshotApplyOnTerminalFlow: true,
-              onSnapshotAppliedMs: recordSnapshotApplyMs,
-            });
-          } finally {
-            markPaymentFlowTelemetryStageDuration(
-              currentJob.draftId,
-              currentJob.id,
-              'finalizeMs',
-              performance.now() - finalizeStartedAt
-            );
-          }
-          if (!finalized) {
-            const finalizeMessage =
-              finalizeErrorSink.message || 'Falha ao salvar forma de pagamento.';
-            const isFinalizeConflict =
-              finalizeErrorSink.statusCode === 409 &&
-              isFinalizeStateConflictErrorMessage(finalizeMessage);
-            if (isFinalizeConflict) {
-              let stateRefreshed = false;
-              try {
-                const stateRefreshStartedAt = performance.now();
-                const refreshedState = await fetchStateSnapshotControlled(currentJob.draftId);
-                applySnapshotForCurrentJob(
-                  refreshedState,
-                  'pending_paid_refresh_finalize_conflict'
-                );
-                recordStateRefreshMs(performance.now() - stateRefreshStartedAt);
-                stateRefreshed = true;
-              } catch {
-                // best-effort: if refresh fails we still evaluate local snapshot below
-              }
-              const latestDraft = saleDraftsRef.current.find(
-                (entry) => entry.id === currentJob.draftId
+          const finalizeMessage =
+            finalizeErrorSink.message || 'Falha ao salvar forma de pagamento.';
+          const isFinalizeConflict =
+            finalizeErrorSink.statusCode === 409 &&
+            isFinalizeStateConflictErrorMessage(finalizeMessage);
+          if (isFinalizeConflict) {
+            let stateRefreshed = false;
+            try {
+              const stateRefreshStartedAt = performance.now();
+              const refreshedState = await fetchStateSnapshotControlled(currentJob.draftId);
+              applySnapshotForCurrentJob(
+                refreshedState,
+                'pending_paid_refresh_finalize_conflict'
               );
-              if (
-                !latestDraft ||
-                latestDraft.status === 'PAID' ||
-                latestDraft.status === 'CANCELLED'
-              ) {
-                setDraftLifecycleStage(
-                  currentJob.draftId,
-                  latestDraft?.status === 'CANCELLED' ? 'CANCELLED' : 'PAID',
-                  {
-                    reason: 'queue_finalize_conflict_terminal',
-                    bumpEpoch: false,
-                  }
-                );
-                completePaymentFlowTelemetry(currentJob.draftId, {
-                  retries: currentJob.attempts,
-                  hadReconciliation: true,
-                });
-                setDraftSyncInProgress(currentJob.draftId, false);
-                cleanupDraftOperationalArtifacts(currentJob.draftId);
-                clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
-                showCornerSync('success', 'Pedido já estava concluído no banco.', 1800);
-                return;
-              }
-              if (latestDraft.status === 'PENDING_PAYMENT') {
-                finalized = true;
-                showCornerSync('syncing', 'Pagamento já preparado. Confirmando...', 1600);
-              } else {
-                await markJobAsFailed(
-                  stateRefreshed
-                    ? 'Conflito ao finalizar pagamento.'
-                    : 'Conflito ao finalizar pagamento. Reagendando com atualização de estado.',
-                  {
-                    ...finalizeErrorSink,
-                    retryable: true,
-                  }
-                );
-                return;
-              }
-            } else {
-              await markJobAsFailed('Falha ao salvar forma de pagamento.', finalizeErrorSink);
+              recordStateRefreshMs(performance.now() - stateRefreshStartedAt);
+              stateRefreshed = true;
+            } catch {
+              // best-effort: if refresh fails we still evaluate local snapshot below
+            }
+            const latestDraft = saleDraftsRef.current.find(
+              (entry) => entry.id === currentJob.draftId
+            );
+            if (
+              !latestDraft ||
+              latestDraft.status === 'PAID' ||
+              latestDraft.status === 'CANCELLED'
+            ) {
+              setDraftLifecycleStage(
+                currentJob.draftId,
+                latestDraft?.status === 'CANCELLED' ? 'CANCELLED' : 'PAID',
+                {
+                  reason: 'queue_finalize_conflict_terminal',
+                  bumpEpoch: false,
+                }
+              );
+              completePaymentFlowTelemetry(currentJob.draftId, {
+                retries: currentJob.attempts,
+                hadReconciliation: true,
+              });
+              setDraftSyncInProgress(currentJob.draftId, false);
+              cleanupDraftOperationalArtifacts(currentJob.draftId);
+              clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
+              showCornerSync('success', 'Pedido já estava concluído no banco.', 1800);
               return;
             }
+            if (latestDraft.status === 'PENDING_PAYMENT') {
+              finalized = true;
+              showCornerSync('syncing', 'Pagamento já preparado. Confirmando...', 1600);
+            } else {
+              await markJobAsFailed(
+                stateRefreshed
+                  ? 'Conflito ao finalizar pagamento.'
+                  : 'Conflito ao finalizar pagamento. Reagendando com atualização de estado.',
+                {
+                  ...finalizeErrorSink,
+                  retryable: true,
+                }
+              );
+              return;
+            }
+          } else {
+            await markJobAsFailed('Falha ao salvar forma de pagamento.', finalizeErrorSink);
+            return;
           }
         }
 
