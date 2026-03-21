@@ -10474,6 +10474,9 @@ const App: React.FC = () => {
       const failedCards = failedPaidSyncQueue.map((job) => {
         const autoRetryAttempts =
           failedPaidSyncAutoRetryAttemptsRef.current.get(job.id) || 0;
+        const blockedByConfirmFinalizeRace = isConfirmPendingFinalizeRaceRelatedMessage(
+          job.lastError || ''
+        );
         const recoverableError =
           isDraftEmptyErrorMessage(job.lastError || '') ||
           isAutoRecoverableFailedQueueMessage(job.lastError || '');
@@ -10481,9 +10484,11 @@ const App: React.FC = () => {
           autoRetryAttempts,
           recoverableError
         );
-        const assistantLabel = shouldRecoverSoon
-          ? 'Robô: reconstruindo snapshot'
-          : 'Robô: nova tentativa automática';
+        const assistantLabel = blockedByConfirmFinalizeRace
+          ? 'Robô: aguardando reconciliação segura'
+          : shouldRecoverSoon
+            ? 'Robô: reconstruindo snapshot'
+            : 'Robô: nova tentativa automática';
         return {
           id: job.id,
           draftId: job.draftId,
@@ -10493,7 +10498,9 @@ const App: React.FC = () => {
           lastError: job.lastError || null,
           isFailed: true,
           autoRetryAttempts,
-          autoRetryPending:
+          autoRetryPending: blockedByConfirmFinalizeRace
+            ? false
+            :
             failedPaidSyncAutoRetryTimersRef.current.has(job.id) ||
             failedPaidSyncAutoRecoverTimersRef.current.has(job.id),
           assistantLabel,
