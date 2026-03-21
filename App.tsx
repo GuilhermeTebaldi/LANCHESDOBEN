@@ -60,6 +60,10 @@ import {
 } from './utils/receiptPrintPayload';
 import { reportErrorMonitorEvent } from './utils/errorMonitorClient';
 import {
+  operationalStorage,
+  type OperationalStorageResolvedResult,
+} from './data/operationalStorage';
+import {
   describePaidSyncAssistantMode,
   getPaidSyncAssistantRecoverDelayMs,
   getPaidSyncAssistantRetryDelayMs,
@@ -1276,43 +1280,45 @@ const normalizePendingDraftAdd = (value: unknown): PendingDraftAdd | null => {
   };
 };
 
-const loadPendingDraftAdds = (): PendingDraftAddsByDraftId => {
-  if (typeof window === 'undefined') return {};
-  try {
-    const raw = window.localStorage.getItem(PENDING_DRAFT_ADDS_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw) as unknown;
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      return {};
-    }
-
-    const record = parsed as Record<string, unknown>;
-    const next: PendingDraftAddsByDraftId = {};
-    for (const [draftId, value] of Object.entries(record)) {
-      if (!Array.isArray(value)) continue;
-      const normalized = value
-        .map((entry) => {
-          if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
-          return normalizePendingDraftAdd({ ...(entry as Record<string, unknown>), draftId });
-        })
-        .filter((entry): entry is PendingDraftAdd => entry !== null);
-      if (normalized.length > 0) {
-        next[draftId] = normalized;
-      }
-    }
-    return next;
-  } catch {
+const normalizePendingDraftAddsRecord = (parsed: unknown): PendingDraftAddsByDraftId => {
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     return {};
   }
+
+  const record = parsed as Record<string, unknown>;
+  const next: PendingDraftAddsByDraftId = {};
+  for (const [draftId, value] of Object.entries(record)) {
+    if (!Array.isArray(value)) continue;
+    const normalized = value
+      .map((entry) => {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+        return normalizePendingDraftAdd({ ...(entry as Record<string, unknown>), draftId });
+      })
+      .filter((entry): entry is PendingDraftAdd => entry !== null);
+    if (normalized.length > 0) {
+      next[draftId] = normalized;
+    }
+  }
+  return next;
+};
+
+const loadPendingDraftAddsLocalFallback = (): PendingDraftAddsByDraftId =>
+  normalizePendingDraftAddsRecord(
+    operationalStorage.getLocalFallback<unknown>(PENDING_DRAFT_ADDS_KEY)
+  );
+
+const loadPendingDraftAddsResolved = async (): Promise<
+  OperationalStorageResolvedResult<PendingDraftAddsByDraftId>
+> => {
+  const resolved = await operationalStorage.getResolved<unknown>(PENDING_DRAFT_ADDS_KEY);
+  return {
+    ...resolved,
+    value: normalizePendingDraftAddsRecord(resolved.value),
+  };
 };
 
 const savePendingDraftAdds = (pendingAdds: PendingDraftAddsByDraftId): void => {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.setItem(PENDING_DRAFT_ADDS_KEY, JSON.stringify(pendingAdds));
-  } catch {
-    // ignore storage write failures
-  }
+  void operationalStorage.setCritical(PENDING_DRAFT_ADDS_KEY, pendingAdds);
 };
 
 const clonePaymentCommitSnapshot = (snapshot: PaymentCommitSnapshot): PaymentCommitSnapshot => ({
@@ -1435,52 +1441,116 @@ const normalizePendingPaidSyncJob = (value: unknown): PendingPaidSyncJob | null 
   };
 };
 
-const loadPendingPaidSyncQueue = (): PendingPaidSyncJob[] => {
-  if (typeof window === 'undefined') return [];
-  try {
-    const raw = window.localStorage.getItem(PENDING_PAID_SYNC_QUEUE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .map((entry) => normalizePendingPaidSyncJob(entry))
-      .filter((entry): entry is PendingPaidSyncJob => entry !== null);
-  } catch {
-    return [];
-  }
+const normalizePendingPaidSyncQueueRecord = (parsed: unknown): PendingPaidSyncJob[] => {
+  if (!Array.isArray(parsed)) return [];
+  return parsed
+    .map((entry) => normalizePendingPaidSyncJob(entry))
+    .filter((entry): entry is PendingPaidSyncJob => entry !== null);
+};
+
+const loadPendingPaidSyncQueueLocalFallback = (): PendingPaidSyncJob[] =>
+  normalizePendingPaidSyncQueueRecord(
+    operationalStorage.getLocalFallback<unknown>(PENDING_PAID_SYNC_QUEUE_KEY)
+  );
+
+const loadPendingPaidSyncQueueResolved = async (): Promise<
+  OperationalStorageResolvedResult<PendingPaidSyncJob[]>
+> => {
+  const resolved = await operationalStorage.getResolved<unknown>(PENDING_PAID_SYNC_QUEUE_KEY);
+  return {
+    ...resolved,
+    value: normalizePendingPaidSyncQueueRecord(resolved.value),
+  };
 };
 
 const savePendingPaidSyncQueue = (queue: PendingPaidSyncJob[]): void => {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.setItem(PENDING_PAID_SYNC_QUEUE_KEY, JSON.stringify(queue));
-  } catch {
-    // ignore storage write failures
-  }
+  void operationalStorage.setCritical(PENDING_PAID_SYNC_QUEUE_KEY, queue);
 };
 
-const loadFailedPaidSyncQueue = (): PendingPaidSyncJob[] => {
-  if (typeof window === 'undefined') return [];
-  try {
-    const raw = window.localStorage.getItem(FAILED_PAID_SYNC_QUEUE_KEY);
-    if (!raw) return [];
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) return [];
-    return parsed
-      .map((entry) => normalizePendingPaidSyncJob(entry))
-      .filter((entry): entry is PendingPaidSyncJob => entry !== null);
-  } catch {
-    return [];
-  }
+const loadFailedPaidSyncQueueLocalFallback = (): PendingPaidSyncJob[] =>
+  normalizePendingPaidSyncQueueRecord(
+    operationalStorage.getLocalFallback<unknown>(FAILED_PAID_SYNC_QUEUE_KEY)
+  );
+
+const loadFailedPaidSyncQueueResolved = async (): Promise<
+  OperationalStorageResolvedResult<PendingPaidSyncJob[]>
+> => {
+  const resolved = await operationalStorage.getResolved<unknown>(FAILED_PAID_SYNC_QUEUE_KEY);
+  return {
+    ...resolved,
+    value: normalizePendingPaidSyncQueueRecord(resolved.value),
+  };
 };
 
 const saveFailedPaidSyncQueue = (queue: PendingPaidSyncJob[]): void => {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.setItem(FAILED_PAID_SYNC_QUEUE_KEY, JSON.stringify(queue));
-  } catch {
-    // ignore storage write failures
-  }
+  void operationalStorage.setCritical(FAILED_PAID_SYNC_QUEUE_KEY, queue);
+};
+
+const countPendingDraftAdds = (value: PendingDraftAddsByDraftId): number =>
+  Object.values(value).reduce((total, entries) => total + entries.length, 0);
+
+const mergePendingDraftAdds = (
+  current: PendingDraftAddsByDraftId,
+  recovered: PendingDraftAddsByDraftId
+): PendingDraftAddsByDraftId => {
+  const merged: PendingDraftAddsByDraftId = {};
+  const draftIds = new Set<string>([
+    ...Object.keys(current),
+    ...Object.keys(recovered),
+  ]);
+
+  draftIds.forEach((draftId) => {
+    const currentEntries = current[draftId] || [];
+    const recoveredEntries = recovered[draftId] || [];
+    const nextEntries: PendingDraftAdd[] = [];
+    const seen = new Set<string>();
+
+    [...currentEntries, ...recoveredEntries].forEach((entry) => {
+      const normalized = normalizePendingDraftAdd({ ...entry, draftId });
+      if (!normalized) return;
+      const dedupeKey = `${normalized.commandId}::${normalized.localItemId}`;
+      if (seen.has(dedupeKey)) return;
+      seen.add(dedupeKey);
+      nextEntries.push(normalized);
+    });
+
+    if (nextEntries.length > 0) {
+      merged[draftId] = nextEntries;
+    }
+  });
+
+  return merged;
+};
+
+const mergePendingPaidSyncQueue = (
+  current: PendingPaidSyncJob[],
+  recovered: PendingPaidSyncJob[]
+): PendingPaidSyncJob[] => {
+  const mergedByDraftId = new Map<string, PendingPaidSyncJob>();
+  [...current, ...recovered].forEach((job) => {
+    const normalized = normalizePendingPaidSyncJob(job);
+    if (!normalized) return;
+    if (!mergedByDraftId.has(normalized.draftId)) {
+      mergedByDraftId.set(normalized.draftId, normalized);
+    }
+  });
+  return Array.from(mergedByDraftId.values());
+};
+
+const mergeFailedPaidSyncQueue = (
+  current: PendingPaidSyncJob[],
+  recovered: PendingPaidSyncJob[]
+): PendingPaidSyncJob[] => {
+  const mergedByIdentity = new Map<string, PendingPaidSyncJob>();
+  [...current, ...recovered].forEach((job) => {
+    const normalized = normalizePendingPaidSyncJob(job);
+    if (!normalized) return;
+    const identity = `${normalized.id}::${normalized.draftId}`;
+    if (!mergedByIdentity.has(identity)) {
+      mergedByIdentity.set(identity, normalized);
+    }
+  });
+  return Array.from(mergedByIdentity.values());
 };
 
 const PENDING_PAID_SYNC_RETRY_BASE_MS = 5000;
@@ -1553,6 +1623,12 @@ const App: React.FC = () => {
   const isPendingDraftAddsHydratedRef = useRef(false);
   const isPendingPaidSyncQueueHydratedRef = useRef(false);
   const isFailedPaidSyncQueueHydratedRef = useRef(false);
+  const pendingDraftAddsRecoveryLoadRef = useRef<Promise<void> | null>(null);
+  const pendingPaidSyncQueueRecoveryLoadRef = useRef<Promise<void> | null>(null);
+  const failedPaidSyncQueueRecoveryLoadRef = useRef<Promise<void> | null>(null);
+  const pendingDraftAddsRevisionRef = useRef(0);
+  const pendingPaidSyncQueueRevisionRef = useRef(0);
+  const failedPaidSyncQueueRevisionRef = useRef(0);
   const isPendingPaidSyncQueueRunningRef = useRef(false);
   const isFlushingOfflineSalesRef = useRef(false);
   const isOfflineQueueHydratedRef = useRef(false);
@@ -2072,16 +2148,45 @@ const App: React.FC = () => {
     pendingDraftAddsRef.current = normalized;
     setPendingDraftAddsByDraft(normalized);
     savePendingDraftAdds(normalized);
+    pendingDraftAddsRevisionRef.current += 1;
     isPendingDraftAddsHydratedRef.current = true;
   }, []);
 
   const hydratePendingDraftAdds = useCallback(() => {
     if (isPendingDraftAddsHydratedRef.current) return;
-    const loadedPendingAdds = loadPendingDraftAdds();
-    pendingDraftAddsRef.current = loadedPendingAdds;
-    setPendingDraftAddsByDraft(loadedPendingAdds);
+
+    const fallbackPendingAdds = loadPendingDraftAddsLocalFallback();
+    pendingDraftAddsRef.current = fallbackPendingAdds;
+    setPendingDraftAddsByDraft(fallbackPendingAdds);
+    pendingDraftAddsRevisionRef.current += 1;
     isPendingDraftAddsHydratedRef.current = true;
-  }, []);
+
+    if (pendingDraftAddsRecoveryLoadRef.current) return;
+    const hydrationRevision = pendingDraftAddsRevisionRef.current;
+    pendingDraftAddsRecoveryLoadRef.current = (async () => {
+      const resolved = await loadPendingDraftAddsResolved();
+      const recoveredPendingAdds = resolved.value || {};
+
+      if (pendingDraftAddsRevisionRef.current === hydrationRevision) {
+        pendingDraftAddsRef.current = recoveredPendingAdds;
+        setPendingDraftAddsByDraft(recoveredPendingAdds);
+        savePendingDraftAdds(recoveredPendingAdds);
+        pendingDraftAddsRevisionRef.current += 1;
+        return;
+      }
+
+      const beforeCount = countPendingDraftAdds(pendingDraftAddsRef.current);
+      const mergedPendingAdds = mergePendingDraftAdds(
+        pendingDraftAddsRef.current,
+        recoveredPendingAdds
+      );
+      if (countPendingDraftAdds(mergedPendingAdds) <= beforeCount) return;
+
+      replacePendingDraftAdds(mergedPendingAdds);
+    })().finally(() => {
+      pendingDraftAddsRecoveryLoadRef.current = null;
+    });
+  }, [replacePendingDraftAdds]);
 
   const clearRecoveryPendingDraftAddsForDraft = useCallback((draftId: string): void => {
     const normalizedDraftId = draftId.trim();
@@ -2106,6 +2211,7 @@ const App: React.FC = () => {
       setPendingPaidSyncJobs(normalizedQueue.length);
       setPendingPaidSyncQueueSnapshot(normalizedQueue);
       savePendingPaidSyncQueue(normalizedQueue);
+      pendingPaidSyncQueueRevisionRef.current += 1;
       isPendingPaidSyncQueueHydratedRef.current = true;
     },
     []
@@ -2113,14 +2219,65 @@ const App: React.FC = () => {
 
   const hydratePendingPaidSyncQueue = useCallback(() => {
     if (isPendingPaidSyncQueueHydratedRef.current) return;
-    const loadedQueue = loadPendingPaidSyncQueue();
-    pendingPaidSyncQueueRef.current = loadedQueue;
-    setPendingPaidSyncJobs(loadedQueue.length);
-    setPendingPaidSyncQueueSnapshot(loadedQueue);
-    loadedQueue.forEach((job) => {
+
+    const fallbackQueue = loadPendingPaidSyncQueueLocalFallback();
+    pendingPaidSyncQueueRef.current = fallbackQueue;
+    setPendingPaidSyncJobs(fallbackQueue.length);
+    setPendingPaidSyncQueueSnapshot(fallbackQueue);
+    pendingPaidSyncQueueRevisionRef.current += 1;
+    fallbackQueue.forEach((job) => {
       setDraftSyncInProgress(job.draftId, true);
     });
     isPendingPaidSyncQueueHydratedRef.current = true;
+
+    if (pendingPaidSyncQueueRecoveryLoadRef.current) return;
+    const hydrationRevision = pendingPaidSyncQueueRevisionRef.current;
+    pendingPaidSyncQueueRecoveryLoadRef.current = (async () => {
+      const resolved = await loadPendingPaidSyncQueueResolved();
+      const recoveredQueue = resolved.value || [];
+
+      if (pendingPaidSyncQueueRevisionRef.current === hydrationRevision) {
+        const previousDraftIds = new Set<string>(
+          pendingPaidSyncQueueRef.current.map((job) => String(job.draftId))
+        );
+        const nextDraftIds = new Set<string>(
+          recoveredQueue.map((job) => String(job.draftId))
+        );
+        previousDraftIds.forEach((draftId) => {
+          if (!nextDraftIds.has(draftId)) {
+            setDraftSyncInProgress(draftId, false);
+          }
+        });
+        nextDraftIds.forEach((draftId) => {
+          setDraftSyncInProgress(draftId, true);
+        });
+
+        pendingPaidSyncQueueRef.current = recoveredQueue;
+        setPendingPaidSyncJobs(recoveredQueue.length);
+        setPendingPaidSyncQueueSnapshot(recoveredQueue);
+        savePendingPaidSyncQueue(recoveredQueue);
+        pendingPaidSyncQueueRevisionRef.current += 1;
+        return;
+      }
+
+      const beforeLength = pendingPaidSyncQueueRef.current.length;
+      const mergedQueue = mergePendingPaidSyncQueue(
+        pendingPaidSyncQueueRef.current,
+        recoveredQueue
+      );
+      if (mergedQueue.length <= beforeLength) return;
+
+      pendingPaidSyncQueueRef.current = mergedQueue;
+      setPendingPaidSyncJobs(mergedQueue.length);
+      setPendingPaidSyncQueueSnapshot(mergedQueue);
+      mergedQueue.forEach((job) => {
+        setDraftSyncInProgress(job.draftId, true);
+      });
+      savePendingPaidSyncQueue(mergedQueue);
+      pendingPaidSyncQueueRevisionRef.current += 1;
+    })().finally(() => {
+      pendingPaidSyncQueueRecoveryLoadRef.current = null;
+    });
   }, [setDraftSyncInProgress]);
 
   useEffect(() => {
@@ -2135,15 +2292,47 @@ const App: React.FC = () => {
     failedPaidSyncQueueRef.current = normalizedQueue;
     setFailedPaidSyncQueue(normalizedQueue);
     saveFailedPaidSyncQueue(normalizedQueue);
+    failedPaidSyncQueueRevisionRef.current += 1;
     isFailedPaidSyncQueueHydratedRef.current = true;
   }, []);
 
   const hydrateFailedPaidSyncQueue = useCallback(() => {
     if (isFailedPaidSyncQueueHydratedRef.current) return;
-    const loadedQueue = loadFailedPaidSyncQueue();
-    failedPaidSyncQueueRef.current = loadedQueue;
-    setFailedPaidSyncQueue(loadedQueue);
+
+    const fallbackQueue = loadFailedPaidSyncQueueLocalFallback();
+    failedPaidSyncQueueRef.current = fallbackQueue;
+    setFailedPaidSyncQueue(fallbackQueue);
+    failedPaidSyncQueueRevisionRef.current += 1;
     isFailedPaidSyncQueueHydratedRef.current = true;
+
+    if (failedPaidSyncQueueRecoveryLoadRef.current) return;
+    const hydrationRevision = failedPaidSyncQueueRevisionRef.current;
+    failedPaidSyncQueueRecoveryLoadRef.current = (async () => {
+      const resolved = await loadFailedPaidSyncQueueResolved();
+      const recoveredQueue = resolved.value || [];
+
+      if (failedPaidSyncQueueRevisionRef.current === hydrationRevision) {
+        failedPaidSyncQueueRef.current = recoveredQueue;
+        setFailedPaidSyncQueue(recoveredQueue);
+        saveFailedPaidSyncQueue(recoveredQueue);
+        failedPaidSyncQueueRevisionRef.current += 1;
+        return;
+      }
+
+      const beforeLength = failedPaidSyncQueueRef.current.length;
+      const mergedQueue = mergeFailedPaidSyncQueue(
+        failedPaidSyncQueueRef.current,
+        recoveredQueue
+      );
+      if (mergedQueue.length <= beforeLength) return;
+
+      failedPaidSyncQueueRef.current = mergedQueue;
+      setFailedPaidSyncQueue(mergedQueue);
+      saveFailedPaidSyncQueue(mergedQueue);
+      failedPaidSyncQueueRevisionRef.current += 1;
+    })().finally(() => {
+      failedPaidSyncQueueRecoveryLoadRef.current = null;
+    });
   }, []);
 
   useEffect(() => {
@@ -4311,10 +4500,7 @@ const App: React.FC = () => {
         return { ok: true, reconciledOnServer: true };
       }
 
-      const localPending =
-        recoverySource === 'visible'
-          ? pendingDraftAddsRef.current[normalizedDraftId] || []
-          : recoveryPendingDraftAddsRef.current[normalizedDraftId] || [];
+      const localPending = recoveryPendingDraftAddsRef.current[normalizedDraftId] || [];
       if (localPending.length === 0) {
         const restored = restorePendingDraftAddsFromSnapshot(job, {
           ...options,
