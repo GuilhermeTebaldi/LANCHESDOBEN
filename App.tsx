@@ -179,7 +179,6 @@ interface RunCommandOptions {
   errorSink?: RunCommandErrorSink;
   trackPendingState?: boolean;
   failFastOnVersionConflict?: boolean;
-  skipObsoleteCheck?: boolean;
   skipSnapshotApply?: boolean;
   bypassGlobalCommandQueue?: boolean;
   onSnapshotAppliedMs?: (durationMs: number) => void;
@@ -4531,9 +4530,7 @@ const App: React.FC = () => {
       const normalizedCommand = isSaleRegisterCommand(command)
         ? ensureSaleCommandIdentifiers(command)
         : command;
-      const obsoleteReason = options.skipObsoleteCheck
-        ? null
-        : getObsoleteCommandReason(normalizedCommand);
+      const obsoleteReason = getObsoleteCommandReason(normalizedCommand);
       if (obsoleteReason) {
         updateRunCommandErrorSink(options.errorSink, {
           error: undefined,
@@ -7205,7 +7202,6 @@ const App: React.FC = () => {
           errorSink: options.errorSink,
           trackPendingState: options.trackPendingState,
           failFastOnVersionConflict: options.failFastOnVersionConflict,
-          skipObsoleteCheck: shouldBypassFinalizeGlobalQueue,
           skipSnapshotApply: shouldSkipFinalizeSnapshotApply,
           bypassGlobalCommandQueue: shouldBypassFinalizeGlobalQueue,
           onSnapshotAppliedMs: options.onSnapshotAppliedMs,
@@ -7236,7 +7232,6 @@ const App: React.FC = () => {
             errorSink: options.errorSink,
             trackPendingState: options.trackPendingState,
             failFastOnVersionConflict: options.failFastOnVersionConflict,
-            skipObsoleteCheck: shouldBypassFinalizeGlobalQueue,
             skipSnapshotApply: shouldSkipFinalizeSnapshotApply,
             bypassGlobalCommandQueue: shouldBypassFinalizeGlobalQueue,
             onSnapshotAppliedMs: options.onSnapshotAppliedMs,
