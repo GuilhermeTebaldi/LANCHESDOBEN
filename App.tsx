@@ -2064,10 +2064,10 @@ const ENABLE_PENDING_PAID_SYNC_INTERVAL_WAKEUP =
 const rawAsyncConfirmPaidFlag = (
   import.meta as ImportMeta & { env?: Record<string, string | undefined> }
 ).env?.VITE_ENABLE_ASYNC_CONFIRM_PAID;
-const ENABLE_ASYNC_CONFIRM_PAID =
-  rawAsyncConfirmPaidFlag === undefined
-    ? false
-    : !['0', 'false', 'off', 'no'].includes(rawAsyncConfirmPaidFlag.trim().toLowerCase());
+const ENABLE_ASYNC_CONFIRM_PAID = false;
+const ASYNC_CONFIRM_PAID_FLAG_WAS_ENABLED =
+  rawAsyncConfirmPaidFlag !== undefined &&
+  !['0', 'false', 'off', 'no'].includes(rawAsyncConfirmPaidFlag.trim().toLowerCase());
 
 const getLowerPriority = (priority: CommandPriority): CommandPriority => {
   if (priority === 'CRITICAL') return 'CRITICAL';
@@ -2788,6 +2788,17 @@ const App: React.FC = () => {
     },
     []
   );
+
+  useEffect(() => {
+    if (!ASYNC_CONFIRM_PAID_FLAG_WAS_ENABLED) return;
+    pushOperationalEvent(
+      'OPS_HEALTH',
+      'Flag VITE_ENABLE_ASYNC_CONFIRM_PAID detectada e ignorada: CONFIRM_PAID forçado em modo síncrono.',
+      {
+        forcedSyncConfirmPaid: true,
+      }
+    );
+  }, [pushOperationalEvent]);
 
   const persistDraftLifecycleState = useCallback((): void => {
     const next: DraftLifecycleStateByDraftId = {};
