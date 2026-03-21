@@ -86,6 +86,7 @@ export const createCommandScheduler = (options: CommandSchedulerOptions): Comman
   const maxQueueSize = Math.max(maxConcurrent, Math.floor(options.maxQueueSize));
   const queued: Array<ScheduledTask<unknown>> = [];
   const pendingByKey = new Map<string, Promise<unknown>>();
+  const runningGroups = new Map<string, boolean>();
   let nextTaskId = 0;
   let active = 0;
   let totalEnqueued = 0;
@@ -98,7 +99,13 @@ export const createCommandScheduler = (options: CommandSchedulerOptions): Comman
   const dequeueNextTask = (): ScheduledTask<unknown> | null => {
     if (queued.length === 0) return null;
     queued.sort(sortScheduledTasks);
-    return queued.shift() ?? null;
+    const nextTaskIndex = queued.findIndex((task) => {
+      if (!task.groupKey) return true;
+      return !runningGroups.has(task.groupKey);
+    });
+    if (nextTaskIndex < 0) return null;
+    const [task] = queued.splice(nextTaskIndex, 1);
+    return task ?? null;
   };
 
   const updateKeyRegistryOnFinish = (key: string | undefined, promise: Promise<unknown>): void => {
@@ -114,6 +121,9 @@ export const createCommandScheduler = (options: CommandSchedulerOptions): Comman
       const nextTask = dequeueNextTask();
       if (!nextTask) break;
 
+      if (nextTask.groupKey) {
+        runningGroups.set(nextTask.groupKey, true);
+      }
       active += 1;
       const taskPromise = Promise.resolve()
         .then(nextTask.run)
@@ -129,6 +139,9 @@ export const createCommandScheduler = (options: CommandSchedulerOptions): Comman
         )
         .finally(() => {
           active = Math.max(0, active - 1);
+          if (nextTask.groupKey) {
+            runningGroups.delete(nextTask.groupKey);
+          }
           updateKeyRegistryOnFinish(nextTask.key, taskPromise);
           runLoop();
         });
@@ -191,6 +204,7 @@ export const createCommandScheduler = (options: CommandSchedulerOptions): Comman
   const clear = (): void => {
     const pendingTasks = queued.splice(0, queued.length);
     pendingByKey.clear();
+    runningGroups.clear();
     pendingTasks.forEach((task) => {
       task.reject(new Error('Command scheduler cleared.'));
     });
