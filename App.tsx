@@ -84,6 +84,8 @@ const OFFLINE_SALE_QUEUE_KEY = 'qb_offline_sale_queue_v1';
 const PENDING_DRAFT_ADDS_KEY = 'qb_pending_draft_adds_v1';
 const PENDING_PAID_SYNC_QUEUE_KEY = 'qb_pending_paid_sync_queue_v1';
 const FAILED_PAID_SYNC_QUEUE_KEY = 'qb_failed_paid_sync_queue_v1';
+const PAYMENT_FLOW_TELEMETRY_HISTORY_KEY = 'qb_payment_flow_telemetry_history_v1';
+const OPERATIONS_EVENT_LOG_KEY = 'qb_operations_event_log_v1';
 const CASH_HISTORY_LEGACY_MODE_KEY = 'qb_cash_history_legacy_mode_v1';
 const LOCAL_CASH_REGISTER_KEY = 'qb_cash_register_local_v1';
 const LOCAL_DAILY_HISTORY_KEY = 'qb_daily_sales_history_local_v1';
@@ -216,6 +218,21 @@ interface OperationalHealthSnapshot {
   failsafeDeferredCommands: number;
   failsafeCurrentPauseMs: number;
   failsafeAccumulatedPausedMs: number;
+}
+
+interface OperationalEventLogEntry {
+  id: string;
+  type:
+    | 'HEALTH_SNAPSHOT'
+    | 'QUEUE_HEALTH'
+    | 'FAILSAFE_ACTIVATED'
+    | 'FAILSAFE_CLEARED'
+    | 'BACKPRESSURE'
+    | 'PAYMENT_FLOW'
+    | 'COMMAND_SKIPPED_OBSOLETE';
+  message: string;
+  timestamp: string;
+  context?: Record<string, unknown>;
 }
 
 interface PendingPaidSyncDraftRecoveryResult {
@@ -1548,6 +1565,130 @@ const saveFailedPaidSyncQueue = (queue: PendingPaidSyncJob[]): void => {
   void operationalStorage.setCritical(FAILED_PAID_SYNC_QUEUE_KEY, queue);
 };
 
+const normalizePaymentFlowTelemetryRecord = (
+  value: unknown
+): PaymentFlowTelemetryRecord | null => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const source = value as Record<string, unknown>;
+  const draftId = typeof source.draftId === 'string' ? source.draftId.trim() : '';
+  const jobId = typeof source.jobId === 'string' ? source.jobId.trim() : '';
+  if (!draftId || !jobId) return null;
+  const clickToLocalPersistRaw = Number(source.clickToLocalPersistMs);
+  const clickToBackendConfirmRaw = Number(source.clickToBackendConfirmMs);
+  const retriesRaw = Number(source.retries);
+  const timestamp =
+    typeof source.timestamp === 'string' && !Number.isNaN(Date.parse(source.timestamp))
+      ? source.timestamp
+      : new Date().toISOString();
+
+  return {
+    draftId,
+    jobId,
+    clickToLocalPersistMs:
+      Number.isFinite(clickToLocalPersistRaw) && clickToLocalPersistRaw >= 0
+        ? Math.floor(clickToLocalPersistRaw)
+        : null,
+    clickToBackendConfirmMs:
+      Number.isFinite(clickToBackendConfirmRaw) && clickToBackendConfirmRaw >= 0
+        ? Math.floor(clickToBackendConfirmRaw)
+        : null,
+    retries: Number.isFinite(retriesRaw) && retriesRaw >= 0 ? Math.floor(retriesRaw) : 0,
+    hadRecovery: source.hadRecovery === true,
+    hadReconciliation: source.hadReconciliation === true,
+    timestamp,
+  };
+};
+
+const normalizePaymentFlowTelemetryHistory = (parsed: unknown): PaymentFlowTelemetryRecord[] => {
+  if (!Array.isArray(parsed)) return [];
+  return parsed
+    .map((entry) => normalizePaymentFlowTelemetryRecord(entry))
+    .filter((entry): entry is PaymentFlowTelemetryRecord => entry !== null)
+    .slice(0, 50);
+};
+
+const loadPaymentFlowTelemetryHistoryLocalFallback = (): PaymentFlowTelemetryRecord[] =>
+  normalizePaymentFlowTelemetryHistory(
+    operationalStorage.getLocalFallback<unknown>(PAYMENT_FLOW_TELEMETRY_HISTORY_KEY)
+  );
+
+const loadPaymentFlowTelemetryHistoryResolved = async (): Promise<
+  OperationalStorageResolvedResult<PaymentFlowTelemetryRecord[]>
+> => {
+  const resolved = await operationalStorage.getResolved<unknown>(
+    PAYMENT_FLOW_TELEMETRY_HISTORY_KEY
+  );
+  return {
+    ...resolved,
+    value: normalizePaymentFlowTelemetryHistory(resolved.value),
+  };
+};
+
+const savePaymentFlowTelemetryHistory = (history: PaymentFlowTelemetryRecord[]): void => {
+  void operationalStorage.set(PAYMENT_FLOW_TELEMETRY_HISTORY_KEY, history);
+};
+
+const normalizeOperationalEventLogEntry = (value: unknown): OperationalEventLogEntry | null => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const source = value as Record<string, unknown>;
+  const id = typeof source.id === 'string' && source.id.trim() ? source.id.trim() : createClientId('ops');
+  const typeCandidate = typeof source.type === 'string' ? source.type : '';
+  const isSupportedType =
+    typeCandidate === 'HEALTH_SNAPSHOT' ||
+    typeCandidate === 'QUEUE_HEALTH' ||
+    typeCandidate === 'FAILSAFE_ACTIVATED' ||
+    typeCandidate === 'FAILSAFE_CLEARED' ||
+    typeCandidate === 'BACKPRESSURE' ||
+    typeCandidate === 'PAYMENT_FLOW' ||
+    typeCandidate === 'COMMAND_SKIPPED_OBSOLETE';
+  if (!isSupportedType) return null;
+  const message = typeof source.message === 'string' ? source.message.trim() : '';
+  if (!message) return null;
+  const timestamp =
+    typeof source.timestamp === 'string' && !Number.isNaN(Date.parse(source.timestamp))
+      ? source.timestamp
+      : new Date().toISOString();
+  const context =
+    source.context && typeof source.context === 'object' && !Array.isArray(source.context)
+      ? (source.context as Record<string, unknown>)
+      : undefined;
+
+  return {
+    id,
+    type: typeCandidate as OperationalEventLogEntry['type'],
+    message,
+    timestamp,
+    context,
+  };
+};
+
+const normalizeOperationalEventLog = (parsed: unknown): OperationalEventLogEntry[] => {
+  if (!Array.isArray(parsed)) return [];
+  return parsed
+    .map((entry) => normalizeOperationalEventLogEntry(entry))
+    .filter((entry): entry is OperationalEventLogEntry => entry !== null)
+    .slice(0, 20);
+};
+
+const loadOperationalEventLogLocalFallback = (): OperationalEventLogEntry[] =>
+  normalizeOperationalEventLog(
+    operationalStorage.getLocalFallback<unknown>(OPERATIONS_EVENT_LOG_KEY)
+  );
+
+const loadOperationalEventLogResolved = async (): Promise<
+  OperationalStorageResolvedResult<OperationalEventLogEntry[]>
+> => {
+  const resolved = await operationalStorage.getResolved<unknown>(OPERATIONS_EVENT_LOG_KEY);
+  return {
+    ...resolved,
+    value: normalizeOperationalEventLog(resolved.value),
+  };
+};
+
+const saveOperationalEventLog = (events: OperationalEventLogEntry[]): void => {
+  void operationalStorage.set(OPERATIONS_EVENT_LOG_KEY, events);
+};
+
 const countPendingDraftAdds = (value: PendingDraftAddsByDraftId): number =>
   Object.values(value).reduce((total, entries) => total + entries.length, 0);
 
@@ -1838,6 +1979,7 @@ const App: React.FC = () => {
   const pendingDraftBackgroundRetryAttemptsRef = useRef<Map<string, number>>(new Map());
   const paymentFlowTelemetryByDraftRef = useRef<Map<string, PaymentFlowTelemetryEntry>>(new Map());
   const paymentFlowTelemetryRecentRef = useRef<PaymentFlowTelemetryRecord[]>([]);
+  const operationalEventLogRef = useRef<OperationalEventLogEntry[]>([]);
   const lastOperationalHealthReportAtRef = useRef(0);
 
   if (!backendCommandSchedulerRef.current) {
@@ -1919,6 +2061,10 @@ const App: React.FC = () => {
       failsafeCurrentPauseMs: 0,
       failsafeAccumulatedPausedMs: 0,
     });
+  const [paymentFlowTelemetryHistory, setPaymentFlowTelemetryHistory] =
+    useState<PaymentFlowTelemetryRecord[]>([]);
+  const [operationalEventLog, setOperationalEventLog] = useState<OperationalEventLogEntry[]>([]);
+  const [isTechnicalPanelOpen, setIsTechnicalPanelOpen] = useState(false);
   
   const [isAddProductModalOpen, setIsAddProductModalOpen] = useState(false);
   const [isAddIngredientModalOpen, setIsAddIngredientModalOpen] = useState(false);
@@ -2332,6 +2478,27 @@ const App: React.FC = () => {
     setSyncingPaidDraftIds(Array.from(nextSet));
   }, []);
 
+  const pushOperationalEvent = useCallback(
+    (
+      type: OperationalEventLogEntry['type'],
+      message: string,
+      context?: Record<string, unknown>
+    ): void => {
+      const next: OperationalEventLogEntry = {
+        id: createClientId('ops'),
+        type,
+        message,
+        timestamp: new Date().toISOString(),
+        context,
+      };
+      const nextList = [next, ...operationalEventLogRef.current].slice(0, 20);
+      operationalEventLogRef.current = nextList;
+      setOperationalEventLog(nextList);
+      saveOperationalEventLog(nextList);
+    },
+    []
+  );
+
   const registerPaymentFlowTelemetryStart = useCallback(
     (draftId: string, jobId: string, clickAtMs: number): void => {
       const normalizedDraftId = draftId.trim();
@@ -2437,8 +2604,18 @@ const App: React.FC = () => {
       };
 
       paymentFlowTelemetryByDraftRef.current.delete(normalizedDraftId);
-      const nextRecent = [record, ...paymentFlowTelemetryRecentRef.current].slice(0, 30);
+      const nextRecent = [record, ...paymentFlowTelemetryRecentRef.current].slice(0, 50);
       paymentFlowTelemetryRecentRef.current = nextRecent;
+      setPaymentFlowTelemetryHistory(nextRecent);
+      savePaymentFlowTelemetryHistory(nextRecent);
+      pushOperationalEvent('PAYMENT_FLOW', 'Fluxo de pagamento concluído.', {
+        draftId: record.draftId,
+        jobId: record.jobId,
+        clickToBackendConfirmMs: record.clickToBackendConfirmMs,
+        retries: record.retries,
+        hadRecovery: record.hadRecovery,
+        hadReconciliation: record.hadReconciliation,
+      });
 
       reportErrorMonitorEvent({
         source: 'sistema:payment-flow:completed',
@@ -2455,7 +2632,7 @@ const App: React.FC = () => {
         },
       });
     },
-    []
+    [pushOperationalEvent]
   );
 
   const buildOperationalHealthSnapshot = useCallback((): OperationalHealthSnapshot => {
@@ -2497,6 +2674,12 @@ const App: React.FC = () => {
         source,
         ...snapshot,
       });
+      pushOperationalEvent('HEALTH_SNAPSHOT', `Snapshot operacional (${source}).`, {
+        schedulerQueued: snapshot.schedulerQueued,
+        pendingPaidQueue: snapshot.pendingPaidQueue,
+        failedQueue: snapshot.failedQueue,
+        failsafeCurrentPauseMs: snapshot.failsafeCurrentPauseMs,
+      });
 
       const nowMs = Date.now();
       const shouldReport =
@@ -2514,7 +2697,7 @@ const App: React.FC = () => {
         },
       });
     },
-    [buildOperationalHealthSnapshot]
+    [buildOperationalHealthSnapshot, pushOperationalEvent]
   );
 
   const logQueueHealth = useCallback((source: string): void => {
@@ -2524,8 +2707,14 @@ const App: React.FC = () => {
       source,
       ...snapshot,
     });
+    pushOperationalEvent('QUEUE_HEALTH', `Fila atualizada (${source}).`, {
+      pendingDraftAdds: snapshot.pendingDraftAdds,
+      pendingPaidQueue: snapshot.pendingPaidQueue,
+      failedQueue: snapshot.failedQueue,
+      schedulerQueued: snapshot.schedulerQueued,
+    });
     publishOperationalHealthSnapshot(`queue:${source}`);
-  }, [buildOperationalHealthSnapshot, publishOperationalHealthSnapshot]);
+  }, [buildOperationalHealthSnapshot, publishOperationalHealthSnapshot, pushOperationalEvent]);
 
   useEffect(() => {
     publishOperationalHealthSnapshot('interval:init', { forceReport: true });
@@ -2536,6 +2725,61 @@ const App: React.FC = () => {
       window.clearInterval(intervalId);
     };
   }, [publishOperationalHealthSnapshot]);
+
+  useEffect(() => {
+    if (!isAccessVerified) return;
+    const fallbackHistory = loadPaymentFlowTelemetryHistoryLocalFallback();
+    paymentFlowTelemetryRecentRef.current = fallbackHistory;
+    setPaymentFlowTelemetryHistory(fallbackHistory);
+
+    let cancelled = false;
+    void (async () => {
+      const resolved = await loadPaymentFlowTelemetryHistoryResolved();
+      if (cancelled) return;
+      const resolvedHistory = resolved.value || [];
+      paymentFlowTelemetryRecentRef.current = resolvedHistory;
+      setPaymentFlowTelemetryHistory(resolvedHistory);
+      savePaymentFlowTelemetryHistory(resolvedHistory);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isAccessVerified]);
+
+  useEffect(() => {
+    if (!isAccessVerified) return;
+    const fallbackEvents = loadOperationalEventLogLocalFallback();
+    operationalEventLogRef.current = fallbackEvents;
+    setOperationalEventLog(fallbackEvents);
+
+    let cancelled = false;
+    void (async () => {
+      const resolved = await loadOperationalEventLogResolved();
+      if (cancelled) return;
+      const events = resolved.value || [];
+      operationalEventLogRef.current = events;
+      setOperationalEventLog(events);
+      saveOperationalEventLog(events);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isAccessVerified]);
+
+  useEffect(() => {
+    const handleTogglePanel = (event: KeyboardEvent): void => {
+      if (!(event.ctrlKey && event.shiftKey && event.key.toLowerCase() === 'o')) return;
+      event.preventDefault();
+      setIsTechnicalPanelOpen((current) => !current);
+    };
+
+    window.addEventListener('keydown', handleTogglePanel);
+    return () => {
+      window.removeEventListener('keydown', handleTogglePanel);
+    };
+  }, []);
 
   const getBackendFailsafeRemainingMs = useCallback((): number => {
     return Math.max(0, backendFailsafeBlockedUntilRef.current - Date.now());
@@ -2568,8 +2812,14 @@ const App: React.FC = () => {
         blockedUntil: new Date(backendFailsafeBlockedUntilRef.current).toISOString(),
       },
     });
+    pushOperationalEvent('FAILSAFE_ACTIVATED', 'Fail-safe de backend ativado.', {
+      streak: nextStreak,
+      delayMs,
+      reason,
+      blockedUntil: new Date(backendFailsafeBlockedUntilRef.current).toISOString(),
+    });
     publishOperationalHealthSnapshot('failsafe:activated', { forceReport: true });
-  }, [publishOperationalHealthSnapshot]);
+  }, [publishOperationalHealthSnapshot, pushOperationalEvent]);
 
   const clearBackendFailsafe = useCallback((): void => {
     if (backendFailsafeLastStartedAtRef.current !== null) {
@@ -2581,8 +2831,11 @@ const App: React.FC = () => {
     }
     backendFailsafeStreakRef.current = 0;
     backendFailsafeBlockedUntilRef.current = 0;
+    pushOperationalEvent('FAILSAFE_CLEARED', 'Fail-safe de backend liberado.', {
+      accumulatedPauseMs: backendFailsafeAccumulatedPauseMsRef.current,
+    });
     publishOperationalHealthSnapshot('failsafe:cleared');
-  }, [publishOperationalHealthSnapshot]);
+  }, [publishOperationalHealthSnapshot, pushOperationalEvent]);
 
   const runBackendExecution = useCallback(
     async <T,>(
@@ -2672,6 +2925,12 @@ const App: React.FC = () => {
             retryCount: options.retryCount ?? 0,
             backpressure: true,
           });
+          pushOperationalEvent('BACKPRESSURE', 'Backpressure no scheduler global de comandos.', {
+            queueSize: error.queueSize,
+            maxQueueSize: error.maxQueueSize,
+            commandType: options.command?.type || options.operationType,
+            draftId: effectiveDraftId,
+          });
           throw new StateCommandSyncError(
             'Fila operacional ocupada. Aguarde alguns segundos e tente novamente.',
             {
@@ -2701,6 +2960,7 @@ const App: React.FC = () => {
       clearBackendFailsafe,
       getBackendFailsafeRemainingMs,
       publishOperationalHealthSnapshot,
+      pushOperationalEvent,
     ]
   );
 
@@ -2797,36 +3057,73 @@ const App: React.FC = () => {
     [enqueueRetryDispatchTask]
   );
 
-  const shouldSkipAlreadyAppliedCommand = useCallback((command: StateCommand): boolean => {
+  const getObsoleteCommandReason = useCallback((command: StateCommand): string | null => {
     const commandDraftId = getCommandDraftId(command);
-    if (!commandDraftId) return false;
+    if (!commandDraftId) return null;
     const draft = saleDraftsRef.current.find((entry) => entry.id === commandDraftId);
-    if (!draft) return false;
+    if (!draft) return null;
 
     if (command.type === 'SALE_DRAFT_REMOVE_ITEM') {
       const hasItem = Array.isArray(draft.items)
         ? draft.items.some((entry) => entry.id === command.itemId)
         : false;
-      return !hasItem;
+      return hasItem ? null : 'item_not_found_locally';
     }
 
     if (command.type === 'SALE_DRAFT_FINALIZE') {
-      return (
+      if (
         draft.status === 'PENDING_PAYMENT' ||
         draft.status === 'PAID' ||
         draft.status === 'CANCELLED'
-      );
+      ) {
+        return `draft_status_${draft.status.toLowerCase()}`;
+      }
+      return null;
     }
 
     if (command.type === 'SALE_DRAFT_CONFIRM_PAID') {
-      return draft.status === 'PAID' || draft.status === 'CANCELLED';
+      return draft.status === 'PAID' || draft.status === 'CANCELLED'
+        ? `draft_status_${draft.status.toLowerCase()}`
+        : null;
     }
 
-    return false;
+    if (command.type === 'SALE_DRAFT_ADD_ITEM') {
+      if (draft.status !== 'DRAFT') {
+        return `draft_not_open_${draft.status.toLowerCase()}`;
+      }
+      return null;
+    }
+
+    if (command.type === 'SALE_DRAFT_UPDATE_ITEM') {
+      if (draft.status !== 'DRAFT') {
+        return `draft_not_open_${draft.status.toLowerCase()}`;
+      }
+      const hasItem = Array.isArray(draft.items)
+        ? draft.items.some((entry) => entry.id === command.itemId)
+        : false;
+      return hasItem ? null : 'item_not_found_locally';
+    }
+
+    if (command.type === 'SALE_DRAFT_SET_CUSTOMER_TYPE') {
+      return draft.status === 'DRAFT' ? null : `draft_not_open_${draft.status.toLowerCase()}`;
+    }
+
+    if (command.type === 'SALE_DRAFT_CANCEL') {
+      return draft.status === 'PAID' || draft.status === 'CANCELLED'
+        ? `draft_status_${draft.status.toLowerCase()}`
+        : null;
+    }
+
+    return null;
   }, []);
 
   const activatePendingPaidSyncIngressBackpressure = useCallback((queueSize: number): void => {
     pendingPaidSyncIngressBlockedUntilRef.current = Date.now() + QUEUE_BACKPRESSURE_PAUSE_MS;
+    pushOperationalEvent('BACKPRESSURE', 'Backpressure na fila de pagamento.', {
+      queueSize,
+      maxSize: PENDING_PAID_SYNC_QUEUE_MAX_SIZE,
+      blockedUntil: new Date(pendingPaidSyncIngressBlockedUntilRef.current).toISOString(),
+    });
     reportErrorMonitorEvent({
       source: 'sistema:queue-backpressure:pending-paid',
       level: 'warn',
@@ -2836,10 +3133,15 @@ const App: React.FC = () => {
         maxSize: PENDING_PAID_SYNC_QUEUE_MAX_SIZE,
       },
     });
-  }, []);
+  }, [pushOperationalEvent]);
 
   const activatePendingDraftAddsIngressBackpressure = useCallback((queueSize: number): void => {
     pendingDraftAddsIngressBlockedUntilRef.current = Date.now() + QUEUE_BACKPRESSURE_PAUSE_MS;
+    pushOperationalEvent('BACKPRESSURE', 'Backpressure na fila de itens pendentes.', {
+      queueSize,
+      maxSize: PENDING_DRAFT_ADDS_MAX_SIZE,
+      blockedUntil: new Date(pendingDraftAddsIngressBlockedUntilRef.current).toISOString(),
+    });
     reportErrorMonitorEvent({
       source: 'sistema:queue-backpressure:pending-draft-adds',
       level: 'warn',
@@ -2849,7 +3151,7 @@ const App: React.FC = () => {
         maxSize: PENDING_DRAFT_ADDS_MAX_SIZE,
       },
     });
-  }, []);
+  }, [pushOperationalEvent]);
 
   useEffect(() => {
     return () => {
@@ -3102,6 +3404,114 @@ const App: React.FC = () => {
     hydrateFailedPaidSyncQueue();
   }, [hydrateFailedPaidSyncQueue, isAccessVerified]);
 
+  useEffect(() => {
+    if (!isAccessVerified) return;
+    if (!isPendingDraftAddsHydratedRef.current) return;
+    if (!isPendingPaidSyncQueueHydratedRef.current) return;
+    if (!isFailedPaidSyncQueueHydratedRef.current) return;
+
+    const terminalDraftIds = new Set<string>(
+      saleDraftsRef.current
+        .filter((draft) => draft.status === 'PAID' || draft.status === 'CANCELLED')
+        .map((draft) => draft.id)
+    );
+    if (terminalDraftIds.size === 0) return;
+
+    let removedFromVisiblePending = 0;
+    const nextPendingDraftAdds: PendingDraftAddsByDraftId = {};
+    Object.entries(
+      pendingDraftAddsRef.current as Record<string, PendingDraftAdd[]>
+    ).forEach(([draftId, entries]) => {
+      if (terminalDraftIds.has(draftId)) {
+        removedFromVisiblePending += entries.length;
+        return;
+      }
+      nextPendingDraftAdds[draftId] = entries;
+    });
+    if (removedFromVisiblePending > 0) {
+      replacePendingDraftAdds(nextPendingDraftAdds);
+    }
+
+    let removedFromRecovery = 0;
+    const nextRecoveryPendingDraftAdds: PendingDraftAddsByDraftId = {};
+    Object.entries(
+      recoveryPendingDraftAddsRef.current as Record<string, PendingDraftAdd[]>
+    ).forEach(([draftId, entries]) => {
+      if (terminalDraftIds.has(draftId)) {
+        removedFromRecovery += entries.length;
+        return;
+      }
+      nextRecoveryPendingDraftAdds[draftId] = entries;
+    });
+    if (removedFromRecovery > 0) {
+      recoveryPendingDraftAddsRef.current = nextRecoveryPendingDraftAdds;
+    }
+
+    const removedPendingPaidJobs = pendingPaidSyncQueueRef.current.filter((job) =>
+      terminalDraftIds.has(job.draftId)
+    );
+    if (removedPendingPaidJobs.length > 0) {
+      removedPendingPaidJobs.forEach((job) => {
+        completePaymentFlowTelemetry(job.draftId, {
+          retries: job.attempts,
+          hadReconciliation: true,
+        });
+      });
+      replacePendingPaidSyncQueue(
+        pendingPaidSyncQueueRef.current.filter((job) => !terminalDraftIds.has(job.draftId))
+      );
+    }
+
+    const removedFailedJobs = failedPaidSyncQueueRef.current.filter((job) =>
+      terminalDraftIds.has(job.draftId)
+    );
+    if (removedFailedJobs.length > 0) {
+      removedFailedJobs.forEach((job) => {
+        completePaymentFlowTelemetry(job.draftId, {
+          retries: job.attempts,
+          hadReconciliation: true,
+        });
+      });
+      replaceFailedPaidSyncQueue(
+        failedPaidSyncQueueRef.current.filter((job) => !terminalDraftIds.has(job.draftId))
+      );
+    }
+
+    if (
+      removedFromVisiblePending > 0 ||
+      removedFromRecovery > 0 ||
+      removedPendingPaidJobs.length > 0 ||
+      removedFailedJobs.length > 0
+    ) {
+      terminalDraftIds.forEach((draftId) => {
+        setDraftSyncInProgress(draftId, false);
+      });
+      pushOperationalEvent(
+        'QUEUE_HEALTH',
+        'Filas de draft terminal foram descartadas automaticamente.',
+        {
+          terminalDrafts: Array.from(terminalDraftIds),
+          removedVisiblePending: removedFromVisiblePending,
+          removedRecoveryPending: removedFromRecovery,
+          removedPendingPaidJobs: removedPendingPaidJobs.length,
+          removedFailedJobs: removedFailedJobs.length,
+        }
+      );
+    }
+  }, [
+    completePaymentFlowTelemetry,
+    failedPaidSyncQueue,
+    isAccessVerified,
+    pendingDraftAddsByDraft,
+    pendingPaidSyncJobs,
+    pushOperationalEvent,
+    replaceFailedPaidSyncQueue,
+    replacePendingDraftAdds,
+    replacePendingPaidSyncQueue,
+    saleDrafts,
+    setDraftSyncInProgress,
+  ]);
+
   const replaceOfflineSalesQueue = useCallback((nextQueue: OfflineQueuedSale[]) => {
     offlineSalesQueueRef.current = nextQueue;
     setPendingOfflineSales(nextQueue.length);
@@ -3173,6 +3583,28 @@ const App: React.FC = () => {
 
       const executeCommand = async (): Promise<{ ok: true } | { ok: false; error: unknown }> => {
         try {
+          const obsoleteReason = getObsoleteCommandReason(command);
+          if (obsoleteReason) {
+            console.info('[COMMAND_EXECUTION]', {
+              type: 'COMMAND_EXECUTION',
+              commandId: command.commandId || null,
+              draftId: getCommandDraftId(command),
+              commandType: command.type,
+              duration: 0,
+              success: true,
+              retryCount: 0,
+              result: 'ignored_as_obsolete',
+              obsoleteReason,
+              stage: 'pre-backend',
+            });
+            pushOperationalEvent('COMMAND_SKIPPED_OBSOLETE', 'Comando obsoleto ignorado antes de executar.', {
+              draftId: getCommandDraftId(command),
+              commandType: command.type,
+              commandId: command.commandId || null,
+              obsoleteReason,
+            });
+            return { ok: true };
+          }
           const nextState = await runBackendExecution(
             {
               operationType: 'RUN_STATE_COMMAND',
@@ -3208,7 +3640,7 @@ const App: React.FC = () => {
 
       return scheduledExecution;
     },
-    [applyStateSnapshot, runBackendExecution]
+    [applyStateSnapshot, getObsoleteCommandReason, pushOperationalEvent, runBackendExecution]
   );
 
   const fetchStateSnapshotControlled = useCallback(
@@ -3267,7 +3699,8 @@ const App: React.FC = () => {
       const normalizedCommand = isSaleRegisterCommand(command)
         ? ensureSaleCommandIdentifiers(command)
         : command;
-      if (shouldSkipAlreadyAppliedCommand(normalizedCommand)) {
+      const obsoleteReason = getObsoleteCommandReason(normalizedCommand);
+      if (obsoleteReason) {
         updateRunCommandErrorSink(options.errorSink, {
           error: undefined,
           message: undefined,
@@ -3282,6 +3715,14 @@ const App: React.FC = () => {
           duration: 0,
           success: true,
           retryCount: 0,
+          result: 'ignored_as_obsolete',
+          obsoleteReason,
+        });
+        pushOperationalEvent('COMMAND_SKIPPED_OBSOLETE', 'Comando obsoleto ignorado.', {
+          draftId: getCommandDraftId(normalizedCommand),
+          commandType: normalizedCommand.type,
+          commandId: normalizedCommand.commandId || null,
+          obsoleteReason,
         });
         if (successMessage && !options.silentSuccessNotification) {
           showNotification(successMessage);
@@ -3347,7 +3788,7 @@ const App: React.FC = () => {
       }
       return false;
     },
-    [executeSyncedCommand, queueOfflineSale, runWithDraftLock, shouldSkipAlreadyAppliedCommand]
+    [executeSyncedCommand, getObsoleteCommandReason, pushOperationalEvent, queueOfflineSale, runWithDraftLock]
   );
 
   const flushOfflineSalesQueue = useCallback(async (): Promise<void> => {
@@ -7663,7 +8104,7 @@ const App: React.FC = () => {
     ]
   );
   const hasPaidSyncQueueCards = paidSyncQueueCards.length > 0;
-  const latestPaymentFlowTelemetry = paymentFlowTelemetryRecentRef.current[0] || null;
+  const latestPaymentFlowTelemetry = paymentFlowTelemetryHistory[0] || null;
   const cornerSyncToneClass =
     cornerSyncState.status === 'success'
       ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
@@ -7853,6 +8294,61 @@ const App: React.FC = () => {
             <span className="truncate">{cornerSyncState.message || 'Sincronizando'}</span>
           </div>
         </div>
+      </div>
+      <div className="fixed bottom-3 left-3 z-[1190] pointer-events-auto">
+        <button
+          type="button"
+          onClick={() => setIsTechnicalPanelOpen((current) => !current)}
+          className="rounded-full border border-slate-700 bg-slate-900 px-3 py-1 text-[9px] font-black uppercase tracking-widest text-white shadow-lg"
+          title="Painel técnico (atalho: Ctrl+Shift+O)"
+        >
+          OPS
+        </button>
+        {isTechnicalPanelOpen && (
+          <div className="mt-2 w-[350px] max-w-[92vw] rounded-xl border border-slate-700 bg-slate-950/95 p-2 text-[10px] text-slate-100 shadow-2xl backdrop-blur">
+            <p className="font-black uppercase tracking-widest text-slate-300">Painel Técnico</p>
+            <p className="mt-1 font-bold uppercase tracking-wide text-slate-400">
+              Sch {operationalHealthSnapshot.schedulerActive}/{operationalHealthSnapshot.schedulerQueued} | C:{operationalHealthSnapshot.schedulerCriticalQueued} H:{operationalHealthSnapshot.schedulerHighQueued} N:{operationalHealthSnapshot.schedulerNormalQueued} L:{operationalHealthSnapshot.schedulerLowQueued}
+            </p>
+            <p className="font-bold uppercase tracking-wide text-slate-400">
+              Draft:{operationalHealthSnapshot.pendingDraftAdds} Paid:{operationalHealthSnapshot.pendingPaidQueue} Failed:{operationalHealthSnapshot.failedQueue}
+            </p>
+            <p className="font-bold uppercase tracking-wide text-slate-400">
+              BP:{operationalHealthSnapshot.schedulerBackpressureHits} DD:{operationalHealthSnapshot.schedulerDedupeHits} FS:{operationalHealthSnapshot.failsafeActivations} DEF:{operationalHealthSnapshot.failsafeDeferredCommands}
+            </p>
+            <p className="font-bold uppercase tracking-wide text-slate-400">
+              Pause:{Math.ceil(operationalHealthSnapshot.failsafeCurrentPauseMs / 1000)}s Acumulada:{Math.ceil(operationalHealthSnapshot.failsafeAccumulatedPausedMs / 1000)}s
+            </p>
+
+            <div className="mt-2 rounded-md border border-slate-800 bg-slate-900 p-1.5">
+              <p className="font-black uppercase tracking-wide text-slate-300">Pagamentos (últimos 10)</p>
+              <div className="mt-1 max-h-[120px] space-y-1 overflow-y-auto">
+                {paymentFlowTelemetryHistory.slice(0, 10).map((entry) => (
+                  <p key={entry.jobId} className="truncate font-mono text-[9px] text-slate-200">
+                    {entry.draftId.slice(-8).toUpperCase()} local:{entry.clickToLocalPersistMs ?? '-'}ms conf:{entry.clickToBackendConfirmMs ?? '-'}ms r:{entry.retries} rec:{entry.hadRecovery ? '1' : '0'} rc:{entry.hadReconciliation ? '1' : '0'}
+                  </p>
+                ))}
+                {paymentFlowTelemetryHistory.length === 0 && (
+                  <p className="text-[9px] text-slate-500">Sem registros.</p>
+                )}
+              </div>
+            </div>
+
+            <div className="mt-2 rounded-md border border-slate-800 bg-slate-900 p-1.5">
+              <p className="font-black uppercase tracking-wide text-slate-300">Eventos (últimos 20)</p>
+              <div className="mt-1 max-h-[140px] space-y-1 overflow-y-auto">
+                {operationalEventLog.map((entry) => (
+                  <p key={entry.id} className="truncate font-mono text-[9px] text-slate-200">
+                    {entry.timestamp.slice(11, 19)} [{entry.type}] {entry.message}
+                  </p>
+                ))}
+                {operationalEventLog.length === 0 && (
+                  <p className="text-[9px] text-slate-500">Sem eventos.</p>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
       </div>
       
       <main className="qb-main flex-1 pb-20">
