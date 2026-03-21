@@ -2052,6 +2052,7 @@ const PENDING_DRAFT_BACKGROUND_SYNC_RETRY_BASE_MS = 1800;
 const PENDING_DRAFT_BACKGROUND_SYNC_RETRY_MAX_MS = 45000;
 const PENDING_DRAFT_BACKGROUND_SYNC_RETRY_JITTER = 0.2;
 const MAX_CONCURRENT_COMMANDS = 2;
+const PENDING_PAID_SYNC_MAX_WORKERS = 2;
 const BACKEND_OPERATION_TIMEOUT_MS = 25_000;
 const PENDING_PAID_SYNC_QUEUE_MAX_SIZE = 50;
 const PENDING_DRAFT_ADDS_MAX_SIZE = 100;
@@ -2266,7 +2267,8 @@ const App: React.FC = () => {
   const commandDraftLocksRef = useRef<Map<string, Promise<void>>>(new Map());
   const pendingPaidSyncIngressBlockedUntilRef = useRef(0);
   const pendingDraftAddsIngressBlockedUntilRef = useRef(0);
-  const isPendingPaidSyncQueueRunningRef = useRef(false);
+  const pendingPaidSyncActiveWorkersRef = useRef(0);
+  const pendingPaidSyncRunningDraftIdsRef = useRef<Set<string>>(new Set());
   const isFlushingOfflineSalesRef = useRef(false);
   const isOfflineQueueHydratedRef = useRef(false);
   const pendingVersionDetectedAtRef = useRef<number | null>(null);
@@ -7657,7 +7659,7 @@ const App: React.FC = () => {
   const processPendingPaidSyncQueue = useCallback(async (): Promise<void> => {
     hydratePendingPaidSyncQueue();
     if (isStateHydrating) return;
-    if (isPendingPaidSyncQueueRunningRef.current) return;
+    if (pendingPaidSyncActiveWorkersRef.current >= PENDING_PAID_SYNC_MAX_WORKERS) return;
     if (pendingPaidSyncQueueRef.current.length === 0) return;
 
     const backendBlockedMs = getBackendFailsafeRemainingMs();
@@ -7673,47 +7675,54 @@ const App: React.FC = () => {
       pendingPaidSyncRetryTimerRef.current = null;
     }
 
-    isPendingPaidSyncQueueRunningRef.current = true;
+    pendingPaidSyncActiveWorkersRef.current += 1;
+    let currentJob: PendingPaidSyncJob | null = null;
 
     try {
-      while (pendingPaidSyncQueueRef.current.length > 0) {
-        const currentJob = pendingPaidSyncQueueRef.current[0];
-        if (!currentJob) return;
+      const nowMs = Date.now();
+      const runningDraftIds = pendingPaidSyncRunningDraftIdsRef.current;
+      const queueSnapshot = pendingPaidSyncQueueRef.current;
+      let selectedIndex = -1;
+      for (let index = 0; index < queueSnapshot.length; index += 1) {
+        const candidate = queueSnapshot[index];
+        if (!candidate) continue;
+        if (runningDraftIds.has(candidate.draftId)) continue;
+        if (!isPendingPaidSyncJobReady(candidate, nowMs)) continue;
+        selectedIndex = index;
+        break;
+      }
 
-        const nowMs = Date.now();
-        if (!isPendingPaidSyncJobReady(currentJob, nowMs)) {
-          const hasReadyBehind = pendingPaidSyncQueueRef.current
-            .slice(1)
-            .some((job) => isPendingPaidSyncJobReady(job, nowMs));
-          if (hasReadyBehind) {
-            replacePendingPaidSyncQueue([
-              ...pendingPaidSyncQueueRef.current.slice(1),
-              currentJob,
-            ]);
-            continue;
-          }
-
-          const earliestRetryAtMs = pendingPaidSyncQueueRef.current.reduce((earliest, job) => {
-            const retryAtMs = getPendingPaidSyncJobNextAttemptAtMs(job);
-            if (!Number.isFinite(retryAtMs) || retryAtMs <= nowMs) {
-              return earliest;
-            }
-            return Math.min(earliest, retryAtMs);
-          }, Number.POSITIVE_INFINITY);
-          const fallbackDelayMs = Math.max(
-            250,
-            getPendingPaidSyncJobNextAttemptAtMs(currentJob) - nowMs
-          );
-          const delayMs = Number.isFinite(earliestRetryAtMs)
-            ? Math.max(250, earliestRetryAtMs - nowMs)
-            : fallbackDelayMs;
+      if (selectedIndex < 0) {
+        const earliestRetryAtMs = queueSnapshot.reduce((earliest, job) => {
+          if (runningDraftIds.has(job.draftId)) return earliest;
+          const retryAtMs = getPendingPaidSyncJobNextAttemptAtMs(job);
+          if (!Number.isFinite(retryAtMs) || retryAtMs <= nowMs) return earliest;
+          return Math.min(earliest, retryAtMs);
+        }, Number.POSITIVE_INFINITY);
+        if (Number.isFinite(earliestRetryAtMs)) {
+          const delayMs = Math.max(250, earliestRetryAtMs - nowMs);
           pendingPaidSyncRetryTimerRef.current = window.setTimeout(() => {
             enqueueRetryDispatchTask('pending-paid-sync-main', () => processPendingPaidSyncQueue());
           }, delayMs);
-          return;
         }
+        return;
+      }
 
-        markPaymentFlowTelemetryProcessingStarted(currentJob.draftId, currentJob.id);
+      currentJob = queueSnapshot[selectedIndex];
+      if (!currentJob) return;
+      pendingPaidSyncRunningDraftIdsRef.current.add(currentJob.draftId);
+      replacePendingPaidSyncQueue([
+        ...queueSnapshot.slice(0, selectedIndex),
+        ...queueSnapshot.slice(selectedIndex + 1),
+      ]);
+      if (
+        pendingPaidSyncActiveWorkersRef.current < PENDING_PAID_SYNC_MAX_WORKERS &&
+        pendingPaidSyncQueueRef.current.length > 0
+      ) {
+        void processPendingPaidSyncQueue();
+      }
+
+      markPaymentFlowTelemetryProcessingStarted(currentJob.draftId, currentJob.id);
 
         let currentServerDraft = saleDraftsRef.current.find(
           (draft) => draft.id === currentJob.draftId
@@ -7734,11 +7743,10 @@ const App: React.FC = () => {
             retries: currentJob.attempts,
             hadReconciliation: true,
           });
-          replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
           setDraftSyncInProgress(currentJob.draftId, false);
           cleanupDraftOperationalArtifacts(currentJob.draftId);
           clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
-          continue;
+          return;
         }
 
         setDraftSyncInProgress(currentJob.draftId, true);
@@ -7789,7 +7797,7 @@ const App: React.FC = () => {
             };
             replacePendingPaidSyncQueue([
               recoveredJob,
-              ...pendingPaidSyncQueueRef.current.slice(1),
+              ...pendingPaidSyncQueueRef.current,
             ]);
             setDraftSyncInProgress(currentJob.draftId, true);
             pendingPaidSyncRetryTimerRef.current = window.setTimeout(() => {
@@ -7845,7 +7853,6 @@ const App: React.FC = () => {
                   hadRecovery: true,
                   hadReconciliation: true,
                 });
-                replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
                 setDraftSyncInProgress(currentJob.draftId, false);
                 cleanupDraftOperationalArtifacts(currentJob.draftId);
                 clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
@@ -7907,7 +7914,6 @@ const App: React.FC = () => {
             markPaymentFlowTelemetryProgress(currentJob.draftId, {
               retries: failedJob.attempts,
             });
-            replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
             enqueueFailedPaidSyncJob(failedJob);
             setDraftSyncInProgress(currentJob.draftId, false);
             const isStockFailure = isStockRelatedErrorMessage(message);
@@ -7957,7 +7963,7 @@ const App: React.FC = () => {
               retryAt,
             }
           );
-          replacePendingPaidSyncQueue([...pendingPaidSyncQueueRef.current.slice(1), failedJob]);
+          replacePendingPaidSyncQueue([...pendingPaidSyncQueueRef.current, failedJob]);
           setDraftSyncInProgress(currentJob.draftId, false);
           showCornerSync('error', 'Banco lento. Pedido movido para o fim da fila.', 1800);
           scheduleRetryDispatchTask('pending-paid-sync-main', 180, () =>
@@ -8032,12 +8038,11 @@ const App: React.FC = () => {
               retries: currentJob.attempts,
               hadReconciliation: true,
             });
-            replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
             setDraftSyncInProgress(currentJob.draftId, false);
             cleanupDraftOperationalArtifacts(currentJob.draftId);
             clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
             showCornerSync('success', 'Pedido já estava concluído no banco.', 1800);
-            continue;
+            return;
           }
         }
 
@@ -8075,12 +8080,11 @@ const App: React.FC = () => {
               retries: currentJob.attempts,
               hadReconciliation: true,
             });
-            replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
             setDraftSyncInProgress(currentJob.draftId, false);
             cleanupDraftOperationalArtifacts(currentJob.draftId);
             clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
             showCornerSync('success', 'Pedido já estava concluído no banco.', 1800);
-            continue;
+            return;
           }
 
           const serverItemsCount = Array.isArray(currentServerDraft?.items)
@@ -8148,12 +8152,11 @@ const App: React.FC = () => {
                   retries: currentJob.attempts,
                   hadReconciliation: true,
                 });
-                replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
                 setDraftSyncInProgress(currentJob.draftId, false);
                 cleanupDraftOperationalArtifacts(currentJob.draftId);
                 clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
                 showCornerSync('success', 'Pedido já estava concluído no banco.', 1800);
-                continue;
+                return;
               }
               if (latestDraft.status === 'PENDING_PAYMENT') {
                 finalized = true;
@@ -8348,7 +8351,6 @@ const App: React.FC = () => {
         completePaymentFlowTelemetry(currentJob.draftId, {
           retries: currentJob.attempts,
         });
-        replacePendingPaidSyncQueue(pendingPaidSyncQueueRef.current.slice(1));
         const latestDraftAfterConfirm = saleDraftsRef.current.find(
           (entry) => entry.id === currentJob.draftId
         );
@@ -8371,10 +8373,19 @@ const App: React.FC = () => {
         cleanupDraftOperationalArtifacts(currentJob.draftId);
         clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
         showCornerSync('success', 'Banco OK', 1400);
-      }
     } finally {
-      isPendingPaidSyncQueueRunningRef.current = false;
-      if (pendingPaidSyncQueueRef.current.length === 0 && failedPaidSyncQueueRef.current.length === 0) {
+      if (currentJob) {
+        pendingPaidSyncRunningDraftIdsRef.current.delete(currentJob.draftId);
+      }
+      pendingPaidSyncActiveWorkersRef.current = Math.max(
+        0,
+        pendingPaidSyncActiveWorkersRef.current - 1
+      );
+      if (
+        pendingPaidSyncActiveWorkersRef.current === 0 &&
+        pendingPaidSyncQueueRef.current.length === 0 &&
+        failedPaidSyncQueueRef.current.length === 0
+      ) {
         setPaidSyncAssistantState((current) => ({
           ...current,
           mode: 'idle',
@@ -8384,9 +8395,22 @@ const App: React.FC = () => {
         }));
       }
       if (pendingPaidSyncQueueRef.current.length > 0) {
-        scheduleRetryDispatchTask('pending-paid-sync-main', 120, () =>
-          processPendingPaidSyncQueue()
+        const nowMs = Date.now();
+        const hasReadyUnlockedJob = pendingPaidSyncQueueRef.current.some(
+          (job) =>
+            !pendingPaidSyncRunningDraftIdsRef.current.has(job.draftId) &&
+            isPendingPaidSyncJobReady(job, nowMs)
         );
+        if (
+          hasReadyUnlockedJob &&
+          pendingPaidSyncActiveWorkersRef.current < PENDING_PAID_SYNC_MAX_WORKERS
+        ) {
+          void processPendingPaidSyncQueue();
+        } else {
+          scheduleRetryDispatchTask('pending-paid-sync-main', 120, () =>
+            processPendingPaidSyncQueue()
+          );
+        }
       }
     }
   }, [
