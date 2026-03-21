@@ -227,6 +227,9 @@ interface PaymentFlowTelemetryEntry {
   confirmMs: number;
   snapshotApplyMs: number;
   frontendReconcileMs: number;
+  stateRefreshMs: number;
+  recoveryMs: number;
+  retryBackoffMs: number;
   retries: number;
   hadRecovery: boolean;
   hadReconciliation: boolean;
@@ -244,6 +247,9 @@ interface PaymentFlowTelemetryRecord {
   confirmMs: number | null;
   snapshotApplyMs: number | null;
   frontendReconcileMs: number | null;
+  stateRefreshMs: number | null;
+  recoveryMs: number | null;
+  retryBackoffMs: number | null;
   clickToBackendConfirmMs: number | null;
   retries: number;
   hadRecovery: boolean;
@@ -1827,6 +1833,9 @@ const normalizePaymentFlowTelemetryRecord = (
   const confirmRaw = Number(source.confirmMs);
   const snapshotApplyRaw = Number(source.snapshotApplyMs);
   const frontendReconcileRaw = Number(source.frontendReconcileMs);
+  const stateRefreshRaw = Number(source.stateRefreshMs);
+  const recoveryRaw = Number(source.recoveryMs);
+  const retryBackoffRaw = Number(source.retryBackoffMs);
   const clickToBackendConfirmRaw = Number(source.clickToBackendConfirmMs);
   const retriesRaw = Number(source.retries);
   const timestamp =
@@ -1871,6 +1880,16 @@ const normalizePaymentFlowTelemetryRecord = (
       Number.isFinite(frontendReconcileRaw) && frontendReconcileRaw >= 0
         ? Math.floor(frontendReconcileRaw)
         : null,
+    stateRefreshMs:
+      Number.isFinite(stateRefreshRaw) && stateRefreshRaw >= 0
+        ? Math.floor(stateRefreshRaw)
+        : null,
+    recoveryMs:
+      Number.isFinite(recoveryRaw) && recoveryRaw >= 0 ? Math.floor(recoveryRaw) : null,
+    retryBackoffMs:
+      Number.isFinite(retryBackoffRaw) && retryBackoffRaw >= 0
+        ? Math.floor(retryBackoffRaw)
+        : null,
     clickToBackendConfirmMs:
       Number.isFinite(clickToBackendConfirmRaw) && clickToBackendConfirmRaw >= 0
         ? Math.floor(clickToBackendConfirmRaw)
@@ -1900,6 +1919,9 @@ const getPaymentFlowProcessingBreakdown = (
   confirmMs: number;
   snapshotApplyMs: number;
   frontendReconcileMs: number;
+  stateRefreshMs: number;
+  recoveryMs: number;
+  retryBackoffMs: number;
   measuredExclusiveMs: number;
   residualMs: number;
 } | null => {
@@ -1930,11 +1952,29 @@ const getPaymentFlowProcessingBreakdown = (
     Number.isFinite(telemetry.frontendReconcileMs)
       ? Math.max(0, telemetry.frontendReconcileMs)
       : 0;
+  const stateRefreshMs =
+    typeof telemetry.stateRefreshMs === 'number' && Number.isFinite(telemetry.stateRefreshMs)
+      ? Math.max(0, telemetry.stateRefreshMs)
+      : 0;
+  const recoveryMs =
+    typeof telemetry.recoveryMs === 'number' && Number.isFinite(telemetry.recoveryMs)
+      ? Math.max(0, telemetry.recoveryMs)
+      : 0;
+  const retryBackoffMs =
+    typeof telemetry.retryBackoffMs === 'number' && Number.isFinite(telemetry.retryBackoffMs)
+      ? Math.max(0, telemetry.retryBackoffMs)
+      : 0;
 
   // snapshotApplyMs is cross-cutting and already included inside finalize/confirm timings.
   // Keep the residual based on exclusive sequential stages only.
   const measuredExclusiveMs =
-    flushPendingDraftAddsMs + finalizeMs + confirmMs + frontendReconcileMs;
+    flushPendingDraftAddsMs +
+    finalizeMs +
+    confirmMs +
+    frontendReconcileMs +
+    stateRefreshMs +
+    recoveryMs +
+    retryBackoffMs;
   const residualMs = Math.max(0, processingMs - measuredExclusiveMs);
 
   return {
@@ -1943,6 +1983,9 @@ const getPaymentFlowProcessingBreakdown = (
     confirmMs: Math.round(confirmMs),
     snapshotApplyMs: Math.round(snapshotApplyMs),
     frontendReconcileMs: Math.round(frontendReconcileMs),
+    stateRefreshMs: Math.round(stateRefreshMs),
+    recoveryMs: Math.round(recoveryMs),
+    retryBackoffMs: Math.round(retryBackoffMs),
     measuredExclusiveMs: Math.round(measuredExclusiveMs),
     residualMs: Math.round(residualMs),
   };
@@ -3074,6 +3117,9 @@ const App: React.FC = () => {
         confirmMs: 0,
         snapshotApplyMs: 0,
         frontendReconcileMs: 0,
+        stateRefreshMs: 0,
+        recoveryMs: 0,
+        retryBackoffMs: 0,
         retries: 0,
         hadRecovery: false,
         hadReconciliation: false,
@@ -3128,7 +3174,10 @@ const App: React.FC = () => {
         | 'finalizeMs'
         | 'confirmMs'
         | 'snapshotApplyMs'
-        | 'frontendReconcileMs',
+        | 'frontendReconcileMs'
+        | 'stateRefreshMs'
+        | 'recoveryMs'
+        | 'retryBackoffMs',
       durationMs: number
     ): void => {
       const normalizedDraftId = draftId.trim();
@@ -3224,6 +3273,9 @@ const App: React.FC = () => {
         confirmMs: Math.max(0, Math.round(current.confirmMs)),
         snapshotApplyMs: Math.max(0, Math.round(current.snapshotApplyMs)),
         frontendReconcileMs: Math.max(0, Math.round(current.frontendReconcileMs)),
+        stateRefreshMs: Math.max(0, Math.round(current.stateRefreshMs)),
+        recoveryMs: Math.max(0, Math.round(current.recoveryMs)),
+        retryBackoffMs: Math.max(0, Math.round(current.retryBackoffMs)),
         clickToBackendConfirmMs: totalConfMs,
         retries: normalizedRetries,
         hadRecovery,
@@ -3247,6 +3299,9 @@ const App: React.FC = () => {
         confirmMs: record.confirmMs,
         snapshotApplyMs: record.snapshotApplyMs,
         frontendReconcileMs: record.frontendReconcileMs,
+        stateRefreshMs: record.stateRefreshMs,
+        recoveryMs: record.recoveryMs,
+        retryBackoffMs: record.retryBackoffMs,
         clickToBackendConfirmMs: record.clickToBackendConfirmMs,
         retries: record.retries,
         hadRecovery: record.hadRecovery,
@@ -3269,6 +3324,9 @@ const App: React.FC = () => {
           confirmMs: record.confirmMs,
           snapshotApplyMs: record.snapshotApplyMs,
           frontendReconcileMs: record.frontendReconcileMs,
+          stateRefreshMs: record.stateRefreshMs,
+          recoveryMs: record.recoveryMs,
+          retryBackoffMs: record.retryBackoffMs,
           clickToBackendConfirmMs: record.clickToBackendConfirmMs,
           retries: record.retries,
           hadRecovery: record.hadRecovery,
@@ -7885,6 +7943,30 @@ const App: React.FC = () => {
           durationMs
         );
       };
+      const recordStateRefreshMs = (durationMs: number): void => {
+        markPaymentFlowTelemetryStageDuration(
+          currentJob.draftId,
+          currentJob.id,
+          'stateRefreshMs',
+          durationMs
+        );
+      };
+      const recordRecoveryMs = (durationMs: number): void => {
+        markPaymentFlowTelemetryStageDuration(
+          currentJob.draftId,
+          currentJob.id,
+          'recoveryMs',
+          durationMs
+        );
+      };
+      const recordRetryBackoffMs = (durationMs: number): void => {
+        markPaymentFlowTelemetryStageDuration(
+          currentJob.draftId,
+          currentJob.id,
+          'retryBackoffMs',
+          durationMs
+        );
+      };
       const applySnapshotForCurrentJob = (state: AppState, source: string): boolean => {
         const snapshotApplyStartedAt = performance.now();
         const applied = applyStateSnapshotIfDraftEpochCurrent(
@@ -7955,6 +8037,7 @@ const App: React.FC = () => {
             recoveryMessage: string,
             recoveryStatusCode?: number
           ): void => {
+            recordRetryBackoffMs(PENDING_PAID_SYNC_EMPTY_DRAFT_RECOVERY_DELAY_MS);
             const retryAt = new Date(
               Date.now() + PENDING_PAID_SYNC_EMPTY_DRAFT_RECOVERY_DELAY_MS
             ).toISOString();
@@ -7997,11 +8080,17 @@ const App: React.FC = () => {
                 jobId: currentJob.id,
               }
             );
-            const recoveryResult = await recoverPendingPaidSyncDraft(currentJob, {
-              trigger: 'queue-empty-draft',
-              failureMessage: message,
-              statusCode,
-            });
+            let recoveryResult: Awaited<ReturnType<typeof recoverPendingPaidSyncDraft>>;
+            const recoveryStartedAt = performance.now();
+            try {
+              recoveryResult = await recoverPendingPaidSyncDraft(currentJob, {
+                trigger: 'queue-empty-draft',
+                failureMessage: message,
+                statusCode,
+              });
+            } finally {
+              recordRecoveryMs(performance.now() - recoveryStartedAt);
+            }
 
             if (recoveryResult.ok) {
               if (recoveryResult.reconciledOnServer) {
@@ -8109,6 +8198,7 @@ const App: React.FC = () => {
 
           const nextAttempts = currentJob.attempts + 1;
           const retryDelayMs = getPendingPaidSyncRetryDelayMs(nextAttempts);
+          recordRetryBackoffMs(retryDelayMs);
           const retryAt = new Date(Date.now() + retryDelayMs).toISOString();
           const nextFinalizeCommandId = createClientId('cmd');
           const nextConfirmCommandId = createClientId('cmd');
@@ -8234,11 +8324,13 @@ const App: React.FC = () => {
         if (!currentServerDraft || currentServerDraft.status === 'DRAFT') {
           if (!currentServerDraft || (currentServerDraft.items || []).length === 0) {
             try {
+              const stateRefreshStartedAt = performance.now();
               const refreshedState = await fetchStateSnapshotControlled(currentJob.draftId);
               applySnapshotForCurrentJob(
                 refreshedState,
                 'pending_paid_refresh_before_finalize'
               );
+              recordStateRefreshMs(performance.now() - stateRefreshStartedAt);
             } catch {
               // best-effort refresh; fallback to local view below
             }
@@ -8313,11 +8405,13 @@ const App: React.FC = () => {
             if (isFinalizeConflict) {
               let stateRefreshed = false;
               try {
+                const stateRefreshStartedAt = performance.now();
                 const refreshedState = await fetchStateSnapshotControlled(currentJob.draftId);
                 applySnapshotForCurrentJob(
                   refreshedState,
                   'pending_paid_refresh_finalize_conflict'
                 );
+                recordStateRefreshMs(performance.now() - stateRefreshStartedAt);
                 stateRefreshed = true;
               } catch {
                 // best-effort: if refresh fails we still evaluate local snapshot below
@@ -8528,11 +8622,13 @@ const App: React.FC = () => {
 
               if (!resolvedBySyncFallback) {
                 try {
+                  const stateRefreshStartedAt = performance.now();
                   const refreshedState = await fetchStateSnapshotControlled(currentJob.draftId);
                   applySnapshotForCurrentJob(
                     refreshedState,
                     'pending_paid_refresh_after_confirm'
                   );
+                  recordStateRefreshMs(performance.now() - stateRefreshStartedAt);
                 } catch (error) {
                   await markJobAsFailed('Pedido confirmado, mas falhou ao atualizar estado local.', {
                     error,
@@ -10248,7 +10344,7 @@ const App: React.FC = () => {
               )}
               {latestPaymentFlowBreakdown && (
                 <p className="truncate">
-                  f:{latestPaymentFlowBreakdown.flushPendingDraftAddsMs} fi:{latestPaymentFlowBreakdown.finalizeMs} cf:{latestPaymentFlowBreakdown.confirmMs} sn:{latestPaymentFlowBreakdown.snapshotApplyMs} fr:{latestPaymentFlowBreakdown.frontendReconcileMs} oth:{latestPaymentFlowBreakdown.residualMs}
+                  f:{latestPaymentFlowBreakdown.flushPendingDraftAddsMs} fi:{latestPaymentFlowBreakdown.finalizeMs} cf:{latestPaymentFlowBreakdown.confirmMs} sn:{latestPaymentFlowBreakdown.snapshotApplyMs} sr:{latestPaymentFlowBreakdown.stateRefreshMs} rv:{latestPaymentFlowBreakdown.recoveryMs} rb:{latestPaymentFlowBreakdown.retryBackoffMs} fr:{latestPaymentFlowBreakdown.frontendReconcileMs} oth:{latestPaymentFlowBreakdown.residualMs}
                 </p>
               )}
             </div>
@@ -10356,7 +10452,7 @@ const App: React.FC = () => {
                   <p key={entry.jobId} className="truncate font-mono text-[9px] text-slate-200">
                     {(() => {
                       const breakdown = getPaymentFlowProcessingBreakdown(entry);
-                      return `${entry.draftId.slice(-8).toUpperCase()} local:${entry.clickToLocalPersistMs ?? '-'}ms w:${entry.waitInQueueMs ?? '-'}ms p:${entry.processingMs ?? '-'}ms conf:${entry.totalConfMs ?? entry.clickToBackendConfirmMs ?? '-'}ms f:${breakdown?.flushPendingDraftAddsMs ?? '-'} fi:${breakdown?.finalizeMs ?? '-'} cf:${breakdown?.confirmMs ?? '-'} sn:${breakdown?.snapshotApplyMs ?? '-'} fr:${breakdown?.frontendReconcileMs ?? '-'} oth:${breakdown?.residualMs ?? '-'} r:${entry.retries} rec:${entry.hadRecovery ? '1' : '0'} rc:${entry.hadReconciliation ? '1' : '0'}`;
+                      return `${entry.draftId.slice(-8).toUpperCase()} local:${entry.clickToLocalPersistMs ?? '-'}ms w:${entry.waitInQueueMs ?? '-'}ms p:${entry.processingMs ?? '-'}ms conf:${entry.totalConfMs ?? entry.clickToBackendConfirmMs ?? '-'}ms f:${breakdown?.flushPendingDraftAddsMs ?? '-'} fi:${breakdown?.finalizeMs ?? '-'} cf:${breakdown?.confirmMs ?? '-'} sn:${breakdown?.snapshotApplyMs ?? '-'} sr:${breakdown?.stateRefreshMs ?? '-'} rv:${breakdown?.recoveryMs ?? '-'} rb:${breakdown?.retryBackoffMs ?? '-'} fr:${breakdown?.frontendReconcileMs ?? '-'} oth:${breakdown?.residualMs ?? '-'} r:${entry.retries} rec:${entry.hadRecovery ? '1' : '0'} rc:${entry.hadReconciliation ? '1' : '0'}`;
                     })()}
                   </p>
                 ))}
