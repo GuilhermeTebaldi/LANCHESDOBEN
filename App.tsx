@@ -2182,6 +2182,7 @@ const PENDING_PAID_SYNC_EMPTY_DRAFT_RECOVERY_DELAY_MS = 1800;
 const PENDING_PAID_SYNC_EMPTY_DRAFT_RECOVERY_MAX_ATTEMPTS = 5;
 const PAID_SYNC_ASSISTANT_STATUS_TTL_MS = 2800;
 const DRAFT_PAYMENT_TRANSITION_GRACE_MS = 12_000;
+const DRAFT_REOPEN_CONFIRMATION_MS = 2_500;
 const PAID_SYNC_QUEUE_PREVIEW_LIMIT = 6;
 const PENDING_DRAFT_BACKGROUND_SYNC_DEBOUNCE_MS = 650;
 const PENDING_DRAFT_BACKGROUND_SYNC_SWEEP_MS = 10000;
@@ -2459,6 +2460,7 @@ const App: React.FC = () => {
   const draftLifecycleStageRef = useRef<Map<string, DraftLifecycleStage>>(new Map());
   const draftOperationEpochRef = useRef<Map<string, number>>(new Map());
   const draftPaymentTransitionGraceUntilRef = useRef<Map<string, number>>(new Map());
+  const draftReopenObservedAtRef = useRef<Map<string, number>>(new Map());
   const isDraftLifecycleHydratedRef = useRef(false);
   const lastOperationalHealthReportAtRef = useRef(0);
 
@@ -3053,6 +3055,9 @@ const App: React.FC = () => {
     if (pendingPaidSyncQueueRef.current.some((job) => job.draftId === normalizedDraftId)) {
       return 'PENDING_CONFIRM';
     }
+    if (pendingPaidSyncRunningDraftIdsRef.current.has(normalizedDraftId)) {
+      return 'PENDING_CONFIRM';
+    }
     if (failedPaidSyncQueueRef.current.some((job) => job.draftId === normalizedDraftId)) {
       return 'PENDING_CONFIRM';
     }
@@ -3099,6 +3104,7 @@ const App: React.FC = () => {
         draftLifecycleStageRef.current.delete(normalizedDraftId);
       } else {
         draftLifecycleStageRef.current.set(normalizedDraftId, stage);
+        draftReopenObservedAtRef.current.delete(normalizedDraftId);
       }
       if (stage === 'FINALIZING' || stage === 'PENDING_CONFIRM') {
         draftPaymentTransitionGraceUntilRef.current.set(
@@ -3111,6 +3117,7 @@ const App: React.FC = () => {
         (stage === 'OPEN' && options.reason !== 'server_reopened_draft')
       ) {
         draftPaymentTransitionGraceUntilRef.current.delete(normalizedDraftId);
+        draftReopenObservedAtRef.current.delete(normalizedDraftId);
       }
       if (shouldBumpEpoch) {
         draftOperationEpochRef.current.set(normalizedDraftId, nextEpoch);
@@ -5126,6 +5133,13 @@ const App: React.FC = () => {
         syncingDraftIds.add(normalizedDraftId);
       }
     });
+    const runningDraftIds = new Set<string>();
+    pendingPaidSyncRunningDraftIdsRef.current.forEach((draftId) => {
+      const normalizedDraftId = draftId.trim();
+      if (normalizedDraftId) {
+        runningDraftIds.add(normalizedDraftId);
+      }
+    });
     const queuedDraftIds = new Set<string>();
     pendingPaidSyncQueueRef.current.forEach((job) => {
       const normalizedDraftId = job.draftId.trim();
@@ -5140,20 +5154,27 @@ const App: React.FC = () => {
       }
     });
     const nowMs = Date.now();
+    const draftReopenObservedAt = draftReopenObservedAtRef.current;
+    const knownDraftIds = new Set<string>();
 
     saleDrafts.forEach((draft) => {
+      const normalizedDraftId = draft.id.trim();
+      if (normalizedDraftId) {
+        knownDraftIds.add(normalizedDraftId);
+      }
       if (draft.status === 'PAID' || draft.status === 'CANCELLED') {
+        draftReopenObservedAt.delete(normalizedDraftId);
         setDraftLifecycleStage(draft.id, draft.status === 'PAID' ? 'PAID' : 'CANCELLED', {
           reason: 'server_terminal_state',
           bumpEpoch: false,
         });
       } else if (draft.status === 'PENDING_PAYMENT') {
+        draftReopenObservedAt.delete(normalizedDraftId);
         setDraftLifecycleStage(draft.id, 'PENDING_CONFIRM', {
           reason: 'server_pending_payment_state',
           bumpEpoch: false,
         });
       } else if (draft.status === 'DRAFT') {
-        const normalizedDraftId = draft.id.trim();
         if (!normalizedDraftId) return;
         const transitionGraceUntilMs =
           draftPaymentTransitionGraceUntilRef.current.get(normalizedDraftId) || 0;
@@ -5162,14 +5183,34 @@ const App: React.FC = () => {
           draftPaymentTransitionGraceUntilRef.current.delete(normalizedDraftId);
         }
         const hasTerminalProcessingInFlight =
-          syncingDraftIds.has(normalizedDraftId) || queuedDraftIds.has(normalizedDraftId);
-        if (hasRecentTransitionGrace) return;
-        if (hasTerminalProcessingInFlight) return;
-        if (resolveDraftLifecycleStage(normalizedDraftId) === 'OPEN') return;
+          syncingDraftIds.has(normalizedDraftId) ||
+          queuedDraftIds.has(normalizedDraftId) ||
+          runningDraftIds.has(normalizedDraftId);
+        if (hasRecentTransitionGrace || hasTerminalProcessingInFlight) {
+          draftReopenObservedAt.delete(normalizedDraftId);
+          return;
+        }
+        if (resolveDraftLifecycleStage(normalizedDraftId) === 'OPEN') {
+          draftReopenObservedAt.delete(normalizedDraftId);
+          return;
+        }
+        const observedAtMs = draftReopenObservedAt.get(normalizedDraftId);
+        if (observedAtMs === undefined) {
+          draftReopenObservedAt.set(normalizedDraftId, nowMs);
+          return;
+        }
+        if (nowMs - observedAtMs < DRAFT_REOPEN_CONFIRMATION_MS) return;
+        draftReopenObservedAt.delete(normalizedDraftId);
         setDraftLifecycleStage(normalizedDraftId, 'OPEN', {
           reason: 'server_reopened_draft',
           bumpEpoch: false,
         });
+      }
+    });
+
+    draftReopenObservedAt.forEach((_observedAt, draftId) => {
+      if (!knownDraftIds.has(draftId)) {
+        draftReopenObservedAt.delete(draftId);
       }
     });
   }, [
