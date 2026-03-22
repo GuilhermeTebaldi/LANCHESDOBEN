@@ -9608,6 +9608,10 @@ const App: React.FC = () => {
     const receiptPayload: ReceiptPrintPayload | null = receiptPayloadInput
       ? saveReceiptPrintPayload(receiptPayloadInput)
       : null;
+    const preparedPrintWindow = prepareReceiptPrintWindow();
+    if (receiptPayload && preparedPrintWindow) {
+      setReceiptPrintPayloadOnWindow(preparedPrintWindow, receiptPayload);
+    }
 
     const pendingItemsCount = countVisiblePendingDraftAdds(pendingDraftAddsRef.current[draftId] || []);
     const paymentClickAtMs = Date.now();
@@ -9655,6 +9659,7 @@ const App: React.FC = () => {
       if (receiptPayload) {
         removeReceiptPrintPayload(receiptPayload.id);
       }
+      closePreparedReceiptWindow(preparedPrintWindow);
       setIsConfirmingPaid(false);
       return;
     }
@@ -9666,23 +9671,23 @@ const App: React.FC = () => {
         : 'Pedido em fila. Confirmando no banco...'
     );
     requestPendingPaidSyncProcessing('confirm-paid-enqueued');
+    // Kick off immediately in the current tab before any print navigation can block timers/event-loop.
+    void processPendingPaidSyncQueue();
     setIsConfirmingPaid(false);
 
-    const preparedPrintWindow = prepareReceiptPrintWindow();
-    if (receiptPayload && preparedPrintWindow) {
-      setReceiptPrintPayloadOnWindow(preparedPrintWindow, receiptPayload);
-    }
     const receiptPrintId = receiptPayload?.id || draftId;
-    const openedPrintWindow = navigatePreparedReceiptWindow(preparedPrintWindow, receiptPrintId);
-    if (!openedPrintWindow) {
-      if (receiptPayload) {
-        removeReceiptPrintPayload(receiptPayload.id);
+    window.setTimeout(() => {
+      const openedPrintWindow = navigatePreparedReceiptWindow(preparedPrintWindow, receiptPrintId);
+      if (!openedPrintWindow) {
+        if (receiptPayload) {
+          removeReceiptPrintPayload(receiptPayload.id);
+        }
+        closePreparedReceiptWindow(preparedPrintWindow);
+        showNotification(
+          'Não foi possível abrir o cupom agora. Use o Histórico para segunda via.'
+        );
       }
-      closePreparedReceiptWindow(preparedPrintWindow);
-      showNotification(
-        'Não foi possível abrir o cupom agora. Use o Histórico para segunda via.'
-      );
-    }
+    }, 0);
   };
 
   const handleUndoLastSale = () => {
