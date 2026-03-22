@@ -8123,16 +8123,18 @@ const App: React.FC = () => {
             }, PENDING_PAID_SYNC_EMPTY_DRAFT_RECOVERY_DELAY_MS);
           };
 
-          if (
-            isEmptyDraftFailure &&
-            currentJob.attempts < PENDING_PAID_SYNC_EMPTY_DRAFT_RECOVERY_MAX_ATTEMPTS
-          ) {
+          if (isEmptyDraftFailure) {
+            const recoveryAttemptNumber = currentJob.attempts + 1;
+            const recoveryAttemptDisplay = Math.min(
+              recoveryAttemptNumber,
+              PENDING_PAID_SYNC_EMPTY_DRAFT_RECOVERY_MAX_ATTEMPTS
+            );
             setPaidSyncAssistantActivity(
               'recovering',
               describePaidSyncAssistantMode(
                 'recovering',
                 `draft ${currentJob.draftId.slice(-8).toUpperCase()} (tentativa ${
-                  currentJob.attempts + 1
+                  recoveryAttemptDisplay
                 }/${PENDING_PAID_SYNC_EMPTY_DRAFT_RECOVERY_MAX_ATTEMPTS})`
               ),
               {
@@ -8216,6 +8218,29 @@ const App: React.FC = () => {
               );
               return;
             }
+
+            clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
+            setDraftSyncInProgress(currentJob.draftId, false);
+            cleanupDraftOperationalArtifacts(currentJob.draftId);
+            setDraftLifecycleStage(currentJob.draftId, 'OPEN', {
+              reason: 'queue_empty_draft_non_retryable_cleared',
+              bumpEpoch: false,
+            });
+            pushOperationalEvent(
+              'QUEUE_HEALTH',
+              'Pedido órfão com carrinho vazio foi descartado automaticamente.',
+              {
+                draftId: currentJob.draftId,
+                jobId: currentJob.id,
+                attempts: currentJob.attempts,
+                reason: recoveryResult.message || message,
+              }
+            );
+            showCornerSync('success', 'Pedido inválido removido automaticamente da fila.', 2400);
+            scheduleRetryDispatchTask('pending-paid-sync-main', 60, () =>
+              processPendingPaidSyncQueue()
+            );
+            return;
           }
 
           if (!retryable && !isEmptyDraftFailure) {
@@ -8280,7 +8305,7 @@ const App: React.FC = () => {
           );
           replacePendingPaidSyncQueue([...pendingPaidSyncQueueRef.current, failedJob]);
           setDraftSyncInProgress(currentJob.draftId, false);
-          showCornerSync('error', 'Banco lento. Pedido movido para o fim da fila.', 1800);
+          showCornerSync('syncing', 'Pedido reagendado automaticamente para nova tentativa.', 1800);
           scheduleRetryDispatchTask('pending-paid-sync-main', 180, () =>
             processPendingPaidSyncQueue()
           );
