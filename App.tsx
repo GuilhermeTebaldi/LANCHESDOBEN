@@ -2286,6 +2286,11 @@ const getCommandExecutionPriority = (command: StateCommand): CommandPriority => 
   return 'NORMAL';
 };
 
+const isTerminalPaidSyncCommand = (command: Pick<StateCommand, 'type'>): boolean =>
+  command.type === 'SALE_DRAFT_FINALIZE' ||
+  command.type === 'SALE_DRAFT_CONFIRM_PAID' ||
+  command.type === 'SALE_DRAFT_FINALIZE_AND_CONFIRM_PAID';
+
 const isSafeCommandTypeForFallbackDedupe = (commandType: StateCommand['type']): boolean =>
   commandType === 'SALE_DRAFT_FINALIZE' ||
   commandType === 'SALE_DRAFT_FINALIZE_AND_CONFIRM_PAID' ||
@@ -4585,12 +4590,57 @@ const App: React.FC = () => {
               );
             }
             const snapshotApplyStartedAt = performance.now();
-            applyStateSnapshotIfDraftEpochCurrent(
+            const appliedSnapshot = applyStateSnapshotIfDraftEpochCurrent(
               nextState,
               commandDraftId,
               expectedDraftEpoch,
               'run_state_command'
             );
+            if (
+              !appliedSnapshot &&
+              commandDraftId &&
+              isTerminalPaidSyncCommand(command)
+            ) {
+              pushOperationalEvent(
+                'COMMAND_SKIPPED_OBSOLETE',
+                'Snapshot terminal obsoleto detectado. Forçando reconciliação imediata.',
+                {
+                  draftId: commandDraftId,
+                  commandType: command.type,
+                  commandId: command.commandId || null,
+                }
+              );
+              try {
+                const reconciledState = await runBackendExecution(
+                  {
+                    operationType: 'FETCH_STATE_SNAPSHOT',
+                    draftId: commandDraftId,
+                    retryCount: 0,
+                  },
+                  () => fetchStateSnapshot()
+                );
+                const reconcileEpoch = getDraftOperationEpoch(commandDraftId);
+                applyStateSnapshotIfDraftEpochCurrent(
+                  reconciledState,
+                  commandDraftId,
+                  reconcileEpoch,
+                  'run_state_command_reconcile_refresh'
+                );
+              } catch (reconcileError) {
+                reportErrorMonitorEvent({
+                  source: 'sistema:state-command:reconcile-refresh-failed',
+                  level: 'warn',
+                  message:
+                    'Falha ao reconciliar snapshot após mismatch de epoch em comando terminal.',
+                  stack: reconcileError instanceof Error ? reconcileError.stack : undefined,
+                  context: {
+                    draftId: commandDraftId,
+                    commandType: command.type,
+                    commandId: command.commandId || null,
+                  },
+                });
+              }
+            }
             options.onSnapshotAppliedMs?.(performance.now() - snapshotApplyStartedAt);
           }
           return { ok: true };
