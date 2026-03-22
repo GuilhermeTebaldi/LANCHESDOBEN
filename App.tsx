@@ -8800,16 +8800,18 @@ const App: React.FC = () => {
 
   const requestPendingPaidSyncProcessing = useCallback(
     (source: string, delayMs = 0): void => {
-      const allowImmediate = source === 'confirm-paid-enqueued';
       const safeDelayMs = Math.max(0, Math.round(delayMs));
+      if (source === 'confirm-paid-enqueued' && safeDelayMs === 0) {
+        enqueueRetryDispatchTask('pending-paid-sync-main', () => processPendingPaidSyncQueue());
+        return;
+      }
       scheduleRetryDispatchTask(
         'pending-paid-sync-main',
         safeDelayMs,
-        () => processPendingPaidSyncQueue(),
-        { allowImmediate }
+        () => processPendingPaidSyncQueue()
       );
     },
-    [processPendingPaidSyncQueue, scheduleRetryDispatchTask]
+    [enqueueRetryDispatchTask, processPendingPaidSyncQueue, scheduleRetryDispatchTask]
   );
 
   useEffect(() => {
@@ -9606,10 +9608,6 @@ const App: React.FC = () => {
     const receiptPayload: ReceiptPrintPayload | null = receiptPayloadInput
       ? saveReceiptPrintPayload(receiptPayloadInput)
       : null;
-    const preparedPrintWindow = prepareReceiptPrintWindow();
-    if (receiptPayload && preparedPrintWindow) {
-      setReceiptPrintPayloadOnWindow(preparedPrintWindow, receiptPayload);
-    }
 
     const pendingItemsCount = countVisiblePendingDraftAdds(pendingDraftAddsRef.current[draftId] || []);
     const paymentClickAtMs = Date.now();
@@ -9657,7 +9655,6 @@ const App: React.FC = () => {
       if (receiptPayload) {
         removeReceiptPrintPayload(receiptPayload.id);
       }
-      closePreparedReceiptWindow(preparedPrintWindow);
       setIsConfirmingPaid(false);
       return;
     }
@@ -9671,6 +9668,10 @@ const App: React.FC = () => {
     requestPendingPaidSyncProcessing('confirm-paid-enqueued');
     setIsConfirmingPaid(false);
 
+    const preparedPrintWindow = prepareReceiptPrintWindow();
+    if (receiptPayload && preparedPrintWindow) {
+      setReceiptPrintPayloadOnWindow(preparedPrintWindow, receiptPayload);
+    }
     const receiptPrintId = receiptPayload?.id || draftId;
     const openedPrintWindow = navigatePreparedReceiptWindow(preparedPrintWindow, receiptPrintId);
     if (!openedPrintWindow) {
