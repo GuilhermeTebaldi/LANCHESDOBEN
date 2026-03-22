@@ -2190,6 +2190,7 @@ const PENDING_PAID_SYNC_EMPTY_DRAFT_RECOVERY_DELAY_MS = 1800;
 const PENDING_PAID_SYNC_EMPTY_DRAFT_RECOVERY_MAX_ATTEMPTS = 5;
 const PENDING_PAID_SYNC_PRE_CONFIRM_SETTLE_MAX_ATTEMPTS = 6;
 const PENDING_PAID_SYNC_PRE_CONFIRM_SETTLE_STEP_DELAYS_MS = [120, 180, 260, 360, 520] as const;
+const PENDING_PAID_SYNC_MISSING_DRAFT_MAX_AUTO_RETRIES = 2;
 const PAID_SYNC_ASSISTANT_STATUS_TTL_MS = 2800;
 const PAID_SYNC_QUEUE_PREVIEW_LIMIT = 6;
 const PENDING_DRAFT_BACKGROUND_SYNC_DEBOUNCE_MS = 650;
@@ -2361,7 +2362,10 @@ const isPendingPaidSyncOrderSettleRetryMessage = (message: string): boolean => {
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .toLowerCase();
-  return normalized.includes('draft ainda nao visivel no estado mais recente antes de confirmar pagamento');
+  return (
+    normalized.includes('draft ainda nao visivel no estado mais recente antes de confirmar pagamento') ||
+    normalized.includes('draft nao encontrado no snapshot mais recente antes de confirmar pagamento')
+  );
 };
 
 const getPendingPaidSyncRetryDelayForMessage = (attempts: number, message: string): number => {
@@ -8603,13 +8607,12 @@ const App: React.FC = () => {
           }
         };
         const shouldKeepPreConfirmSettling = (): boolean => {
-          const status = latestDraftBeforeConfirm?.status;
-          if (!latestDraftBeforeConfirm) return true;
-          if (status === 'DRAFT') return true;
-          return (
+          const isTransitionalLocalStage =
             latestDraftLifecycleStage === 'FINALIZING' ||
-            latestDraftLifecycleStage === 'PENDING_CONFIRM'
-          );
+            latestDraftLifecycleStage === 'PENDING_CONFIRM';
+          if (!isTransitionalLocalStage) return false;
+          if (!latestDraftBeforeConfirm) return true;
+          return latestDraftBeforeConfirm.status === 'DRAFT';
         };
 
         for (
@@ -8680,13 +8683,21 @@ const App: React.FC = () => {
         }
 
         if (!latestDraftBeforeConfirm) {
+          const missingDraftAttempt = currentJob.attempts + 1;
+          const shouldRetryMissingDraft =
+            missingDraftAttempt <= PENDING_PAID_SYNC_MISSING_DRAFT_MAX_AUTO_RETRIES;
           const missingDraftMessage =
-            `Draft não encontrado no snapshot mais recente antes de confirmar pagamento (stage local ${latestDraftLifecycleStage}).`;
-          await markJobAsFailed('Draft ainda não visível no estado mais recente. Tentando novamente.', {
-            message: missingDraftMessage,
-            retryable: true,
-            statusCode: 409,
-          });
+            `Draft não encontrado no snapshot mais recente antes de confirmar pagamento (stage local ${latestDraftLifecycleStage}; tentativa ${missingDraftAttempt}/${PENDING_PAID_SYNC_MISSING_DRAFT_MAX_AUTO_RETRIES}).`;
+          await markJobAsFailed(
+            shouldRetryMissingDraft
+              ? 'Draft ainda não visível no estado mais recente. Tentando novamente.'
+              : 'Draft não ficou visível após tentativas curtas de validação.',
+            {
+              message: missingDraftMessage,
+              retryable: shouldRetryMissingDraft,
+              statusCode: 409,
+            }
+          );
           return;
         }
 
