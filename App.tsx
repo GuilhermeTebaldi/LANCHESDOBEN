@@ -2191,6 +2191,7 @@ const PENDING_PAID_SYNC_EMPTY_DRAFT_RECOVERY_MAX_ATTEMPTS = 5;
 const PENDING_PAID_SYNC_PRE_CONFIRM_SETTLE_MAX_ATTEMPTS = 6;
 const PENDING_PAID_SYNC_PRE_CONFIRM_SETTLE_STEP_DELAYS_MS = [120, 180, 260, 360, 520] as const;
 const PENDING_PAID_SYNC_MISSING_DRAFT_MAX_AUTO_RETRIES = 2;
+const PENDING_PAID_SYNC_PRECONDITION_MAX_AUTO_RETRIES = 2;
 const PAID_SYNC_ASSISTANT_STATUS_TTL_MS = 2800;
 const PAID_SYNC_QUEUE_PREVIEW_LIMIT = 6;
 const PENDING_DRAFT_BACKGROUND_SYNC_DEBOUNCE_MS = 650;
@@ -8702,12 +8703,25 @@ const App: React.FC = () => {
         }
 
         if (latestDraftBeforeConfirm.status !== 'PENDING_PAYMENT') {
-          const preconditionMessage = `Venda ainda não foi finalizada para pagamento. Draft em ${latestDraftBeforeConfirm.status} antes do confirm (stage local ${latestDraftLifecycleStage}).`;
-          await markJobAsFailed('Venda ainda não foi finalizada para pagamento.', {
-            message: preconditionMessage,
-            retryable: true,
-            statusCode: 409,
-          });
+          const preconditionAttempt = currentJob.attempts + 1;
+          const isTransitionalPreConfirmStage =
+            latestDraftLifecycleStage === 'FINALIZING' ||
+            latestDraftLifecycleStage === 'PENDING_CONFIRM';
+          const shouldRetryPrecondition =
+            isTransitionalPreConfirmStage &&
+            preconditionAttempt <= PENDING_PAID_SYNC_PRECONDITION_MAX_AUTO_RETRIES;
+          const preconditionMessage =
+            `Venda ainda não foi finalizada para pagamento. Draft em ${latestDraftBeforeConfirm.status} antes do confirm (stage local ${latestDraftLifecycleStage}; tentativa ${preconditionAttempt}/${PENDING_PAID_SYNC_PRECONDITION_MAX_AUTO_RETRIES}).`;
+          await markJobAsFailed(
+            shouldRetryPrecondition
+              ? 'Venda ainda não foi finalizada para pagamento.'
+              : 'Pré-condição de confirmação não atendida após tentativas curtas.',
+            {
+              message: preconditionMessage,
+              retryable: shouldRetryPrecondition,
+              statusCode: 409,
+            }
+          );
           return;
         }
 
