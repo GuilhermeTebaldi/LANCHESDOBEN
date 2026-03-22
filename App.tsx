@@ -2185,6 +2185,7 @@ const PENDING_PAID_SYNC_RETRY_STEPS_MS = [
   120_000,
   300_000,
 ] as const;
+const PENDING_PAID_SYNC_ORDER_SETTLE_RETRY_STEPS_MS = [1_200, 1_800, 2_600, 3_800, 5_500, 8_000] as const;
 const PENDING_PAID_SYNC_EMPTY_DRAFT_RECOVERY_DELAY_MS = 1800;
 const PENDING_PAID_SYNC_EMPTY_DRAFT_RECOVERY_MAX_ATTEMPTS = 5;
 const PENDING_PAID_SYNC_PRE_CONFIRM_SETTLE_MAX_ATTEMPTS = 6;
@@ -2352,6 +2353,27 @@ const getPendingPaidSyncRetryDelayMs = (attempts: number): number => {
     Math.max(0, safeAttempts - 1)
   );
   return PENDING_PAID_SYNC_RETRY_STEPS_MS[index];
+};
+
+const isPendingPaidSyncOrderSettleRetryMessage = (message: string): boolean => {
+  if (isConfirmBeforeFinalizeErrorMessage(message)) return true;
+  const normalized = message
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+  return normalized.includes('draft ainda nao visivel no estado mais recente antes de confirmar pagamento');
+};
+
+const getPendingPaidSyncRetryDelayForMessage = (attempts: number, message: string): number => {
+  const safeAttempts = Math.max(1, Math.floor(attempts));
+  if (!isPendingPaidSyncOrderSettleRetryMessage(message)) {
+    return getPendingPaidSyncRetryDelayMs(safeAttempts);
+  }
+  const index = Math.min(
+    PENDING_PAID_SYNC_ORDER_SETTLE_RETRY_STEPS_MS.length - 1,
+    Math.max(0, safeAttempts - 1)
+  );
+  return PENDING_PAID_SYNC_ORDER_SETTLE_RETRY_STEPS_MS[index];
 };
 
 const getPendingDraftBackgroundSyncRetryDelayMs = (attempts: number): number => {
@@ -8276,11 +8298,14 @@ const App: React.FC = () => {
           }
 
           const nextAttempts = currentJob.attempts + 1;
-          const retryDelayMs = getPendingPaidSyncRetryDelayMs(nextAttempts);
+          const retryDelayMs = getPendingPaidSyncRetryDelayForMessage(nextAttempts, message);
           recordRetryBackoffMs(retryDelayMs);
           const retryAt = new Date(Date.now() + retryDelayMs).toISOString();
           const nextFinalizeCommandId = createClientId('cmd');
           const nextConfirmCommandId = createClientId('cmd');
+          const retryPolicy = isPendingPaidSyncOrderSettleRetryMessage(message)
+            ? 'order_settle_short'
+            : 'default';
           const failedJob: PendingPaidSyncJob = {
             ...currentJob,
             finalizeCommandId: nextFinalizeCommandId,
@@ -8303,6 +8328,7 @@ const App: React.FC = () => {
               nextConfirmCommandId,
               attempts: failedJob.attempts,
               retryAt,
+              retryPolicy,
             }
           );
           replacePendingPaidSyncQueue([...pendingPaidSyncQueueRef.current, failedJob]);
