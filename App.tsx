@@ -2199,6 +2199,7 @@ const PENDING_PAID_SYNC_RETRY_STEPS_MS = [
 const PENDING_PAID_SYNC_ORDER_SETTLE_RETRY_STEPS_MS = [1_200, 1_800, 2_600, 3_800, 5_500, 8_000] as const;
 const PENDING_PAID_SYNC_EMPTY_DRAFT_RECOVERY_DELAY_MS = 1800;
 const PENDING_PAID_SYNC_EMPTY_DRAFT_RECOVERY_MAX_ATTEMPTS = 5;
+const PENDING_PAID_SYNC_QUEUE_EMPTY_DRAFT_MAX_RECOVERY_ATTEMPTS = 2;
 const PAID_SYNC_ASSISTANT_STATUS_TTL_MS = 2800;
 const DRAFT_PAYMENT_TRANSITION_GRACE_MS = 12_000;
 const DRAFT_REOPEN_CONFIRMATION_MS = 2_500;
@@ -6795,6 +6796,7 @@ const App: React.FC = () => {
         errorSink?: RunCommandErrorSink;
         failFastOnVersionConflict?: boolean;
         source?: PendingDraftAddsSource;
+        skipSnapshotApply?: boolean;
       } = {}
     ): Promise<boolean> => {
       hydratePendingDraftAdds();
@@ -7027,6 +7029,7 @@ const App: React.FC = () => {
             errorSink: options.errorSink,
             trackPendingState: false,
             failFastOnVersionConflict: options.failFastOnVersionConflict,
+            skipSnapshotApply: options.skipSnapshotApply,
           });
         } finally {
           const inFlight = pendingDraftAddsInFlightRef.current.get(currentRuntimeKey);
@@ -7148,6 +7151,7 @@ const App: React.FC = () => {
         errorSink?: RunCommandErrorSink;
         failFastOnVersionConflict?: boolean;
         source?: PendingDraftAddsSource;
+        skipSnapshotApply?: boolean;
       } = {}
     ): Promise<boolean> => {
       const normalizedDraftId = draftId.trim();
@@ -7959,6 +7963,7 @@ const App: React.FC = () => {
         errorSink: flushErrorSink,
         failFastOnVersionConflict: false,
         source: recoverySource,
+        skipSnapshotApply: true,
       });
       if (!flushed) {
         return {
@@ -8016,16 +8021,25 @@ const App: React.FC = () => {
           isPendingDraftAddExecutable(entry)
         );
         const recoveryAttempt = job.attempts + 1;
+        const reachedQueueEmptyRecoveryAttemptsLimit =
+          options.trigger === 'queue-empty-draft' &&
+          recoveryAttempt >= PENDING_PAID_SYNC_QUEUE_EMPTY_DRAFT_MAX_RECOVERY_ATTEMPTS;
         const reachedRecoveryAttemptsLimit =
           recoveryAttempt >= PENDING_PAID_SYNC_EMPTY_DRAFT_RECOVERY_MAX_ATTEMPTS;
-        if (!hasExecutableRecoveryEntries || reachedRecoveryAttemptsLimit) {
+        if (
+          !hasExecutableRecoveryEntries ||
+          reachedQueueEmptyRecoveryAttemptsLimit ||
+          reachedRecoveryAttemptsLimit
+        ) {
           clearRecoveryPendingDraftAddsForDraft(normalizedDraftId);
           return {
             ok: false,
             retryable: false,
             message: reachedRecoveryAttemptsLimit
               ? 'Draft permaneceu vazio após limite de recuperação automática.'
-              : 'Draft vazio sem itens executáveis para recuperação automática.',
+              : reachedQueueEmptyRecoveryAttemptsLimit
+                ? 'Draft permaneceu vazio após duas tentativas automáticas no fluxo principal.'
+                : 'Draft vazio sem itens executáveis para recuperação automática.',
             statusCode: 422,
           };
         }
@@ -8672,6 +8686,7 @@ const App: React.FC = () => {
                   errorSink: draftAddsErrorSink,
                   failFastOnVersionConflict: false,
                   source: 'visible',
+                  skipSnapshotApply: true,
                 }
               );
               if (!flushedVisible) {
@@ -8690,12 +8705,24 @@ const App: React.FC = () => {
                   errorSink: recoveryAddsErrorSink,
                   failFastOnVersionConflict: false,
                   source: 'recovery',
+                  skipSnapshotApply: true,
                 }
               );
               if (!flushedRecovery) {
                 await markJobAsFailed('Falha ao enviar itens pendentes da recuperação.', recoveryAddsErrorSink);
                 return;
               }
+            }
+            try {
+              const stateRefreshStartedAt = performance.now();
+              const refreshedStateAfterFlush = await fetchStateSnapshotControlled(currentJob.draftId);
+              applySnapshotForCurrentJob(
+                refreshedStateAfterFlush,
+                'pending_paid_refresh_after_flush'
+              );
+              recordStateRefreshMs(performance.now() - stateRefreshStartedAt);
+            } catch {
+              // best-effort refresh; fallback to local state below
             }
             currentServerDraft = saleDraftsRef.current.find((entry) => entry.id === currentJob.draftId);
             if (
