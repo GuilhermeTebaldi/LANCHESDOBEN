@@ -2187,6 +2187,8 @@ const PENDING_PAID_SYNC_RETRY_STEPS_MS = [
 ] as const;
 const PENDING_PAID_SYNC_EMPTY_DRAFT_RECOVERY_DELAY_MS = 1800;
 const PENDING_PAID_SYNC_EMPTY_DRAFT_RECOVERY_MAX_ATTEMPTS = 5;
+const PENDING_PAID_SYNC_PRE_CONFIRM_SETTLE_MAX_ATTEMPTS = 6;
+const PENDING_PAID_SYNC_PRE_CONFIRM_SETTLE_STEP_DELAYS_MS = [120, 180, 260, 360, 520] as const;
 const PAID_SYNC_ASSISTANT_STATUS_TTL_MS = 2800;
 const PAID_SYNC_QUEUE_PREVIEW_LIMIT = 6;
 const PENDING_DRAFT_BACKGROUND_SYNC_DEBOUNCE_MS = 650;
@@ -8549,12 +8551,8 @@ const App: React.FC = () => {
         let latestDraftBeforeConfirm = saleDraftsRef.current.find(
           (entry) => entry.id === currentJob.draftId
         );
-        const needsPreConfirmRefresh =
-          !latestDraftBeforeConfirm ||
-          (latestDraftBeforeConfirm.status !== 'PENDING_PAYMENT' &&
-            latestDraftBeforeConfirm.status !== 'PAID' &&
-            latestDraftBeforeConfirm.status !== 'CANCELLED');
-        if (needsPreConfirmRefresh) {
+        let latestDraftLifecycleStage = resolveDraftLifecycleStage(currentJob.draftId);
+        const refreshDraftBeforeConfirm = async (): Promise<boolean> => {
           try {
             const stateRefreshStartedAt = performance.now();
             const refreshedState = await fetchStateSnapshotControlled(currentJob.draftId);
@@ -8563,6 +8561,11 @@ const App: React.FC = () => {
               'pending_paid_refresh_before_confirm_state_validation'
             );
             recordStateRefreshMs(performance.now() - stateRefreshStartedAt);
+            latestDraftBeforeConfirm = saleDraftsRef.current.find(
+              (entry) => entry.id === currentJob.draftId
+            );
+            latestDraftLifecycleStage = resolveDraftLifecycleStage(currentJob.draftId);
+            return true;
           } catch (error) {
             await markJobAsFailed('Falha ao validar estado antes de confirmar pagamento.', {
               error,
@@ -8570,11 +8573,61 @@ const App: React.FC = () => {
               retryable: isRetryableSyncError(error),
               statusCode: error instanceof StateCommandSyncError ? error.statusCode : undefined,
             });
-            return;
+            return false;
           }
-          latestDraftBeforeConfirm = saleDraftsRef.current.find(
-            (entry) => entry.id === currentJob.draftId
+        };
+        const shouldKeepPreConfirmSettling = (): boolean => {
+          const status = latestDraftBeforeConfirm?.status;
+          if (!latestDraftBeforeConfirm) return true;
+          if (status === 'DRAFT') return true;
+          return (
+            latestDraftLifecycleStage === 'FINALIZING' ||
+            latestDraftLifecycleStage === 'PENDING_CONFIRM'
           );
+        };
+
+        for (
+          let settleAttempt = 0;
+          settleAttempt < PENDING_PAID_SYNC_PRE_CONFIRM_SETTLE_MAX_ATTEMPTS;
+          settleAttempt += 1
+        ) {
+          const currentStatus = latestDraftBeforeConfirm?.status;
+          if (
+            currentStatus === 'PENDING_PAYMENT' ||
+            currentStatus === 'PAID' ||
+            currentStatus === 'CANCELLED'
+          ) {
+            break;
+          }
+
+          const refreshed = await refreshDraftBeforeConfirm();
+          if (!refreshed) return;
+
+          const refreshedStatus = latestDraftBeforeConfirm?.status;
+          if (
+            refreshedStatus === 'PENDING_PAYMENT' ||
+            refreshedStatus === 'PAID' ||
+            refreshedStatus === 'CANCELLED'
+          ) {
+            break;
+          }
+          if (!shouldKeepPreConfirmSettling()) {
+            break;
+          }
+          if (settleAttempt >= PENDING_PAID_SYNC_PRE_CONFIRM_SETTLE_MAX_ATTEMPTS - 1) {
+            break;
+          }
+
+          const settleDelayMs =
+            PENDING_PAID_SYNC_PRE_CONFIRM_SETTLE_STEP_DELAYS_MS[
+              Math.min(
+                settleAttempt,
+                PENDING_PAID_SYNC_PRE_CONFIRM_SETTLE_STEP_DELAYS_MS.length - 1
+              )
+            ];
+          await new Promise<void>((resolve) => {
+            window.setTimeout(resolve, settleDelayMs);
+          });
         }
 
         if (
@@ -8602,7 +8655,7 @@ const App: React.FC = () => {
 
         if (!latestDraftBeforeConfirm) {
           const missingDraftMessage =
-            'Draft não encontrado no snapshot mais recente antes de confirmar pagamento.';
+            `Draft não encontrado no snapshot mais recente antes de confirmar pagamento (stage local ${latestDraftLifecycleStage}).`;
           await markJobAsFailed('Draft ainda não visível no estado mais recente. Tentando novamente.', {
             message: missingDraftMessage,
             retryable: true,
@@ -8612,7 +8665,7 @@ const App: React.FC = () => {
         }
 
         if (latestDraftBeforeConfirm.status !== 'PENDING_PAYMENT') {
-          const preconditionMessage = `Venda ainda não foi finalizada para pagamento. Draft em ${latestDraftBeforeConfirm.status} antes do confirm.`;
+          const preconditionMessage = `Venda ainda não foi finalizada para pagamento. Draft em ${latestDraftBeforeConfirm.status} antes do confirm (stage local ${latestDraftLifecycleStage}).`;
           await markJobAsFailed('Venda ainda não foi finalizada para pagamento.', {
             message: preconditionMessage,
             retryable: true,
@@ -8900,6 +8953,7 @@ const App: React.FC = () => {
     markPaymentFlowTelemetryStageDuration,
     markPaymentFlowTelemetryProgress,
     runCommandWithSync,
+    resolveDraftLifecycleStage,
     setDraftLifecycleStage,
     setPaidSyncAssistantActivity,
     setDraftSyncInProgress,
