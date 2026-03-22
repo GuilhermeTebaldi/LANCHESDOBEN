@@ -113,6 +113,23 @@ export type StateCommand =
       }>;
     })
   | (BaseCommand & {
+      type: 'SALE_DRAFT_FINALIZE_AND_CONFIRM_PAID';
+      draftId: string;
+      paymentMethod: SalePaymentMethod;
+      cashReceived?: number;
+      saleOrigin?: SaleOrigin;
+      appOrderTotal?: number;
+      splitMode?: SalePaymentSplitMode;
+      splitCount?: number;
+      splitPayments?: Array<{
+        sequence?: number;
+        label?: string;
+        method: SaleBasePaymentMethod;
+        amount: number;
+        cashReceived?: number;
+      }>;
+    })
+  | (BaseCommand & {
       type: 'SALE_DRAFT_CONFIRM_PAID';
       draftId: string;
     })

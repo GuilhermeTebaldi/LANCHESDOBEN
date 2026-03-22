@@ -25,7 +25,10 @@ const createId = (prefix: string): string =>
   `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 
 const logStateCommandPerf = (
-  commandType: 'SALE_DRAFT_FINALIZE' | 'SALE_DRAFT_CONFIRM_PAID',
+  commandType:
+    | 'SALE_DRAFT_FINALIZE'
+    | 'SALE_DRAFT_CONFIRM_PAID'
+    | 'SALE_DRAFT_FINALIZE_AND_CONFIRM_PAID',
   payload: Record<string, unknown>
 ): void => {
   // Keep perf logs explicit for terminal payment flow diagnostics in production.
@@ -948,6 +951,38 @@ const applySaleDraftFinalize = (
   });
 };
 
+const applySaleDraftFinalizeAndConfirmPaid = (
+  state: FrontAppState,
+  command: Extract<StateCommandInput, { type: 'SALE_DRAFT_FINALIZE_AND_CONFIRM_PAID' }>
+) => {
+  const startedAt = Date.now();
+
+  applySaleDraftFinalize(state, {
+    type: 'SALE_DRAFT_FINALIZE',
+    draftId: command.draftId,
+    paymentMethod: command.paymentMethod,
+    cashReceived: command.cashReceived,
+    saleOrigin: command.saleOrigin,
+    appOrderTotal: command.appOrderTotal,
+    splitMode: command.splitMode,
+    splitCount: command.splitCount,
+    splitPayments: command.splitPayments,
+    commandId: command.commandId,
+  });
+
+  applySaleDraftConfirmPaid(state, {
+    type: 'SALE_DRAFT_CONFIRM_PAID',
+    draftId: command.draftId,
+    commandId: command.commandId,
+  });
+
+  logStateCommandPerf('SALE_DRAFT_FINALIZE_AND_CONFIRM_PAID', {
+    draftId: command.draftId,
+    paymentMethod: command.paymentMethod,
+    totalMs: Date.now() - startedAt,
+  });
+};
+
 const applySaleDraftConfirmPaid = (
   state: FrontAppState,
   command: Extract<StateCommandInput, { type: 'SALE_DRAFT_CONFIRM_PAID' }>
@@ -1636,6 +1671,9 @@ export const applyStateCommand = (
     case 'SALE_DRAFT_FINALIZE':
       applySaleDraftFinalize(state, command);
       return state;
+    case 'SALE_DRAFT_FINALIZE_AND_CONFIRM_PAID':
+      applySaleDraftFinalizeAndConfirmPaid(state, command);
+      return state;
     case 'SALE_DRAFT_CONFIRM_PAID':
       applySaleDraftConfirmPaid(state, command);
       return state;
@@ -1778,6 +1816,7 @@ export const applyStateCommand = (
 const ARCHIVE_MUTATING_COMMAND_TYPES = new Set<StateCommandInput['type']>([
   'SALE_REGISTER',
   'SALE_DRAFT_CONFIRM_PAID',
+  'SALE_DRAFT_FINALIZE_AND_CONFIRM_PAID',
   'SALE_UNDO_LAST',
   'SALE_UNDO_BY_ID',
   'INGREDIENT_STOCK_MOVE',

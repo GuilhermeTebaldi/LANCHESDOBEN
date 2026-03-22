@@ -2250,7 +2250,11 @@ const getLowerPriority = (priority: CommandPriority): CommandPriority => {
 };
 
 const getCommandExecutionPriority = (command: StateCommand): CommandPriority => {
-  if (command.type === 'SALE_DRAFT_CONFIRM_PAID' || command.type === 'SALE_DRAFT_FINALIZE') {
+  if (
+    command.type === 'SALE_DRAFT_CONFIRM_PAID' ||
+    command.type === 'SALE_DRAFT_FINALIZE' ||
+    command.type === 'SALE_DRAFT_FINALIZE_AND_CONFIRM_PAID'
+  ) {
     return 'CRITICAL';
   }
   if (
@@ -2275,6 +2279,7 @@ const getCommandExecutionPriority = (command: StateCommand): CommandPriority => 
 
 const isSafeCommandTypeForFallbackDedupe = (commandType: StateCommand['type']): boolean =>
   commandType === 'SALE_DRAFT_FINALIZE' ||
+  commandType === 'SALE_DRAFT_FINALIZE_AND_CONFIRM_PAID' ||
   commandType === 'SALE_DRAFT_CONFIRM_PAID' ||
   commandType === 'SALE_DRAFT_REMOVE_ITEM' ||
   commandType === 'SALE_DRAFT_CANCEL';
@@ -3852,6 +3857,12 @@ const App: React.FC = () => {
         return `draft_status_${draft.status.toLowerCase()}`;
       }
       return null;
+    }
+
+    if (command.type === 'SALE_DRAFT_FINALIZE_AND_CONFIRM_PAID') {
+      return draft.status === 'PAID' || draft.status === 'CANCELLED'
+        ? `draft_status_${draft.status.toLowerCase()}`
+        : null;
     }
 
     if (command.type === 'SALE_DRAFT_CONFIRM_PAID') {
@@ -8808,6 +8819,111 @@ const App: React.FC = () => {
           draftId: currentJob.draftId,
           commandId: currentJob.confirmCommandId,
         };
+        const buildAtomicFinalizeAndConfirmCommand = (): StateCommand => {
+          const paymentSnapshot = currentJob.snapshot;
+          const appOrderTotalParsed = isAppSaleOrigin(paymentSnapshot.saleOrigin)
+            ? parseMoneyInput(paymentSnapshot.appOrderTotalInput)
+            : null;
+          const cashReceivedParsed =
+            paymentSnapshot.paymentMethod === 'DINHEIRO'
+              ? parseMoneyInput(paymentSnapshot.cashReceivedInput)
+              : null;
+          const splitPayments =
+            paymentSnapshot.paymentMethod === 'DIVIDIDO'
+              ? paymentSnapshot.splitCommitted
+                  .map((entry, index) => ({
+                    sequence:
+                      Number.isFinite(Number(entry.sequence)) && Number(entry.sequence) > 0
+                        ? Math.floor(Number(entry.sequence))
+                        : index + 1,
+                    label: entry.label?.trim() || `Parcela ${index + 1}`,
+                    method: entry.method,
+                    amount: roundMoney(Math.max(0, Number(entry.amount) || 0)),
+                    cashReceived:
+                      entry.method === 'DINHEIRO' && Number.isFinite(Number(entry.cashReceived))
+                        ? roundMoney(Number(entry.cashReceived))
+                        : undefined,
+                  }))
+                  .filter((entry) => entry.amount > 0)
+              : undefined;
+
+          return {
+            type: 'SALE_DRAFT_FINALIZE_AND_CONFIRM_PAID',
+            draftId: currentJob.draftId,
+            commandId: createClientId('cmd'),
+            paymentMethod: paymentSnapshot.paymentMethod,
+            cashReceived:
+              paymentSnapshot.paymentMethod === 'DINHEIRO'
+                ? (cashReceivedParsed ?? undefined)
+                : undefined,
+            saleOrigin: paymentSnapshot.saleOrigin,
+            appOrderTotal: isAppSaleOrigin(paymentSnapshot.saleOrigin)
+              ? (appOrderTotalParsed ?? undefined)
+              : undefined,
+            splitMode:
+              paymentSnapshot.paymentMethod === 'DIVIDIDO'
+                ? (paymentSnapshot.splitMode ?? undefined)
+                : undefined,
+            splitCount:
+              paymentSnapshot.paymentMethod === 'DIVIDIDO'
+                ? (paymentSnapshot.splitCount ?? undefined)
+                : undefined,
+            splitPayments:
+              paymentSnapshot.paymentMethod === 'DIVIDIDO' ? splitPayments : undefined,
+          };
+        };
+        const tryAtomicFinalizeAndConfirmFallback = async (
+          confirmErrorSink: RunCommandErrorSink
+        ): Promise<boolean> => {
+          const confirmErrorMessage = confirmErrorSink.message || '';
+          const isOrderConflict =
+            confirmErrorSink.statusCode === 409 &&
+            isConfirmBeforeFinalizeErrorMessage(confirmErrorMessage);
+          if (!isOrderConflict) return false;
+
+          const atomicCommand = buildAtomicFinalizeAndConfirmCommand();
+          const atomicErrorSink: RunCommandErrorSink = {};
+          const atomicallyConfirmed = await runCommandWithSync(
+            atomicCommand,
+            undefined,
+            {
+              skipOfflineQueue: true,
+              trackPendingState: false,
+              silentSuccessNotification: true,
+              silentErrorNotification: true,
+              errorSink: atomicErrorSink,
+              failFastOnVersionConflict: false,
+              bypassGlobalCommandQueue: true,
+              onSnapshotAppliedMs: recordSnapshotApplyMs,
+            }
+          );
+          if (atomicallyConfirmed) {
+            pushOperationalEvent(
+              'QUEUE_HEALTH',
+              'Fallback atômico de FINALIZE+CONFIRM resolveu conflito de ordem do confirm.',
+              {
+                draftId: currentJob.draftId,
+                originalCommandId: confirmCommand.commandId || null,
+                fallbackCommandId: atomicCommand.commandId || null,
+              }
+            );
+            return true;
+          }
+
+          if (atomicErrorSink.error !== undefined) {
+            confirmErrorSink.error = atomicErrorSink.error;
+          }
+          if (atomicErrorSink.message !== undefined) {
+            confirmErrorSink.message = atomicErrorSink.message;
+          }
+          if (atomicErrorSink.retryable !== undefined) {
+            confirmErrorSink.retryable = atomicErrorSink.retryable;
+          }
+          if (atomicErrorSink.statusCode !== undefined) {
+            confirmErrorSink.statusCode = atomicErrorSink.statusCode;
+          }
+          return false;
+        };
 
         const confirmStartedAt = performance.now();
         try {
@@ -8828,8 +8944,12 @@ const App: React.FC = () => {
               }
             );
             if (!confirmed) {
-              await markJobAsFailed('Falha ao confirmar pagamento.', confirmErrorSink);
-              return;
+              const recoveredByAtomicFallback =
+                await tryAtomicFinalizeAndConfirmFallback(confirmErrorSink);
+              if (!recoveredByAtomicFallback) {
+                await markJobAsFailed('Falha ao confirmar pagamento.', confirmErrorSink);
+                return;
+              }
             }
           } else {
             let asyncJobId: string | null = null;

@@ -124,6 +124,19 @@ const saleDraftFinalizeCommandSchema = baseCommandSchema
     splitPayments: z.array(salePaymentSplitItemSchema).min(1).max(99).optional(),
   });
 
+const saleDraftFinalizeAndConfirmPaidCommandSchema = baseCommandSchema
+  .extend({
+    type: z.literal('SALE_DRAFT_FINALIZE_AND_CONFIRM_PAID'),
+    draftId: idSchema,
+    paymentMethod: salePaymentMethodSchema,
+    cashReceived: z.coerce.number().finite().min(0).optional(),
+    saleOrigin: saleOriginSchema.optional(),
+    appOrderTotal: z.coerce.number().finite().positive().optional(),
+    splitMode: salePaymentSplitModeSchema.optional(),
+    splitCount: z.coerce.number().int().min(1).max(99).optional(),
+    splitPayments: z.array(salePaymentSplitItemSchema).min(1).max(99).optional(),
+  });
+
 const saleDraftConfirmPaidCommandSchema = baseCommandSchema.extend({
   type: z.literal('SALE_DRAFT_CONFIRM_PAID'),
   draftId: idSchema,
@@ -251,6 +264,7 @@ export const stateCommandSchema = z.discriminatedUnion('type', [
   saleDraftUpdateItemCommandSchema,
   saleDraftRemoveItemCommandSchema,
   saleDraftFinalizeCommandSchema,
+  saleDraftFinalizeAndConfirmPaidCommandSchema,
   saleDraftConfirmPaidCommandSchema,
   saleDraftCancelCommandSchema,
   saleUndoCommandSchema,

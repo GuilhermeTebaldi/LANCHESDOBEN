@@ -113,7 +113,9 @@ const getApplyCommandLatestRetryDelayMs = (attempt: number): number => {
 };
 
 const isTerminalPaymentCommand = (command: StateCommandInput): boolean =>
-  command.type === 'SALE_DRAFT_FINALIZE' || command.type === 'SALE_DRAFT_CONFIRM_PAID';
+  command.type === 'SALE_DRAFT_FINALIZE' ||
+  command.type === 'SALE_DRAFT_CONFIRM_PAID' ||
+  command.type === 'SALE_DRAFT_FINALIZE_AND_CONFIRM_PAID';
 
 const logStateServicePerf = (
   event: string,
@@ -612,7 +614,10 @@ export class StateService {
       const shouldUpdateArchive = commandTouchesArchiveState(command.type);
       const persistStartedAt = shouldTrackPerf ? Date.now() : 0;
       const shouldPersistConfirmPaidPatch =
-        !!current && command.type === 'SALE_DRAFT_CONFIRM_PAID' && shouldUpdateArchive;
+        !!current &&
+        (command.type === 'SALE_DRAFT_CONFIRM_PAID' ||
+          command.type === 'SALE_DRAFT_FINALIZE_AND_CONFIRM_PAID') &&
+        shouldUpdateArchive;
       const shouldPersistFinalizeDraftOnly =
         !!current && command.type === 'SALE_DRAFT_FINALIZE' && !shouldUpdateArchive;
       const persistMode = !current

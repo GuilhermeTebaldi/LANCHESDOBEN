@@ -159,7 +159,9 @@ const getRetryDelayMs = (attempt: number): number => {
 };
 
 const isTerminalPaymentQueueCommand = (commandType: StateCommandInput['type']): boolean =>
-  commandType === 'SALE_DRAFT_CONFIRM_PAID' || commandType === 'SALE_DRAFT_FINALIZE';
+  commandType === 'SALE_DRAFT_CONFIRM_PAID' ||
+  commandType === 'SALE_DRAFT_FINALIZE' ||
+  commandType === 'SALE_DRAFT_FINALIZE_AND_CONFIRM_PAID';
 
 const logStateCommandQueuePerf = (event: string, payload: Record<string, unknown>): void => {
   // eslint-disable-next-line no-console

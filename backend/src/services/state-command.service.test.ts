@@ -71,6 +71,7 @@ test('commandTouchesArchiveState classifies hot-only commands safely', () => {
 
   assert.equal(commandTouchesArchiveState('SALE_REGISTER'), true);
   assert.equal(commandTouchesArchiveState('SALE_DRAFT_CONFIRM_PAID'), true);
+  assert.equal(commandTouchesArchiveState('SALE_DRAFT_FINALIZE_AND_CONFIRM_PAID'), true);
   assert.equal(commandTouchesArchiveState('CASH_EXPENSE'), true);
   assert.equal(commandTouchesArchiveState('CLOSE_DAY'), true);
 });
@@ -213,6 +214,30 @@ test('draft confirm paid is idempotent and does not double debit stock', () => {
   assert.equal(retriedPaid.ingredients.find((entry) => entry.id === 'i-sauce')?.currentStock, 180);
   assert.equal(retriedPaid.sales.length, 1);
   assert.equal(retriedPaid.stockEntries.length, 3);
+});
+
+test('draft finalize and confirm paid command commits atomically', () => {
+  const base = createBaseState();
+  const withDraft = applyStateCommand(base, { type: 'SALE_DRAFT_CREATE', draftId: 'draft-atomic' });
+  const withItem = applyStateCommand(withDraft, {
+    type: 'SALE_DRAFT_ADD_ITEM',
+    draftId: 'draft-atomic',
+    productId: 'p-burger',
+    quantity: 2,
+  });
+  const paid = applyStateCommand(withItem, {
+    type: 'SALE_DRAFT_FINALIZE_AND_CONFIRM_PAID',
+    draftId: 'draft-atomic',
+    paymentMethod: 'PIX',
+  });
+
+  assert.equal(paid.saleDrafts?.[0]?.status, 'PAID');
+  assert.equal(paid.saleDrafts?.[0]?.stockDebited, true);
+  assert.equal(paid.sales.length, 1);
+  assert.equal(paid.stockEntries.length, 3);
+  assert.equal(paid.ingredients.find((entry) => entry.id === 'i-bread')?.currentStock, 48);
+  assert.equal(paid.ingredients.find((entry) => entry.id === 'i-meat')?.currentStock, 38);
+  assert.equal(paid.ingredients.find((entry) => entry.id === 'i-sauce')?.currentStock, 160);
 });
 
 test('draft finalize is idempotent after payment and does not reopen paid draft', () => {
