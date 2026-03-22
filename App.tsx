@@ -2462,6 +2462,7 @@ const App: React.FC = () => {
   const draftOperationEpochRef = useRef<Map<string, number>>(new Map());
   const draftPaymentTransitionGraceUntilRef = useRef<Map<string, number>>(new Map());
   const draftTerminalVisualLockUntilRef = useRef<Map<string, number>>(new Map());
+  const retiredEditableDraftIdsRef = useRef<Set<string>>(new Set());
   const draftReopenObservedAtRef = useRef<Map<string, number>>(new Map());
   const isDraftLifecycleHydratedRef = useRef(false);
   const lastOperationalHealthReportAtRef = useRef(0);
@@ -3056,6 +3057,12 @@ const App: React.FC = () => {
     []
   );
 
+  const isDraftRetiredFromEditableFlow = useCallback((draftId: string): boolean => {
+    const normalizedDraftId = draftId.trim();
+    if (!normalizedDraftId) return false;
+    return retiredEditableDraftIdsRef.current.has(normalizedDraftId);
+  }, []);
+
   const resolveDraftLifecycleStage = useCallback((draftId: string): DraftLifecycleStage => {
     hydrateDraftLifecycleState();
     const normalizedDraftId = draftId.trim();
@@ -3064,6 +3071,12 @@ const App: React.FC = () => {
     const explicitStage = draftLifecycleStageRef.current.get(normalizedDraftId);
     if (explicitStage) {
       return explicitStage;
+    }
+    if (retiredEditableDraftIdsRef.current.has(normalizedDraftId)) {
+      const retiredServerDraft = saleDraftsRef.current.find((entry) => entry.id === normalizedDraftId);
+      if (retiredServerDraft?.status === 'PAID') return 'PAID';
+      if (retiredServerDraft?.status === 'CANCELLED') return 'CANCELLED';
+      return 'PENDING_CONFIRM';
     }
     if (syncingPaidDraftIdsRef.current.has(normalizedDraftId)) {
       return 'PENDING_CONFIRM';
@@ -3126,6 +3139,7 @@ const App: React.FC = () => {
         draftReopenObservedAtRef.current.delete(normalizedDraftId);
       }
       if (stage === 'FINALIZING' || stage === 'PENDING_CONFIRM') {
+        retiredEditableDraftIdsRef.current.add(normalizedDraftId);
         draftPaymentTransitionGraceUntilRef.current.set(
           normalizedDraftId,
           nowMs + DRAFT_PAYMENT_TRANSITION_GRACE_MS
@@ -3138,6 +3152,7 @@ const App: React.FC = () => {
           )
         );
       } else if (stage === 'PAID' || stage === 'CANCELLED') {
+        retiredEditableDraftIdsRef.current.add(normalizedDraftId);
         draftPaymentTransitionGraceUntilRef.current.delete(normalizedDraftId);
         draftReopenObservedAtRef.current.delete(normalizedDraftId);
         draftTerminalVisualLockUntilRef.current.set(
@@ -3148,6 +3163,7 @@ const App: React.FC = () => {
           )
         );
       } else if (stage === 'OPEN') {
+        retiredEditableDraftIdsRef.current.delete(normalizedDraftId);
         draftTerminalVisualLockUntilRef.current.delete(normalizedDraftId);
         if (options.reason !== 'server_reopened_draft') {
           draftPaymentTransitionGraceUntilRef.current.delete(normalizedDraftId);
@@ -4928,7 +4944,9 @@ const App: React.FC = () => {
     const mergedServerDrafts = saleDrafts.map((draft) =>
       mergeDraft(
         draft,
-        isDraftLifecycleLocked(draft.id) || isDraftTerminalVisualLocked(draft.id)
+        isDraftLifecycleLocked(draft.id) ||
+          isDraftTerminalVisualLocked(draft.id) ||
+          isDraftRetiredFromEditableFlow(draft.id)
           ? []
           : pendingDraftAddsByDraft[draft.id] || []
       )
@@ -4951,6 +4969,7 @@ const App: React.FC = () => {
           countVisiblePendingDraftAdds(entries) > 0 &&
           !isDraftLifecycleLocked(draftId) &&
           !isDraftTerminalVisualLocked(draftId) &&
+          !isDraftRetiredFromEditableFlow(draftId) &&
           !serverDraftIds.has(draftId) &&
           !knownPersistedDraftIds.has(draftId)
       )
@@ -4997,6 +5016,7 @@ const App: React.FC = () => {
     optimisticRemovedDraftItemsRevision,
     draftLifecycleRevision,
     isDraftLifecycleLocked,
+    isDraftRetiredFromEditableFlow,
     isDraftTerminalVisualLocked,
     pendingDraftAddsByDraft,
     products,
@@ -5142,6 +5162,7 @@ const App: React.FC = () => {
         if (queuedDraftIds.has(draft.id)) return false;
         if (isDraftLifecycleLocked(draft.id)) return false;
         if (isDraftTerminalVisualLocked(draft.id)) return false;
+        if (isDraftRetiredFromEditableFlow(draft.id)) return false;
         if (draft.status !== 'DRAFT' && draft.status !== 'PENDING_PAYMENT') return false;
         const pendingLocalItemsCount = countVisiblePendingDraftAdds(
           pendingDraftAddsByDraft[draft.id] || []
@@ -5153,6 +5174,7 @@ const App: React.FC = () => {
       draftLifecycleRevision,
       failedPaidSyncQueue,
       isDraftLifecycleLocked,
+      isDraftRetiredFromEditableFlow,
       isDraftTerminalVisualLocked,
       pendingDraftAddsByDraft,
       pendingPaidSyncQueueSnapshot,
@@ -5197,6 +5219,13 @@ const App: React.FC = () => {
     const nowMs = Date.now();
     const draftReopenObservedAt = draftReopenObservedAtRef.current;
     const knownDraftIds = new Set<string>();
+    const knownPersistedDraftIds = new Set<string>();
+    [...sales, ...globalSales, ...globalCancelledSales].forEach((entry) => {
+      const saleDraftId = typeof entry.saleDraftId === 'string' ? entry.saleDraftId.trim() : '';
+      if (saleDraftId) {
+        knownPersistedDraftIds.add(saleDraftId);
+      }
+    });
 
     saleDrafts.forEach((draft) => {
       const normalizedDraftId = draft.id.trim();
@@ -5217,6 +5246,7 @@ const App: React.FC = () => {
         });
       } else if (draft.status === 'DRAFT') {
         if (!normalizedDraftId) return;
+        const hasPersistedTerminalEvidence = knownPersistedDraftIds.has(normalizedDraftId);
         const transitionGraceUntilMs =
           draftPaymentTransitionGraceUntilRef.current.get(normalizedDraftId) || 0;
         const hasRecentTransitionGrace = transitionGraceUntilMs > nowMs;
@@ -5224,15 +5254,23 @@ const App: React.FC = () => {
           draftPaymentTransitionGraceUntilRef.current.delete(normalizedDraftId);
         }
         const hasTerminalVisualLock = isDraftTerminalVisualLocked(normalizedDraftId, nowMs);
+        const isRetiredFromEditableFlow = isDraftRetiredFromEditableFlow(normalizedDraftId);
         const hasTerminalProcessingInFlight =
           syncingDraftIds.has(normalizedDraftId) ||
           queuedDraftIds.has(normalizedDraftId) ||
           runningDraftIds.has(normalizedDraftId);
-        if (hasRecentTransitionGrace || hasTerminalProcessingInFlight || hasTerminalVisualLock) {
+        const hasServerDraftItems = Array.isArray(draft.items) && draft.items.length > 0;
+        if (
+          hasRecentTransitionGrace ||
+          hasTerminalProcessingInFlight ||
+          hasTerminalVisualLock ||
+          hasPersistedTerminalEvidence ||
+          !hasServerDraftItems
+        ) {
           draftReopenObservedAt.delete(normalizedDraftId);
           return;
         }
-        if (resolveDraftLifecycleStage(normalizedDraftId) === 'OPEN') {
+        if (!isRetiredFromEditableFlow && resolveDraftLifecycleStage(normalizedDraftId) === 'OPEN') {
           draftReopenObservedAt.delete(normalizedDraftId);
           return;
         }
@@ -5255,6 +5293,23 @@ const App: React.FC = () => {
         draftReopenObservedAt.delete(draftId);
       }
     });
+    retiredEditableDraftIdsRef.current.forEach((draftId) => {
+      const hasVisibleLocalPending =
+        countVisiblePendingDraftAdds(pendingDraftAddsRef.current[draftId] || []) > 0;
+      const hasVisibleRecoveryPending =
+        countVisiblePendingDraftAdds(recoveryPendingDraftAddsRef.current[draftId] || []) > 0;
+      const isKnownOrInFlight =
+        knownDraftIds.has(draftId) ||
+        knownPersistedDraftIds.has(draftId) ||
+        syncingDraftIds.has(draftId) ||
+        queuedDraftIds.has(draftId) ||
+        runningDraftIds.has(draftId) ||
+        hasVisibleLocalPending ||
+        hasVisibleRecoveryPending;
+      if (!isKnownOrInFlight) {
+        retiredEditableDraftIdsRef.current.delete(draftId);
+      }
+    });
     draftTerminalVisualLockUntilRef.current.forEach((lockUntilMs, draftId) => {
       const isKnownOrInFlight =
         knownDraftIds.has(draftId) ||
@@ -5266,10 +5321,14 @@ const App: React.FC = () => {
       }
     });
   }, [
+    globalCancelledSales,
+    globalSales,
     failedPaidSyncQueue,
+    isDraftRetiredFromEditableFlow,
     pendingPaidSyncQueueSnapshot,
     resolveDraftLifecycleStage,
     saleDrafts,
+    sales,
     setDraftLifecycleStage,
     isDraftTerminalVisualLocked,
     syncingPaidDraftIds,
@@ -5340,6 +5399,7 @@ const App: React.FC = () => {
     const isDraftQueuedForPaidSync = (draftId: string): boolean => {
       if (isDraftLifecycleLocked(draftId)) return true;
       if (isDraftTerminalVisualLocked(draftId)) return true;
+      if (isDraftRetiredFromEditableFlow(draftId)) return true;
       if (syncingPaidDraftIdsRef.current.has(draftId)) return true;
       if (pendingPaidSyncQueueRef.current.some((job) => job.draftId === draftId)) return true;
       if (failedPaidSyncQueueRef.current.some((job) => job.draftId === draftId)) return true;
@@ -5389,7 +5449,7 @@ const App: React.FC = () => {
     }
 
     return null;
-  }, [isDraftLifecycleLocked, isDraftTerminalVisualLocked]);
+  }, [isDraftLifecycleLocked, isDraftRetiredFromEditableFlow, isDraftTerminalVisualLocked]);
 
   const ensureActiveDraft = useCallback(
     async (customerType: SaleCustomerType = 'BALCAO'): Promise<string | null> => {
