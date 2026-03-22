@@ -9219,6 +9219,116 @@ const App: React.FC = () => {
   useEffect(() => {
     if (!isAccessVerified) return;
     if (!isFailedPaidSyncQueueHydratedRef.current) return;
+    if (failedPaidSyncQueueRef.current.length === 0) return;
+
+    const emptyDraftFailedJobs = failedPaidSyncQueueRef.current.filter((job) =>
+      isDraftEmptyErrorMessage(job.lastError || '')
+    );
+    if (emptyDraftFailedJobs.length === 0) return;
+
+    let nextFailedQueue = [...failedPaidSyncQueueRef.current];
+    let movedToPending = 0;
+    let reconciledTerminal = 0;
+    let droppedOrphan = 0;
+
+    emptyDraftFailedJobs.forEach((job) => {
+      clearFailedPaidSyncAutoRetryState(job.id);
+      nextFailedQueue = nextFailedQueue.filter((entry) => entry.id !== job.id);
+
+      const serverDraft = saleDraftsRef.current.find((draft) => draft.id === job.draftId);
+      if (serverDraft && (serverDraft.status === 'PAID' || serverDraft.status === 'CANCELLED')) {
+        completePaymentFlowTelemetry(job.draftId, {
+          retries: job.attempts,
+          hadReconciliation: true,
+        });
+        setDraftSyncInProgress(job.draftId, false);
+        cleanupDraftOperationalArtifacts(job.draftId);
+        clearRecoveryPendingDraftAddsForDraft(job.draftId);
+        reconciledTerminal += 1;
+        return;
+      }
+
+      const serverHasItems = Array.isArray(serverDraft?.items) && serverDraft.items.length > 0;
+      const snapshotHasItems =
+        Array.isArray(job.snapshot?.draft?.items) && job.snapshot.draft.items.length > 0;
+
+      if (!snapshotHasItems && !serverHasItems) {
+        setDraftSyncInProgress(job.draftId, false);
+        setDraftLifecycleStage(job.draftId, 'OPEN', {
+          reason: 'failed_empty_draft_orphan_cleared',
+          bumpEpoch: false,
+        });
+        clearRecoveryPendingDraftAddsForDraft(job.draftId);
+        droppedOrphan += 1;
+        return;
+      }
+
+      const safeSnapshot = serverHasItems
+        ? buildAutoRequeuePaymentSnapshot(serverDraft!)
+        : clonePaymentCommitSnapshot(job.snapshot);
+      if (!safeSnapshot) {
+        setDraftSyncInProgress(job.draftId, false);
+        setDraftLifecycleStage(job.draftId, 'OPEN', {
+          reason: 'failed_empty_draft_invalid_snapshot_cleared',
+          bumpEpoch: false,
+        });
+        clearRecoveryPendingDraftAddsForDraft(job.draftId);
+        droppedOrphan += 1;
+        return;
+      }
+
+      enqueuePendingPaidSyncJob({
+        ...job,
+        snapshot: safeSnapshot,
+        finalizeCommandId: createClientId('cmd'),
+        confirmCommandId: createClientId('cmd'),
+        attempts: 0,
+        nextAttemptAt: undefined,
+        lastError: undefined,
+      });
+      movedToPending += 1;
+    });
+
+    replaceFailedPaidSyncQueue(nextFailedQueue);
+
+    if (movedToPending > 0) {
+      requestPendingPaidSyncProcessing('failed-empty-draft-migration');
+    }
+
+    if (movedToPending > 0 || reconciledTerminal > 0 || droppedOrphan > 0) {
+      pushOperationalEvent(
+        'QUEUE_HEALTH',
+        'Falhas antigas de carrinho vazio foram reconciliadas automaticamente.',
+        {
+          migratedJobs: emptyDraftFailedJobs.map((job) => ({
+            id: job.id,
+            draftId: job.draftId,
+          })),
+          movedToPending,
+          reconciledTerminal,
+          droppedOrphan,
+        }
+      );
+    }
+  }, [
+    clearFailedPaidSyncAutoRetryState,
+    clearRecoveryPendingDraftAddsForDraft,
+    cleanupDraftOperationalArtifacts,
+    completePaymentFlowTelemetry,
+    enqueuePendingPaidSyncJob,
+    failedPaidSyncQueue,
+    isAccessVerified,
+    pushOperationalEvent,
+    replaceFailedPaidSyncQueue,
+    requestPendingPaidSyncProcessing,
+    saleDrafts,
+    setDraftLifecycleStage,
+    setDraftSyncInProgress,
+  ]);
+
+  useEffect(() => {
+    if (!isAccessVerified) return;
+    if (!isFailedPaidSyncQueueHydratedRef.current) return;
 
     const activeFailedIds = new Set(failedPaidSyncQueue.map((job) => job.id));
     let shouldRefreshAutoRetryUi = false;
