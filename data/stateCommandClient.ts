@@ -41,6 +41,7 @@ interface StateCommandSyncErrorOptions {
 
 interface RunStateCommandOptions {
   failFastOnVersionConflict?: boolean;
+  responseMode?: 'snapshot' | 'headers-only';
 }
 
 export class StateCommandSyncError extends Error {
@@ -770,7 +771,7 @@ export const warmupStateWriteContext = async (): Promise<void> => {
 export const runStateCommand = async (
   command: StateCommand,
   options: RunStateCommandOptions = {}
-): Promise<AppState> => {
+): Promise<AppState | null> => {
   const payloadCommand = withCommandId(command);
   const startedAtMs = Date.now();
 
@@ -813,10 +814,11 @@ export const runStateCommand = async (
       response = await fetchWithTimeout(getStateCommandsApiUrl(), {
         method: 'POST',
         headers: {
-          Accept: 'application/json',
+          Accept: options.responseMode === 'headers-only' ? '*/*' : 'application/json',
           'Content-Type': 'application/json',
           'If-Match': `"${context.version}"`,
           'X-State-Token': context.token,
+          'X-State-Response-Mode': options.responseMode === 'headers-only' ? 'headers-only' : 'snapshot',
         },
         body: JSON.stringify(payloadCommand),
       });
@@ -834,6 +836,9 @@ export const runStateCommand = async (
     if (response.ok) {
       clearApiUnavailableFailureState();
       writeContext = readContextFromResponse(response);
+      if (options.responseMode === 'headers-only' || response.status === 204) {
+        return null;
+      }
       const payload = (await response.json()) as unknown;
       return normalizeAppState(payload);
     }

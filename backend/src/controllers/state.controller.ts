@@ -34,6 +34,24 @@ const setStateHeaders = (req: Request, res: Response, version: string): void => 
   res.setHeader('X-State-Token', token);
 };
 
+const normalizeResponseModeQueryValue = (value: unknown): string => {
+  if (typeof value === 'string') return value.trim().toLowerCase();
+  if (!Array.isArray(value)) return '';
+  for (const entry of value) {
+    if (typeof entry === 'string') {
+      return entry.trim().toLowerCase();
+    }
+  }
+  return '';
+};
+
+const shouldReturnHeadersOnly = (req: Request): boolean => {
+  const headerValue = req.header('X-State-Response-Mode')?.trim().toLowerCase() || '';
+  if (headerValue === 'headers-only') return true;
+  const queryValue = normalizeResponseModeQueryValue(req.query.responseMode);
+  return queryValue === 'headers-only';
+};
+
 export const stateController = {
   headState: async (req: Request, res: Response) => {
     const version = await stateService.getAppStateVersion();
@@ -99,6 +117,10 @@ export const stateController = {
       snapshot = await stateService.applyCommandAgainstLatest(command, req.context);
     }
     setStateHeaders(req, res, snapshot.version);
+    if (shouldReturnHeadersOnly(req)) {
+      res.status(204).end();
+      return;
+    }
     res.status(200).json(snapshot.state);
   },
 };

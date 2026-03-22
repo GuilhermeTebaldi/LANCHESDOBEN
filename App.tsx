@@ -2193,6 +2193,7 @@ const PENDING_PAID_SYNC_PRE_CONFIRM_SETTLE_STEP_DELAYS_MS = [120, 180, 260, 360,
 const PENDING_PAID_SYNC_MISSING_DRAFT_MAX_AUTO_RETRIES = 2;
 const PENDING_PAID_SYNC_PRECONDITION_MAX_AUTO_RETRIES = 2;
 const PAID_SYNC_ASSISTANT_STATUS_TTL_MS = 2800;
+const DRAFT_PAYMENT_TRANSITION_GRACE_MS = 12_000;
 const PAID_SYNC_QUEUE_PREVIEW_LIMIT = 6;
 const PENDING_DRAFT_BACKGROUND_SYNC_DEBOUNCE_MS = 650;
 const PENDING_DRAFT_BACKGROUND_SYNC_SWEEP_MS = 10000;
@@ -2464,6 +2465,7 @@ const App: React.FC = () => {
   const draftItemRemoteMutationRetryAttemptsRef = useRef<Map<string, number>>(new Map());
   const draftLifecycleStageRef = useRef<Map<string, DraftLifecycleStage>>(new Map());
   const draftOperationEpochRef = useRef<Map<string, number>>(new Map());
+  const draftPaymentTransitionGraceUntilRef = useRef<Map<string, number>>(new Map());
   const isDraftLifecycleHydratedRef = useRef(false);
   const lastOperationalHealthReportAtRef = useRef(0);
 
@@ -3062,11 +3064,21 @@ const App: React.FC = () => {
       return 'PENDING_CONFIRM';
     }
 
+    const nowMs = Date.now();
+    const transitionGraceUntilMs = draftPaymentTransitionGraceUntilRef.current.get(normalizedDraftId) || 0;
+    const hasTransitionGrace = transitionGraceUntilMs > nowMs;
+    if (transitionGraceUntilMs > 0 && !hasTransitionGrace) {
+      draftPaymentTransitionGraceUntilRef.current.delete(normalizedDraftId);
+    }
+
     const serverDraft = saleDraftsRef.current.find((entry) => entry.id === normalizedDraftId);
-    if (!serverDraft) return 'OPEN';
+    if (!serverDraft) {
+      return hasTransitionGrace ? 'PENDING_CONFIRM' : 'OPEN';
+    }
     if (serverDraft.status === 'PAID') return 'PAID';
     if (serverDraft.status === 'CANCELLED') return 'CANCELLED';
     if (serverDraft.status === 'PENDING_PAYMENT') return 'PENDING_CONFIRM';
+    if (serverDraft.status === 'DRAFT' && hasTransitionGrace) return 'PENDING_CONFIRM';
     return 'OPEN';
   }, [hydrateDraftLifecycleState]);
 
@@ -3088,11 +3100,24 @@ const App: React.FC = () => {
       const previousEpoch = draftOperationEpochRef.current.get(normalizedDraftId) || 0;
       const shouldBumpEpoch = options.bumpEpoch ?? previousStage !== stage;
       const nextEpoch = shouldBumpEpoch ? previousEpoch + 1 : previousEpoch;
+      const nowMs = Date.now();
 
       if (stage === 'OPEN') {
         draftLifecycleStageRef.current.delete(normalizedDraftId);
       } else {
         draftLifecycleStageRef.current.set(normalizedDraftId, stage);
+      }
+      if (stage === 'FINALIZING' || stage === 'PENDING_CONFIRM') {
+        draftPaymentTransitionGraceUntilRef.current.set(
+          normalizedDraftId,
+          nowMs + DRAFT_PAYMENT_TRANSITION_GRACE_MS
+        );
+      } else if (
+        stage === 'PAID' ||
+        stage === 'CANCELLED' ||
+        (stage === 'OPEN' && options.reason !== 'server_reopened_draft')
+      ) {
+        draftPaymentTransitionGraceUntilRef.current.delete(normalizedDraftId);
       }
       if (shouldBumpEpoch) {
         draftOperationEpochRef.current.set(normalizedDraftId, nextEpoch);
@@ -4470,9 +4495,19 @@ const App: React.FC = () => {
             () =>
               runStateCommand(command, {
                 failFastOnVersionConflict: options.failFastOnVersionConflict,
+                responseMode: options.skipSnapshotApply ? 'headers-only' : 'snapshot',
               })
           );
           if (!options.skipSnapshotApply) {
+            if (!nextState) {
+              throw new StateCommandSyncError(
+                'Servidor não retornou snapshot para aplicar no estado local.',
+                {
+                  statusCode: 503,
+                  retryable: true,
+                }
+              );
+            }
             const snapshotApplyStartedAt = performance.now();
             applyStateSnapshotIfDraftEpochCurrent(
               nextState,
@@ -5086,25 +5121,26 @@ const App: React.FC = () => {
   }, [saleDrafts]);
   useEffect(() => {
     const syncingDraftIds = new Set<string>();
-    syncingPaidDraftIds.forEach((draftId) => {
+    syncingPaidDraftIdsRef.current.forEach((draftId) => {
       const normalizedDraftId = draftId.trim();
       if (normalizedDraftId) {
         syncingDraftIds.add(normalizedDraftId);
       }
     });
     const queuedDraftIds = new Set<string>();
-    pendingPaidSyncQueueSnapshot.forEach((job) => {
+    pendingPaidSyncQueueRef.current.forEach((job) => {
       const normalizedDraftId = job.draftId.trim();
       if (normalizedDraftId) {
         queuedDraftIds.add(normalizedDraftId);
       }
     });
-    failedPaidSyncQueue.forEach((job) => {
+    failedPaidSyncQueueRef.current.forEach((job) => {
       const normalizedDraftId = job.draftId.trim();
       if (normalizedDraftId) {
         queuedDraftIds.add(normalizedDraftId);
       }
     });
+    const nowMs = Date.now();
 
     saleDrafts.forEach((draft) => {
       if (draft.status === 'PAID' || draft.status === 'CANCELLED') {
@@ -5120,8 +5156,15 @@ const App: React.FC = () => {
       } else if (draft.status === 'DRAFT') {
         const normalizedDraftId = draft.id.trim();
         if (!normalizedDraftId) return;
+        const transitionGraceUntilMs =
+          draftPaymentTransitionGraceUntilRef.current.get(normalizedDraftId) || 0;
+        const hasRecentTransitionGrace = transitionGraceUntilMs > nowMs;
+        if (transitionGraceUntilMs > 0 && !hasRecentTransitionGrace) {
+          draftPaymentTransitionGraceUntilRef.current.delete(normalizedDraftId);
+        }
         const hasTerminalProcessingInFlight =
           syncingDraftIds.has(normalizedDraftId) || queuedDraftIds.has(normalizedDraftId);
+        if (hasRecentTransitionGrace) return;
         if (hasTerminalProcessingInFlight) return;
         if (resolveDraftLifecycleStage(normalizedDraftId) === 'OPEN') return;
         setDraftLifecycleStage(normalizedDraftId, 'OPEN', {
