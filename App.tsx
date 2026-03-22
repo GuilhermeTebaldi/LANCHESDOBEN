@@ -7892,37 +7892,6 @@ const App: React.FC = () => {
   const processPendingPaidSyncQueue = useCallback(async (): Promise<void> => {
     hydratePendingPaidSyncQueue();
     if (isStateHydrating) return;
-    const pendingEmptyDraftJobs = pendingPaidSyncQueueRef.current.filter((job) =>
-      isDraftEmptyErrorMessage(job.lastError || '')
-    );
-    if (pendingEmptyDraftJobs.length > 0) {
-      const nextPendingQueue = pendingPaidSyncQueueRef.current.filter(
-        (job) => !isDraftEmptyErrorMessage(job.lastError || '')
-      );
-      replacePendingPaidSyncQueue(nextPendingQueue);
-      pendingEmptyDraftJobs.forEach((job) => {
-        const alreadyFailed = failedPaidSyncQueueRef.current.some((entry) => entry.id === job.id);
-        if (!alreadyFailed) {
-          enqueueFailedPaidSyncJob({
-            ...job,
-            nextAttemptAt: undefined,
-            lastError: job.lastError || 'O carrinho está vazio. (HTTP 422)',
-          });
-        }
-        setDraftSyncInProgress(job.draftId, false);
-      });
-      pushOperationalEvent(
-        'QUEUE_HEALTH',
-        'Pedido com carrinho vazio foi removido do retry automático e movido para falha terminal.',
-        {
-          movedJobs: pendingEmptyDraftJobs.map((job) => ({
-            id: job.id,
-            draftId: job.draftId,
-          })),
-        }
-      );
-      if (nextPendingQueue.length === 0) return;
-    }
     if (pendingPaidSyncActiveWorkersRef.current >= PENDING_PAID_SYNC_MAX_WORKERS) return;
     if (pendingPaidSyncQueueRef.current.length === 0) return;
 
@@ -8122,38 +8091,6 @@ const App: React.FC = () => {
               showCornerSync('success', 'Pedido já estava resolvido no banco.', 1800);
               return;
             }
-
-            const nextPendingByDraft = { ...pendingDraftAddsRef.current };
-            if ((nextPendingByDraft[currentJob.draftId] || []).length > 0) {
-              delete nextPendingByDraft[currentJob.draftId];
-              replacePendingDraftAdds(nextPendingByDraft);
-            }
-            clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
-
-            const terminalEmptyMessage = statusCode
-              ? `${message} (HTTP ${statusCode})`
-              : message;
-            const failedJob: PendingPaidSyncJob = {
-              ...currentJob,
-              attempts: currentJob.attempts + 1,
-              nextAttemptAt: undefined,
-              lastError: terminalEmptyMessage,
-            };
-            markPaymentFlowTelemetryProgress(currentJob.draftId, {
-              retries: failedJob.attempts,
-            });
-            enqueueFailedPaidSyncJob(failedJob);
-            setDraftSyncInProgress(currentJob.draftId, false);
-            showCornerSync(
-              'error',
-              'Carrinho vazio no servidor. Falha terminal sem nova tentativa automática.',
-              3200
-            );
-            showNotification(`Erro ao enviar pedido: ${terminalEmptyMessage}`);
-            scheduleRetryDispatchTask('pending-paid-sync-main', 60, () =>
-              processPendingPaidSyncQueue()
-            );
-            return;
           }
 
           const scheduleRecoveryRetry = (
@@ -8281,15 +8218,7 @@ const App: React.FC = () => {
             }
           }
 
-          if (!retryable) {
-            if (isEmptyDraftFailure) {
-              const nextPendingByDraft = { ...pendingDraftAddsRef.current };
-              if ((nextPendingByDraft[currentJob.draftId] || []).length > 0) {
-                delete nextPendingByDraft[currentJob.draftId];
-                replacePendingDraftAdds(nextPendingByDraft);
-              }
-              clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
-            }
+          if (!retryable && !isEmptyDraftFailure) {
             const failedJob: PendingPaidSyncJob = {
               ...currentJob,
               attempts: currentJob.attempts + 1,
@@ -9313,23 +9242,6 @@ const App: React.FC = () => {
 
     failedPaidSyncQueue.forEach((job) => {
       const isEmptyDraftFailure = isDraftEmptyErrorMessage(job.lastError || '');
-      if (isEmptyDraftFailure) {
-        const retryTimer = failedPaidSyncAutoRetryTimersRef.current.get(job.id);
-        if (retryTimer !== undefined) {
-          window.clearTimeout(retryTimer);
-          failedPaidSyncAutoRetryTimersRef.current.delete(job.id);
-        }
-        const recoverTimer = failedPaidSyncAutoRecoverTimersRef.current.get(job.id);
-        if (recoverTimer !== undefined) {
-          window.clearTimeout(recoverTimer);
-          failedPaidSyncAutoRecoverTimersRef.current.delete(job.id);
-        }
-        if (failedPaidSyncAutoRetryAttemptsRef.current.has(job.id)) {
-          failedPaidSyncAutoRetryAttemptsRef.current.delete(job.id);
-          shouldRefreshAutoRetryUi = true;
-        }
-        return;
-      }
 
       const isConfirmBeforeFinalizeFailure = isConfirmBeforeFinalizeErrorMessage(job.lastError || '');
       if (isConfirmBeforeFinalizeFailure) {
@@ -10457,7 +10369,7 @@ const App: React.FC = () => {
           recoverableError
         );
         const assistantLabel = isEmptyDraftFailure
-          ? 'Robô: aguardando ação manual'
+          ? 'Robô: recuperação automática do carrinho'
           : isConfirmBeforeFinalizeFailure
             ? 'Robô: aguardando ordem de estado'
             : shouldRecoverSoon
