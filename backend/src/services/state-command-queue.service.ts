@@ -8,6 +8,11 @@ import {
   isDatabaseUnavailableError,
 } from '../utils/database-unavailable.js';
 import { HttpError, isHttpError } from '../utils/http-error.js';
+import {
+  buildStateCommandJobMeta,
+  commandIdentifiersFromInput,
+  logStateCommandIngressEvent,
+} from '../utils/state-command-observability.js';
 import { stateCommandSchema, type StateCommandInput } from '../validators/state-command.validator.js';
 import { StateService } from './state.service.js';
 
@@ -333,9 +338,34 @@ export class StateCommandQueueService {
     const queueWaitMs = Math.max(0, startedAt - new Date(job.createdAt).getTime());
     const parsedCommandType = job.commandType as StateCommandInput['type'];
     const shouldTrackPerf = isTerminalPaymentQueueCommand(parsedCommandType);
+    const requestMeta = buildStateCommandJobMeta({
+      requestId: job.requestId || `queue-job:${job.id}`,
+      actorUserId: job.actorUserId,
+    });
+    const payloadCommandIdentifiers = commandIdentifiersFromInput(job.payloadJson);
+    const baseCommandIdentifiers = {
+      commandType: payloadCommandIdentifiers.commandType || job.commandType,
+      commandId: payloadCommandIdentifiers.commandId || job.commandId,
+      draftId: payloadCommandIdentifiers.draftId,
+    };
+    logStateCommandIngressEvent({
+      ...requestMeta,
+      origin: 'async-worker',
+      phase: 'received',
+      ...baseCommandIdentifiers,
+      jobId: job.id,
+    });
     try {
       const parseStartedAt = shouldTrackPerf ? Date.now() : 0;
       const parsedCommand = stateCommandSchema.parse(job.payloadJson);
+      const parsedCommandIdentifiers = commandIdentifiersFromInput(parsedCommand);
+      const commandIdentifiers = {
+        ...baseCommandIdentifiers,
+        ...parsedCommandIdentifiers,
+        commandType: parsedCommandIdentifiers.commandType || baseCommandIdentifiers.commandType,
+        commandId: parsedCommandIdentifiers.commandId || baseCommandIdentifiers.commandId,
+        draftId: parsedCommandIdentifiers.draftId || baseCommandIdentifiers.draftId,
+      };
       const parseMs = shouldTrackPerf ? Date.now() - parseStartedAt : 0;
       if (!parsedCommand.commandId || parsedCommand.commandId !== job.commandId) {
         throw new HttpError(409, 'Payload do job assíncrono está inconsistente com commandId.');
@@ -380,6 +410,14 @@ export class StateCommandQueueService {
           resultVersion: snapshot.version,
         });
       }
+      logStateCommandIngressEvent({
+        ...requestMeta,
+        origin: 'async-worker',
+        phase: 'completed',
+        statusCode: 200,
+        ...commandIdentifiers,
+        jobId: job.id,
+      });
       needsProcessingFallback = false;
     } catch (error) {
       const databaseUnavailable = classifyDatabaseUnavailableError(error);
@@ -390,6 +428,15 @@ export class StateCommandQueueService {
       const retryable = isRetryableWorkerError(error);
       const errorMessage = truncateErrorMessage(normalizeErrorMessage(error));
       const canRetry = retryable && job.attempts < job.maxAttempts;
+      logStateCommandIngressEvent({
+        ...requestMeta,
+        origin: 'async-worker',
+        phase: 'failed',
+        statusCode: isHttpError(error) ? error.statusCode : 500,
+        ...baseCommandIdentifiers,
+        jobId: job.id,
+        errorMessage,
+      });
       if (shouldTrackPerf) {
         logStateCommandQueuePerf('job:failed', {
           jobId: job.id,
