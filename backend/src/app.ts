@@ -11,6 +11,8 @@ import { apiRouter } from './routes/index.js';
 
 const app = express();
 const localhostOriginPattern = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i;
+const buildCommit = process.env.RENDER_GIT_COMMIT?.trim() || process.env.SOURCE_VERSION?.trim() || null;
+const buildServiceId = process.env.RENDER_SERVICE_ID?.trim() || null;
 
 app.set('trust proxy', 1);
 app.use(helmet());
@@ -44,7 +46,13 @@ app.use(morgan(env.NODE_ENV === 'production' ? 'combined' : 'dev'));
 app.use(requestContextMiddleware);
 
 app.get('/health', (_req: Request, res: Response) => {
-  res.status(200).json({ status: 'ok' });
+  res.status(200).json({
+    status: 'ok',
+    build: {
+      commit: buildCommit,
+      serviceId: buildServiceId,
+    },
+  });
 });
 
 app.use('/api/v1', apiRouter);
