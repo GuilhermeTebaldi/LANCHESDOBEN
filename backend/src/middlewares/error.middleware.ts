@@ -191,8 +191,11 @@ export const errorMiddleware = (error: unknown, req: Request, res: Response, _ne
   }
 
   const httpError = isHttpError(error) ? error : new HttpError(500, 'Erro interno do servidor.');
+  const isExpectedOperationalError =
+    isExpectedErrorMonitorAuthFailure(req, httpError.statusCode, httpError.message) ||
+    isExpectedStateVersionConflict(req, httpError.statusCode, httpError.message);
 
-  if (env.NODE_ENV !== 'test') {
+  if (env.NODE_ENV !== 'test' && !isExpectedOperationalError) {
     // eslint-disable-next-line no-console
     console.error('[error]', {
       message: httpError.message,
@@ -204,13 +207,7 @@ export const errorMiddleware = (error: unknown, req: Request, res: Response, _ne
   }
 
   reportBackendErrorEvent(req, {
-    level:
-      isExpectedErrorMonitorAuthFailure(req, httpError.statusCode, httpError.message) ||
-      isExpectedStateVersionConflict(req, httpError.statusCode, httpError.message)
-      ? 'info'
-      : httpError.statusCode >= 500
-        ? 'error'
-        : 'warn',
+    level: isExpectedOperationalError ? 'info' : httpError.statusCode >= 500 ? 'error' : 'warn',
     message: httpError.message,
     statusCode: httpError.statusCode,
     details: httpError.details,
