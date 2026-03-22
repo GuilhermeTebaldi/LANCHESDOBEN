@@ -101,15 +101,26 @@ export default function ErrorMonitorPortal() {
         setLastUpdatedAt(new Date().toISOString());
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Falha ao carregar eventos.';
+        const isInvalidPassword = message.toLowerCase().includes('senha inválida');
         setFetchError(message);
-        reportErrorEvent({
-          source: 'site:monitor-page',
-          level: 'warn',
-          message: `Falha ao consultar monitor: ${message}`,
-          context: {
-            route: '/rede',
-          },
-        });
+        if (isInvalidPassword) {
+          setPassword('');
+          setPasswordInput('');
+          setEvents([]);
+          setNewEventIds([]);
+          seenEventIdsRef.current = new Set();
+          hasInitializedSeenIdsRef.current = false;
+          writeStoredPassword('');
+        } else {
+          reportErrorEvent({
+            source: 'site:monitor-page',
+            level: 'warn',
+            message: `Falha ao consultar monitor: ${message}`,
+            context: {
+              route: '/rede',
+            },
+          });
+        }
       } finally {
         if (!options.silent) {
           setIsLoading(false);
