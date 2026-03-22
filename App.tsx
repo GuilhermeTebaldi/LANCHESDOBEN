@@ -9610,17 +9610,6 @@ const App: React.FC = () => {
     if (receiptPayload && preparedPrintWindow) {
       setReceiptPrintPayloadOnWindow(preparedPrintWindow, receiptPayload);
     }
-    const receiptPrintId = receiptPayload?.id || draftId;
-    const openedPrintWindowEarly = navigatePreparedReceiptWindow(preparedPrintWindow, receiptPrintId);
-    if (!openedPrintWindowEarly) {
-      if (receiptPayload) {
-        removeReceiptPrintPayload(receiptPayload.id);
-      }
-      closePreparedReceiptWindow(preparedPrintWindow);
-      showNotification(
-        'Não foi possível abrir o cupom agora. Use o Histórico para segunda via.'
-      );
-    }
 
     const pendingItemsCount = countVisiblePendingDraftAdds(pendingDraftAddsRef.current[draftId] || []);
     const paymentClickAtMs = Date.now();
@@ -9665,6 +9654,10 @@ const App: React.FC = () => {
         reason: 'pending_paid_enqueue_rejected',
         bumpEpoch: false,
       });
+      if (receiptPayload) {
+        removeReceiptPrintPayload(receiptPayload.id);
+      }
+      closePreparedReceiptWindow(preparedPrintWindow);
       setIsConfirmingPaid(false);
       return;
     }
@@ -9677,6 +9670,18 @@ const App: React.FC = () => {
     );
     requestPendingPaidSyncProcessing('confirm-paid-enqueued');
     setIsConfirmingPaid(false);
+
+    const receiptPrintId = receiptPayload?.id || draftId;
+    const openedPrintWindow = navigatePreparedReceiptWindow(preparedPrintWindow, receiptPrintId);
+    if (!openedPrintWindow) {
+      if (receiptPayload) {
+        removeReceiptPrintPayload(receiptPayload.id);
+      }
+      closePreparedReceiptWindow(preparedPrintWindow);
+      showNotification(
+        'Não foi possível abrir o cupom agora. Use o Histórico para segunda via.'
+      );
+    }
   };
 
   const handleUndoLastSale = () => {
