@@ -4390,6 +4390,7 @@ const App: React.FC = () => {
       options: {
         trackPendingState?: boolean;
         failFastOnVersionConflict?: boolean;
+        skipObsoleteCheck?: boolean;
         skipSnapshotApply?: boolean;
         bypassGlobalCommandQueue?: boolean;
         onSnapshotAppliedMs?: (durationMs: number) => void;
@@ -4406,7 +4407,9 @@ const App: React.FC = () => {
           const expectedDraftEpoch = commandDraftId
             ? getDraftOperationEpoch(commandDraftId)
             : null;
-          const obsoleteReason = getObsoleteCommandReason(command);
+          const obsoleteReason = options.skipObsoleteCheck
+            ? null
+            : getObsoleteCommandReason(command);
           if (obsoleteReason) {
             console.info('[COMMAND_EXECUTION]', {
               type: 'COMMAND_EXECUTION',
@@ -4578,6 +4581,7 @@ const App: React.FC = () => {
         return executeSyncedCommand(normalizedCommand, {
           trackPendingState: options.trackPendingState,
           failFastOnVersionConflict: options.failFastOnVersionConflict,
+          skipObsoleteCheck: options.skipObsoleteCheck,
           skipSnapshotApply: options.skipSnapshotApply,
           bypassGlobalCommandQueue: options.bypassGlobalCommandQueue,
           onSnapshotAppliedMs: options.onSnapshotAppliedMs,
