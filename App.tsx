@@ -1206,14 +1206,6 @@ const isConfirmBeforeFinalizeErrorMessage = (message: string): boolean => {
   return normalized.includes('venda ainda nao foi finalizada para pagamento');
 };
 
-const isFinalizeStateConflictErrorMessage = (message: string): boolean => {
-  const normalized = message
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase();
-  return normalized.includes('nao e possivel finalizar esta venda');
-};
-
 const isDatabaseUnavailableErrorMessage = (message: string): boolean => {
   const normalized = message
     .normalize('NFD')
@@ -2188,10 +2180,6 @@ const PENDING_PAID_SYNC_RETRY_STEPS_MS = [
 const PENDING_PAID_SYNC_ORDER_SETTLE_RETRY_STEPS_MS = [1_200, 1_800, 2_600, 3_800, 5_500, 8_000] as const;
 const PENDING_PAID_SYNC_EMPTY_DRAFT_RECOVERY_DELAY_MS = 1800;
 const PENDING_PAID_SYNC_EMPTY_DRAFT_RECOVERY_MAX_ATTEMPTS = 5;
-const PENDING_PAID_SYNC_PRE_CONFIRM_SETTLE_MAX_ATTEMPTS = 6;
-const PENDING_PAID_SYNC_PRE_CONFIRM_SETTLE_STEP_DELAYS_MS = [120, 180, 260, 360, 520] as const;
-const PENDING_PAID_SYNC_MISSING_DRAFT_MAX_AUTO_RETRIES = 2;
-const PENDING_PAID_SYNC_PRECONDITION_MAX_AUTO_RETRIES = 2;
 const PAID_SYNC_ASSISTANT_STATUS_TTL_MS = 2800;
 const DRAFT_PAYMENT_TRANSITION_GRACE_MS = 12_000;
 const PAID_SYNC_QUEUE_PREVIEW_LIMIT = 6;
@@ -8572,253 +8560,6 @@ const App: React.FC = () => {
           }
         }
 
-        let finalized = false;
-        const finalizeErrorSink: RunCommandErrorSink = {};
-        const finalizeStartedAt = performance.now();
-        try {
-          finalized = await handleSavePaymentMethod(currentJob.snapshot, {
-            trackPendingState: false,
-            silentSavedNotification: true,
-            silentErrorNotification: true,
-            errorSink: finalizeErrorSink,
-            preferAsyncFinalize: false,
-            failFastOnVersionConflict: false,
-            skipSnapshotApplyOnTerminalFlow: true,
-            onSnapshotAppliedMs: recordSnapshotApplyMs,
-          });
-        } finally {
-          markPaymentFlowTelemetryStageDuration(
-            currentJob.draftId,
-            currentJob.id,
-            'finalizeMs',
-            performance.now() - finalizeStartedAt
-          );
-        }
-        if (!finalized) {
-          const finalizeMessage =
-            finalizeErrorSink.message || 'Falha ao salvar forma de pagamento.';
-          const isFinalizeConflict =
-            finalizeErrorSink.statusCode === 409 &&
-            isFinalizeStateConflictErrorMessage(finalizeMessage);
-          if (isFinalizeConflict) {
-            let stateRefreshed = false;
-            try {
-              const stateRefreshStartedAt = performance.now();
-              const refreshedState = await fetchStateSnapshotControlled(currentJob.draftId);
-              applySnapshotForCurrentJob(
-                refreshedState,
-                'pending_paid_refresh_finalize_conflict'
-              );
-              recordStateRefreshMs(performance.now() - stateRefreshStartedAt);
-              stateRefreshed = true;
-            } catch {
-              // best-effort: if refresh fails we still evaluate local snapshot below
-            }
-            const latestDraft = saleDraftsRef.current.find(
-              (entry) => entry.id === currentJob.draftId
-            );
-            if (
-              !latestDraft ||
-              latestDraft.status === 'PAID' ||
-              latestDraft.status === 'CANCELLED'
-            ) {
-              setDraftLifecycleStage(
-                currentJob.draftId,
-                latestDraft?.status === 'CANCELLED' ? 'CANCELLED' : 'PAID',
-                {
-                  reason: 'queue_finalize_conflict_terminal',
-                  bumpEpoch: false,
-                }
-              );
-              completePaymentFlowTelemetry(currentJob.draftId, {
-                retries: currentJob.attempts,
-                hadReconciliation: true,
-              });
-              setDraftSyncInProgress(currentJob.draftId, false);
-              cleanupDraftOperationalArtifacts(currentJob.draftId);
-              clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
-              showCornerSync('success', 'Pedido já estava concluído no banco.', 1800);
-              return;
-            }
-            if (latestDraft.status === 'PENDING_PAYMENT') {
-              finalized = true;
-              showCornerSync('syncing', 'Pagamento já preparado. Confirmando...', 1600);
-            } else {
-              await markJobAsFailed(
-                stateRefreshed
-                  ? 'Conflito ao finalizar pagamento.'
-                  : 'Conflito ao finalizar pagamento. Reagendando com atualização de estado.',
-                {
-                  ...finalizeErrorSink,
-                  retryable: true,
-                }
-              );
-              return;
-            }
-          } else {
-            await markJobAsFailed('Falha ao salvar forma de pagamento.', finalizeErrorSink);
-            return;
-          }
-        }
-
-        if (finalized) {
-          setDraftLifecycleStage(currentJob.draftId, 'PENDING_CONFIRM', {
-            reason: 'finalize_completed_awaiting_confirm',
-            bumpEpoch: false,
-          });
-        }
-
-        let latestDraftBeforeConfirm = saleDraftsRef.current.find(
-          (entry) => entry.id === currentJob.draftId
-        );
-        let latestDraftLifecycleStage = resolveDraftLifecycleStage(currentJob.draftId);
-        const refreshDraftBeforeConfirm = async (): Promise<boolean> => {
-          try {
-            const stateRefreshStartedAt = performance.now();
-            const refreshedState = await fetchStateSnapshotControlled(currentJob.draftId);
-            applySnapshotForCurrentJob(
-              refreshedState,
-              'pending_paid_refresh_before_confirm_state_validation'
-            );
-            recordStateRefreshMs(performance.now() - stateRefreshStartedAt);
-            latestDraftBeforeConfirm = saleDraftsRef.current.find(
-              (entry) => entry.id === currentJob.draftId
-            );
-            latestDraftLifecycleStage = resolveDraftLifecycleStage(currentJob.draftId);
-            return true;
-          } catch (error) {
-            await markJobAsFailed('Falha ao validar estado antes de confirmar pagamento.', {
-              error,
-              message: getStateSyncErrorMessage(error),
-              retryable: isRetryableSyncError(error),
-              statusCode: error instanceof StateCommandSyncError ? error.statusCode : undefined,
-            });
-            return false;
-          }
-        };
-        const shouldKeepPreConfirmSettling = (): boolean => {
-          const isTransitionalLocalStage =
-            latestDraftLifecycleStage === 'FINALIZING' ||
-            latestDraftLifecycleStage === 'PENDING_CONFIRM';
-          if (!isTransitionalLocalStage) return false;
-          if (!latestDraftBeforeConfirm) return true;
-          return latestDraftBeforeConfirm.status === 'DRAFT';
-        };
-
-        for (
-          let settleAttempt = 0;
-          settleAttempt < PENDING_PAID_SYNC_PRE_CONFIRM_SETTLE_MAX_ATTEMPTS;
-          settleAttempt += 1
-        ) {
-          const currentStatus = latestDraftBeforeConfirm?.status;
-          if (
-            currentStatus === 'PENDING_PAYMENT' ||
-            currentStatus === 'PAID' ||
-            currentStatus === 'CANCELLED'
-          ) {
-            break;
-          }
-
-          const refreshed = await refreshDraftBeforeConfirm();
-          if (!refreshed) return;
-
-          const refreshedStatus = latestDraftBeforeConfirm?.status;
-          if (
-            refreshedStatus === 'PENDING_PAYMENT' ||
-            refreshedStatus === 'PAID' ||
-            refreshedStatus === 'CANCELLED'
-          ) {
-            break;
-          }
-          if (!shouldKeepPreConfirmSettling()) {
-            break;
-          }
-          if (settleAttempt >= PENDING_PAID_SYNC_PRE_CONFIRM_SETTLE_MAX_ATTEMPTS - 1) {
-            break;
-          }
-
-          const settleDelayMs =
-            PENDING_PAID_SYNC_PRE_CONFIRM_SETTLE_STEP_DELAYS_MS[
-              Math.min(
-                settleAttempt,
-                PENDING_PAID_SYNC_PRE_CONFIRM_SETTLE_STEP_DELAYS_MS.length - 1
-              )
-            ];
-          await new Promise<void>((resolve) => {
-            window.setTimeout(resolve, settleDelayMs);
-          });
-        }
-
-        if (
-          latestDraftBeforeConfirm?.status === 'PAID' ||
-          latestDraftBeforeConfirm?.status === 'CANCELLED'
-        ) {
-          setDraftLifecycleStage(
-            currentJob.draftId,
-            latestDraftBeforeConfirm?.status === 'CANCELLED' ? 'CANCELLED' : 'PAID',
-            {
-              reason: 'queue_before_confirm_terminal',
-              bumpEpoch: false,
-            }
-          );
-          completePaymentFlowTelemetry(currentJob.draftId, {
-            retries: currentJob.attempts,
-            hadReconciliation: true,
-          });
-          setDraftSyncInProgress(currentJob.draftId, false);
-          cleanupDraftOperationalArtifacts(currentJob.draftId);
-          clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
-          showCornerSync('success', 'Pedido já estava concluído no banco.', 1800);
-          return;
-        }
-
-        if (!latestDraftBeforeConfirm) {
-          const missingDraftAttempt = currentJob.attempts + 1;
-          const shouldRetryMissingDraft =
-            missingDraftAttempt <= PENDING_PAID_SYNC_MISSING_DRAFT_MAX_AUTO_RETRIES;
-          const missingDraftMessage =
-            `Draft não encontrado no snapshot mais recente antes de confirmar pagamento (stage local ${latestDraftLifecycleStage}; tentativa ${missingDraftAttempt}/${PENDING_PAID_SYNC_MISSING_DRAFT_MAX_AUTO_RETRIES}).`;
-          await markJobAsFailed(
-            shouldRetryMissingDraft
-              ? 'Draft ainda não visível no estado mais recente. Tentando novamente.'
-              : 'Draft não ficou visível após tentativas curtas de validação.',
-            {
-              message: missingDraftMessage,
-              retryable: shouldRetryMissingDraft,
-              statusCode: 409,
-            }
-          );
-          return;
-        }
-
-        if (latestDraftBeforeConfirm.status !== 'PENDING_PAYMENT') {
-          const preconditionAttempt = currentJob.attempts + 1;
-          const isTransitionalPreConfirmStage =
-            latestDraftLifecycleStage === 'FINALIZING' ||
-            latestDraftLifecycleStage === 'PENDING_CONFIRM';
-          const shouldRetryPrecondition =
-            isTransitionalPreConfirmStage &&
-            preconditionAttempt <= PENDING_PAID_SYNC_PRECONDITION_MAX_AUTO_RETRIES;
-          const preconditionMessage =
-            `Venda ainda não foi finalizada para pagamento. Draft em ${latestDraftBeforeConfirm.status} antes do confirm (stage local ${latestDraftLifecycleStage}; tentativa ${preconditionAttempt}/${PENDING_PAID_SYNC_PRECONDITION_MAX_AUTO_RETRIES}).`;
-          await markJobAsFailed(
-            shouldRetryPrecondition
-              ? 'Venda ainda não foi finalizada para pagamento.'
-              : 'Pré-condição de confirmação não atendida após tentativas curtas.',
-            {
-              message: preconditionMessage,
-              retryable: shouldRetryPrecondition,
-              statusCode: 409,
-            }
-          );
-          return;
-        }
-
-        const confirmCommand: StateCommand = {
-          type: 'SALE_DRAFT_CONFIRM_PAID',
-          draftId: currentJob.draftId,
-          commandId: currentJob.confirmCommandId,
-        };
         const buildAtomicFinalizeAndConfirmCommand = (): StateCommand => {
           const paymentSnapshot = currentJob.snapshot;
           const appOrderTotalParsed = isAppSaleOrigin(paymentSnapshot.saleOrigin)
@@ -8850,7 +8591,7 @@ const App: React.FC = () => {
           return {
             type: 'SALE_DRAFT_FINALIZE_AND_CONFIRM_PAID',
             draftId: currentJob.draftId,
-            commandId: createClientId('cmd'),
+            commandId: currentJob.finalizeCommandId || createClientId('cmd'),
             paymentMethod: paymentSnapshot.paymentMethod,
             cashReceived:
               paymentSnapshot.paymentMethod === 'DINHEIRO'
@@ -8872,19 +8613,16 @@ const App: React.FC = () => {
               paymentSnapshot.paymentMethod === 'DIVIDIDO' ? splitPayments : undefined,
           };
         };
-        const tryAtomicFinalizeAndConfirmFallback = async (
-          confirmErrorSink: RunCommandErrorSink
-        ): Promise<boolean> => {
-          const confirmErrorMessage = confirmErrorSink.message || '';
-          const isOrderConflict =
-            confirmErrorSink.statusCode === 409 &&
-            isConfirmBeforeFinalizeErrorMessage(confirmErrorMessage);
-          if (!isOrderConflict) return false;
-
-          const atomicCommand = buildAtomicFinalizeAndConfirmCommand();
+        setDraftLifecycleStage(currentJob.draftId, 'PENDING_CONFIRM', {
+          reason: 'atomic_finalize_confirm_dispatch',
+          bumpEpoch: false,
+        });
+        const atomicFinalizeAndConfirmCommand = buildAtomicFinalizeAndConfirmCommand();
+        const atomicStartedAt = performance.now();
+        try {
           const atomicErrorSink: RunCommandErrorSink = {};
           const atomicallyConfirmed = await runCommandWithSync(
-            atomicCommand,
+            atomicFinalizeAndConfirmCommand,
             undefined,
             {
               skipOfflineQueue: true,
@@ -8897,212 +8635,24 @@ const App: React.FC = () => {
               onSnapshotAppliedMs: recordSnapshotApplyMs,
             }
           );
-          if (atomicallyConfirmed) {
-            pushOperationalEvent(
-              'QUEUE_HEALTH',
-              'Fallback atômico de FINALIZE+CONFIRM resolveu conflito de ordem do confirm.',
-              {
-                draftId: currentJob.draftId,
-                originalCommandId: confirmCommand.commandId || null,
-                fallbackCommandId: atomicCommand.commandId || null,
-              }
-            );
-            return true;
+          if (!atomicallyConfirmed) {
+            await markJobAsFailed('Falha ao finalizar e confirmar pagamento.', atomicErrorSink);
+            return;
           }
-
-          if (atomicErrorSink.error !== undefined) {
-            confirmErrorSink.error = atomicErrorSink.error;
-          }
-          if (atomicErrorSink.message !== undefined) {
-            confirmErrorSink.message = atomicErrorSink.message;
-          }
-          if (atomicErrorSink.retryable !== undefined) {
-            confirmErrorSink.retryable = atomicErrorSink.retryable;
-          }
-          if (atomicErrorSink.statusCode !== undefined) {
-            confirmErrorSink.statusCode = atomicErrorSink.statusCode;
-          }
-          return false;
-        };
-
-        const confirmStartedAt = performance.now();
-        try {
-          if (!ENABLE_ASYNC_CONFIRM_PAID) {
-            const confirmErrorSink: RunCommandErrorSink = {};
-            const confirmed = await runCommandWithSync(
-              confirmCommand,
-              undefined,
-              {
-                skipOfflineQueue: true,
-                trackPendingState: false,
-                silentSuccessNotification: true,
-                silentErrorNotification: true,
-                errorSink: confirmErrorSink,
-                failFastOnVersionConflict: false,
-                bypassGlobalCommandQueue: true,
-                onSnapshotAppliedMs: recordSnapshotApplyMs,
-              }
-            );
-            if (!confirmed) {
-              const recoveredByAtomicFallback =
-                await tryAtomicFinalizeAndConfirmFallback(confirmErrorSink);
-              if (!recoveredByAtomicFallback) {
-                await markJobAsFailed('Falha ao confirmar pagamento.', confirmErrorSink);
-                return;
-              }
+          pushOperationalEvent(
+            'QUEUE_HEALTH',
+            'Fluxo principal de paid-sync executou comando atômico FINALIZE+CONFIRM.',
+            {
+              draftId: currentJob.draftId,
+              commandId: atomicFinalizeAndConfirmCommand.commandId || null,
             }
-          } else {
-            let asyncJobId: string | null = null;
-            try {
-              const queuedAsyncJob = await enqueueStateCommandAsyncControlled(confirmCommand);
-              asyncJobId = queuedAsyncJob.id;
-            } catch (error) {
-              const statusCode =
-                error instanceof StateCommandSyncError ? error.statusCode : undefined;
-              const shouldFallbackToSync =
-                statusCode === 404 ||
-                statusCode === 405 ||
-                statusCode === 422 ||
-                statusCode === 501;
-
-              if (shouldFallbackToSync) {
-                const confirmErrorSink: RunCommandErrorSink = {};
-                const confirmed = await runCommandWithSync(
-                  confirmCommand,
-                  undefined,
-                  {
-                    skipOfflineQueue: true,
-                    trackPendingState: false,
-                    silentSuccessNotification: true,
-                    silentErrorNotification: true,
-                    errorSink: confirmErrorSink,
-                    failFastOnVersionConflict: false,
-                    bypassGlobalCommandQueue: true,
-                    onSnapshotAppliedMs: recordSnapshotApplyMs,
-                  }
-                );
-                if (!confirmed) {
-                  await markJobAsFailed('Falha ao confirmar pagamento.', confirmErrorSink);
-                  return;
-                }
-              } else {
-                await markJobAsFailed('Falha ao enfileirar confirmação assíncrona.', {
-                  error,
-                  message: getStateSyncErrorMessage(error),
-                  retryable: isRetryableSyncError(error),
-                  statusCode,
-                });
-                return;
-              }
-            }
-
-            if (asyncJobId) {
-              let terminalStatus: { status: StateCommandAsyncJobStatus; lastError: string | null } | null = null;
-              let resolvedBySyncFallback = false;
-              try {
-                terminalStatus = await waitForAsyncCommandJobTerminalStatus(
-                  asyncJobId,
-                  (queuedJobId) => getStateCommandAsyncJobControlled(queuedJobId, currentJob.draftId)
-                );
-              } catch (error) {
-                const errorMessage = getStateSyncErrorMessage(error);
-                const isTimeoutWhileWaiting =
-                  errorMessage.toLowerCase().includes('timeout aguardando processamento assíncrono');
-                if (!isTimeoutWhileWaiting) {
-                  await markJobAsFailed('Falha ao aguardar processamento assíncrono.', {
-                    error,
-                    message: errorMessage,
-                    retryable: isRetryableSyncError(error),
-                    statusCode: error instanceof StateCommandSyncError ? error.statusCode : undefined,
-                  });
-                  return;
-                }
-
-                const confirmErrorSink: RunCommandErrorSink = {};
-                const confirmed = await runCommandWithSync(
-                  confirmCommand,
-                  undefined,
-                  {
-                    skipOfflineQueue: true,
-                    trackPendingState: false,
-                    silentSuccessNotification: true,
-                    silentErrorNotification: true,
-                    errorSink: confirmErrorSink,
-                    failFastOnVersionConflict: false,
-                    bypassGlobalCommandQueue: true,
-                    onSnapshotAppliedMs: recordSnapshotApplyMs,
-                  }
-                );
-                if (!confirmed) {
-                  await markJobAsFailed(
-                    'Falha ao confirmar pagamento após timeout do processamento assíncrono.',
-                    confirmErrorSink
-                  );
-                  return;
-                }
-                resolvedBySyncFallback = true;
-              }
-
-              if (!resolvedBySyncFallback && (!terminalStatus || terminalStatus.status !== 'COMPLETED')) {
-                const confirmErrorSink: RunCommandErrorSink = {};
-                const confirmed = await runCommandWithSync(
-                  confirmCommand,
-                  undefined,
-                  {
-                    skipOfflineQueue: true,
-                    trackPendingState: false,
-                    silentSuccessNotification: true,
-                    silentErrorNotification: true,
-                    errorSink: confirmErrorSink,
-                    failFastOnVersionConflict: false,
-                    bypassGlobalCommandQueue: true,
-                    onSnapshotAppliedMs: recordSnapshotApplyMs,
-                  }
-                );
-                if (!confirmed) {
-                  await markJobAsFailed(
-                    terminalStatus?.lastError || 'Falha no processamento assíncrono do pedido.',
-                    {
-                      message:
-                        terminalStatus?.lastError ||
-                        confirmErrorSink.message ||
-                        'Falha no processamento assíncrono do pedido.',
-                      retryable: confirmErrorSink.retryable ?? false,
-                      statusCode: confirmErrorSink.statusCode,
-                    }
-                  );
-                  return;
-                }
-                resolvedBySyncFallback = true;
-              }
-
-              if (!resolvedBySyncFallback) {
-                try {
-                  const stateRefreshStartedAt = performance.now();
-                  const refreshedState = await fetchStateSnapshotControlled(currentJob.draftId);
-                  applySnapshotForCurrentJob(
-                    refreshedState,
-                    'pending_paid_refresh_after_confirm'
-                  );
-                  recordStateRefreshMs(performance.now() - stateRefreshStartedAt);
-                } catch (error) {
-                  await markJobAsFailed('Pedido confirmado, mas falhou ao atualizar estado local.', {
-                    error,
-                    message: getStateSyncErrorMessage(error),
-                    retryable: isRetryableSyncError(error),
-                    statusCode: error instanceof StateCommandSyncError ? error.statusCode : undefined,
-                  });
-                  return;
-                }
-              }
-            }
-          }
+          );
         } finally {
           markPaymentFlowTelemetryStageDuration(
             currentJob.draftId,
             currentJob.id,
             'confirmMs',
-            performance.now() - confirmStartedAt
+            performance.now() - atomicStartedAt
           );
         }
 
@@ -9183,13 +8733,10 @@ const App: React.FC = () => {
     cleanupDraftOperationalArtifacts,
     enqueueFailedPaidSyncJob,
     enqueueRetryDispatchTask,
-    enqueueStateCommandAsyncControlled,
     fetchStateSnapshotControlled,
     flushPendingDraftAdds,
     getBackendFailsafeRemainingMs,
     getDraftOperationEpoch,
-    getStateCommandAsyncJobControlled,
-    handleSavePaymentMethod,
     hydratePendingPaidSyncQueue,
     isRetryableSyncError,
     isStateHydrating,
@@ -9202,13 +8749,11 @@ const App: React.FC = () => {
     markPaymentFlowTelemetryStageDuration,
     markPaymentFlowTelemetryProgress,
     runCommandWithSync,
-    resolveDraftLifecycleStage,
     setDraftLifecycleStage,
     setPaidSyncAssistantActivity,
     setDraftSyncInProgress,
     scheduleRetryDispatchTask,
     showCornerSync,
-    waitForAsyncCommandJobTerminalStatus,
     showNotification,
   ]);
 
