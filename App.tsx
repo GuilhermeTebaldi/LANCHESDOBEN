@@ -1198,6 +1198,14 @@ const isStockRelatedErrorMessage = (message: string): boolean => {
 const isDraftEmptyErrorMessage = (message: string): boolean =>
   message.toLowerCase().includes('carrinho está vazio');
 
+const isConfirmBeforeFinalizeErrorMessage = (message: string): boolean => {
+  const normalized = message
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase();
+  return normalized.includes('venda ainda nao foi finalizada para pagamento');
+};
+
 const isFinalizeStateConflictErrorMessage = (message: string): boolean => {
   const normalized = message
     .normalize('NFD')
@@ -1228,6 +1236,9 @@ const isAutoRecoverableFailedQueueMessage = (message: string): boolean => {
   if (isDatabaseUnavailableErrorMessage(message)) {
     return false;
   }
+  if (isConfirmBeforeFinalizeErrorMessage(message)) {
+    return false;
+  }
   const normalized = message
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
@@ -1235,8 +1246,7 @@ const isAutoRecoverableFailedQueueMessage = (message: string): boolean => {
   return (
     normalized.includes('conflito de versao') ||
     normalized.includes('token de estado desatualizado') ||
-    normalized.includes('nao e possivel finalizar esta venda') ||
-    normalized.includes('venda ainda nao foi finalizada para pagamento')
+    normalized.includes('nao e possivel finalizar esta venda')
   );
 };
 
@@ -8578,6 +8588,93 @@ const App: React.FC = () => {
           });
         }
 
+        let latestDraftBeforeConfirm = saleDraftsRef.current.find(
+          (entry) => entry.id === currentJob.draftId
+        );
+        const needsPreConfirmRefresh =
+          !latestDraftBeforeConfirm ||
+          (latestDraftBeforeConfirm.status !== 'PENDING_PAYMENT' &&
+            latestDraftBeforeConfirm.status !== 'PAID' &&
+            latestDraftBeforeConfirm.status !== 'CANCELLED');
+        if (needsPreConfirmRefresh) {
+          try {
+            const stateRefreshStartedAt = performance.now();
+            const refreshedState = await fetchStateSnapshotControlled(currentJob.draftId);
+            applySnapshotForCurrentJob(
+              refreshedState,
+              'pending_paid_refresh_before_confirm_state_validation'
+            );
+            recordStateRefreshMs(performance.now() - stateRefreshStartedAt);
+          } catch (error) {
+            await markJobAsFailed('Falha ao validar estado antes de confirmar pagamento.', {
+              error,
+              message: getStateSyncErrorMessage(error),
+              retryable: isRetryableSyncError(error),
+              statusCode: error instanceof StateCommandSyncError ? error.statusCode : undefined,
+            });
+            return;
+          }
+          latestDraftBeforeConfirm = saleDraftsRef.current.find(
+            (entry) => entry.id === currentJob.draftId
+          );
+        }
+
+        if (
+          latestDraftBeforeConfirm?.status === 'PAID' ||
+          latestDraftBeforeConfirm?.status === 'CANCELLED'
+        ) {
+          setDraftLifecycleStage(
+            currentJob.draftId,
+            latestDraftBeforeConfirm?.status === 'CANCELLED' ? 'CANCELLED' : 'PAID',
+            {
+              reason: 'queue_before_confirm_terminal',
+              bumpEpoch: false,
+            }
+          );
+          completePaymentFlowTelemetry(currentJob.draftId, {
+            retries: currentJob.attempts,
+            hadReconciliation: true,
+          });
+          setDraftSyncInProgress(currentJob.draftId, false);
+          cleanupDraftOperationalArtifacts(currentJob.draftId);
+          clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
+          showCornerSync('success', 'Pedido já estava concluído no banco.', 1800);
+          return;
+        }
+
+        if (!latestDraftBeforeConfirm) {
+          const missingDraftMessage =
+            'Draft não encontrado no snapshot mais recente antes de confirmar pagamento.';
+          const shouldRetryMissingDraft = currentJob.attempts < 1;
+          await markJobAsFailed(
+            shouldRetryMissingDraft
+              ? 'Draft ainda não visível no estado mais recente. Tentando novamente.'
+              : 'Confirmação bloqueada: draft ausente no estado mais recente.',
+            {
+              message: missingDraftMessage,
+              retryable: shouldRetryMissingDraft,
+              statusCode: 409,
+            }
+          );
+          return;
+        }
+
+        if (latestDraftBeforeConfirm.status !== 'PENDING_PAYMENT') {
+          const preconditionMessage = `Venda ainda não foi finalizada para pagamento. Draft em ${latestDraftBeforeConfirm.status} antes do confirm.`;
+          const shouldRetryPrecondition = currentJob.attempts < 1;
+          await markJobAsFailed(
+            shouldRetryPrecondition
+              ? 'Venda ainda não foi finalizada para pagamento.'
+              : 'Confirmação bloqueada: venda fora da ordem de estado esperada.',
+            {
+              message: preconditionMessage,
+              retryable: shouldRetryPrecondition,
+              statusCode: 409,
+            }
+          );
+          return;
+        }
+
         const confirmCommand: StateCommand = {
           type: 'SALE_DRAFT_CONFIRM_PAID',
           draftId: currentJob.draftId,
@@ -9225,6 +9322,25 @@ const App: React.FC = () => {
     failedPaidSyncQueue.forEach((job) => {
       const isEmptyDraftFailure = isDraftEmptyErrorMessage(job.lastError || '');
       if (isEmptyDraftFailure) {
+        const retryTimer = failedPaidSyncAutoRetryTimersRef.current.get(job.id);
+        if (retryTimer !== undefined) {
+          window.clearTimeout(retryTimer);
+          failedPaidSyncAutoRetryTimersRef.current.delete(job.id);
+        }
+        const recoverTimer = failedPaidSyncAutoRecoverTimersRef.current.get(job.id);
+        if (recoverTimer !== undefined) {
+          window.clearTimeout(recoverTimer);
+          failedPaidSyncAutoRecoverTimersRef.current.delete(job.id);
+        }
+        if (failedPaidSyncAutoRetryAttemptsRef.current.has(job.id)) {
+          failedPaidSyncAutoRetryAttemptsRef.current.delete(job.id);
+          shouldRefreshAutoRetryUi = true;
+        }
+        return;
+      }
+
+      const isConfirmBeforeFinalizeFailure = isConfirmBeforeFinalizeErrorMessage(job.lastError || '');
+      if (isConfirmBeforeFinalizeFailure) {
         const retryTimer = failedPaidSyncAutoRetryTimersRef.current.get(job.id);
         if (retryTimer !== undefined) {
           window.clearTimeout(retryTimer);
@@ -10314,13 +10430,18 @@ const App: React.FC = () => {
         const autoRetryAttempts =
           failedPaidSyncAutoRetryAttemptsRef.current.get(job.id) || 0;
         const isEmptyDraftFailure = isDraftEmptyErrorMessage(job.lastError || '');
+        const isConfirmBeforeFinalizeFailure = isConfirmBeforeFinalizeErrorMessage(
+          job.lastError || ''
+        );
         const recoverableError =
-          !isEmptyDraftFailure && isAutoRecoverableFailedQueueMessage(job.lastError || '');
+          !isEmptyDraftFailure &&
+          !isConfirmBeforeFinalizeFailure &&
+          isAutoRecoverableFailedQueueMessage(job.lastError || '');
         const shouldRecoverSoon = shouldPaidSyncAssistantRunRecovery(
           autoRetryAttempts,
           recoverableError
         );
-        const assistantLabel = isEmptyDraftFailure
+        const assistantLabel = isEmptyDraftFailure || isConfirmBeforeFinalizeFailure
           ? 'Robô: aguardando ação manual'
           : shouldRecoverSoon
             ? 'Robô: reconstruindo snapshot'
