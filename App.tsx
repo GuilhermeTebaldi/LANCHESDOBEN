@@ -866,9 +866,28 @@ const formatSaleDateTime = (timestamp: Date | string): string => {
   return saleDate.toLocaleString('pt-BR');
 };
 
+const buildSaleOrderSettlementKey = (sale: Sale): string => {
+  const paymentConfirmedAtRaw = sale.payment?.confirmedAt;
+  if (paymentConfirmedAtRaw instanceof Date || typeof paymentConfirmedAtRaw === 'string') {
+    const paymentConfirmedAt = toSaleDate(paymentConfirmedAtRaw);
+    if (paymentConfirmedAt) {
+      return `confirmed:${paymentConfirmedAt.toISOString()}`;
+    }
+  }
+  const saleTimestamp = toSaleDate(sale.timestamp);
+  if (saleTimestamp) {
+    return `timestamp:${saleTimestamp.toISOString()}`;
+  }
+  const saleId = typeof sale.id === 'string' ? sale.id.trim() : '';
+  if (saleId) {
+    return `id:${saleId}`;
+  }
+  return 'unknown';
+};
+
 const buildSaleOrderGroupKey = (sale: Sale, fallbackIndex: number): string => {
   const draftId = typeof sale.saleDraftId === 'string' ? sale.saleDraftId.trim() : '';
-  if (draftId) return `draft:${draftId}`;
+  if (draftId) return `draft:${draftId}:${buildSaleOrderSettlementKey(sale)}`;
   const saleId = typeof sale.id === 'string' ? sale.id.trim() : '';
   if (saleId) return `sale:${saleId}`;
   return `fallback:${fallbackIndex}`;
@@ -10318,8 +10337,8 @@ const App: React.FC = () => {
     const groupOrder: UndoSaleGroup[] = [];
     const groupsById = new Map<string, UndoSaleGroup>();
 
-    recentSalesForUndo.forEach((sale) => {
-      const key = sale.saleDraftId ? `draft-${sale.saleDraftId}` : `sale-${sale.id}`;
+    recentSalesForUndo.forEach((sale, index) => {
+      const key = buildSaleOrderGroupKey(sale, index);
       const existing = groupsById.get(key);
       if (existing) {
         existing.sales.push(sale);

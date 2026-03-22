@@ -168,9 +168,37 @@ const getSaleOriginLabel = (origin: SaleOrigin | null | undefined): string => {
 const isAppSaleOrigin = (origin: SaleOrigin | null | undefined): boolean =>
   origin === 'IFOOD' || origin === 'APP99' || origin === 'KEETA';
 
+const toStableIsoDateTime = (value: Date | string | null | undefined): string | null => {
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value.toISOString();
+  }
+  if (typeof value === 'string') {
+    const parsed = new Date(value);
+    return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+  }
+  return null;
+};
+
+const buildOrderSettlementKey = (sale: Sale): string => {
+  const paymentConfirmedAtRaw = sale.payment?.confirmedAt;
+  const confirmedAtIso = toStableIsoDateTime(paymentConfirmedAtRaw);
+  if (confirmedAtIso) {
+    return `confirmed:${confirmedAtIso}`;
+  }
+  const saleTimestampIso = toStableIsoDateTime(sale.timestamp);
+  if (saleTimestampIso) {
+    return `timestamp:${saleTimestampIso}`;
+  }
+  const saleId = typeof sale.id === 'string' ? sale.id.trim() : '';
+  if (saleId) {
+    return `id:${saleId}`;
+  }
+  return 'unknown';
+};
+
 const buildOrderGroupKey = (sale: Sale, fallbackIndex: number): string => {
   const draftId = typeof sale.saleDraftId === 'string' ? sale.saleDraftId.trim() : '';
-  if (draftId) return `draft:${draftId}`;
+  if (draftId) return `draft:${draftId}:${buildOrderSettlementKey(sale)}`;
   const saleId = typeof sale.id === 'string' ? sale.id.trim() : '';
   if (saleId) return `sale:${saleId}`;
   return `fallback:${fallbackIndex}`;
