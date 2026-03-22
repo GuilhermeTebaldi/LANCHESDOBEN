@@ -7698,7 +7698,23 @@ const App: React.FC = () => {
       }
 
       const localPending = recoveryPendingDraftAddsRef.current[normalizedDraftId] || [];
-      if (localPending.length === 0) {
+      const hasExecutableLocalPending = localPending.some((entry) => isPendingDraftAddExecutable(entry));
+      if (localPending.length > 0 && !hasExecutableLocalPending) {
+        clearRecoveryPendingDraftAddsForDraft(normalizedDraftId);
+        pushOperationalEvent(
+          'QUEUE_HEALTH',
+          'Buffer de recovery sem itens executáveis foi limpo antes de nova reconstrução.',
+          {
+            draftId: normalizedDraftId,
+            jobId: job.id,
+            trigger: options.trigger || 'unknown',
+            attempts: job.attempts,
+          }
+        );
+      }
+
+      const recoveryPendingAfterCleanup = recoveryPendingDraftAddsRef.current[normalizedDraftId] || [];
+      if (recoveryPendingAfterCleanup.length === 0) {
         const restored = restorePendingDraftAddsFromSnapshot(job, {
           ...options,
           target: recoverySource,
@@ -7772,6 +7788,24 @@ const App: React.FC = () => {
       }
 
       if (!Array.isArray(refreshedDraft.items) || refreshedDraft.items.length === 0) {
+        const remainingRecoveryEntries = recoveryPendingDraftAddsRef.current[normalizedDraftId] || [];
+        const hasExecutableRecoveryEntries = remainingRecoveryEntries.some((entry) =>
+          isPendingDraftAddExecutable(entry)
+        );
+        const recoveryAttempt = job.attempts + 1;
+        const reachedRecoveryAttemptsLimit =
+          recoveryAttempt >= PENDING_PAID_SYNC_EMPTY_DRAFT_RECOVERY_MAX_ATTEMPTS;
+        if (!hasExecutableRecoveryEntries || reachedRecoveryAttemptsLimit) {
+          clearRecoveryPendingDraftAddsForDraft(normalizedDraftId);
+          return {
+            ok: false,
+            retryable: false,
+            message: reachedRecoveryAttemptsLimit
+              ? 'Draft permaneceu vazio após limite de recuperação automática.'
+              : 'Draft vazio sem itens executáveis para recuperação automática.',
+            statusCode: 422,
+          };
+        }
         return {
           ok: false,
           retryable: true,
@@ -7790,6 +7824,7 @@ const App: React.FC = () => {
       flushPendingDraftAdds,
       getDraftOperationEpoch,
       hydratePendingDraftAdds,
+      pushOperationalEvent,
       restorePendingDraftAddsFromSnapshot,
     ]
   );
