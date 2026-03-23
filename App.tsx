@@ -9025,7 +9025,7 @@ const App: React.FC = () => {
   const requestPendingPaidSyncProcessing = useCallback(
     (source: string, delayMs = 0): void => {
       const safeDelayMs = Math.max(0, Math.round(delayMs));
-      if (source === 'confirm-paid-enqueued' && safeDelayMs === 0) {
+      if (safeDelayMs === 0) {
         enqueueRetryDispatchTask('pending-paid-sync-main', () => processPendingPaidSyncQueue());
         return;
       }
