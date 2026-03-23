@@ -7,6 +7,31 @@ import { env } from '../config/env.js';
 import { HttpError } from '../utils/http-error.js';
 import { z } from 'zod';
 
+const OPERATIONAL_EVENT_SOURCE_PREFIX = 'sistema:ops:event:';
+const OPERATIONAL_EVENT_TYPES = [
+  'OPS_HEALTH',
+  'HEALTH_SNAPSHOT',
+  'QUEUE_HEALTH',
+  'FAILSAFE_ACTIVATED',
+  'FAILSAFE_CLEARED',
+  'BACKPRESSURE',
+  'PAYMENT_FLOW',
+  'COMMAND_SKIPPED_OBSOLETE',
+  'CART_REMOVE_LOCAL_PENDING',
+  'CART_REMOVE_REMOTE',
+  'PENDING_ADD_CANCELLED',
+] as const;
+
+const operationalEventTypeSchema = z.enum(OPERATIONAL_EVENT_TYPES);
+
+const operationalEventSchema = z.object({
+  id: z.string().trim().min(1).max(120),
+  type: operationalEventTypeSchema,
+  message: z.string().trim().min(1).max(4000),
+  timestamp: z.string().trim().min(1).max(80),
+  context: z.record(z.unknown()).optional(),
+});
+
 const errorMonitorEventSchema = z.object({
   source: z.string().trim().min(1).max(120).default('frontend'),
   level: z.enum(['error', 'warn', 'info']).default('error'),
@@ -27,6 +52,42 @@ const clearMonitorEventsSchema = z.object({
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const RATE_LIMIT_MAX_EVENTS = 180;
 const reportRateByIp = new Map<string, { windowStartedAt: number; count: number }>();
+
+const normalizeString = (value: unknown, maxLength: number): string | null => {
+  if (typeof value !== 'string') return null;
+  const normalized = value.trim();
+  if (!normalized) return null;
+  if (normalized.length > maxLength) {
+    return normalized.slice(0, maxLength);
+  }
+  return normalized;
+};
+
+const parseOperationalEventFromMetadata = (
+  metadata: Prisma.JsonValue | null
+): z.infer<typeof operationalEventSchema> | null => {
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+    return null;
+  }
+  const metadataRecord = metadata as Record<string, unknown>;
+  const metadataContext = metadataRecord.context;
+  if (!metadataContext || typeof metadataContext !== 'object' || Array.isArray(metadataContext)) {
+    return null;
+  }
+  const contextRecord = metadataContext as Record<string, unknown>;
+  const rawEvent = contextRecord.operationalPanelEvent;
+  if (!rawEvent || typeof rawEvent !== 'object' || Array.isArray(rawEvent)) {
+    return null;
+  }
+  const parsed = operationalEventSchema.safeParse(rawEvent);
+  if (!parsed.success) {
+    return null;
+  }
+  if (Number.isNaN(Date.parse(parsed.data.timestamp))) {
+    return null;
+  }
+  return parsed.data;
+};
 
 const requireMonitorPassword = (req: Request): void => {
   const providedPassword = req.header('x-monitor-password')?.trim() || '';
@@ -115,6 +176,68 @@ export const errorMonitorController = {
         metadata: row.metadata,
       }))
     );
+  },
+
+  listOperationalEvents: async (req: Request, res: Response) => {
+    const limitRaw = Number(req.query.limit);
+    const limit = Number.isFinite(limitRaw) ? Math.min(Math.max(Math.floor(limitRaw), 1), 200) : 60;
+    const queryTake = Math.min(limit * 5, 1000);
+
+    const rows = await prisma.auditLog.findMany({
+      where: {
+        entityName: 'error_monitor',
+        entityId: {
+          startsWith: OPERATIONAL_EVENT_SOURCE_PREFIX,
+        },
+        action: 'FRONTEND_ERROR_REPORTED',
+      },
+      orderBy: { createdAt: 'desc' },
+      take: queryTake,
+    });
+
+    const items = rows
+      .map((row) => {
+        const event = parseOperationalEventFromMetadata(row.metadata);
+        if (!event) return null;
+        const sourceClientId = normalizeString(
+          row.entityId.slice(OPERATIONAL_EVENT_SOURCE_PREFIX.length),
+          120
+        );
+        const metadataRecord =
+          row.metadata && typeof row.metadata === 'object' && !Array.isArray(row.metadata)
+            ? (row.metadata as Record<string, unknown>)
+            : null;
+        const metadataContext =
+          metadataRecord &&
+          metadataRecord.context &&
+          typeof metadataRecord.context === 'object' &&
+          !Array.isArray(metadataRecord.context)
+            ? (metadataRecord.context as Record<string, unknown>)
+            : null;
+        const contextClientId = metadataContext ? normalizeString(metadataContext.clientId, 120) : null;
+        const clientId = contextClientId || sourceClientId;
+
+        return {
+          id: event.id,
+          type: event.type,
+          message: event.message,
+          timestamp: event.timestamp,
+          context: event.context ?? null,
+          source: row.entityId,
+          createdAt: row.createdAt,
+          requestId: row.requestId,
+          ipAddress: row.ipAddress,
+          userAgent: row.userAgent,
+          clientId,
+        };
+      })
+      .filter(
+        (entry): entry is NonNullable<typeof entry> =>
+          entry !== null
+      )
+      .slice(0, limit);
+
+    res.status(200).json(items);
   },
 
   clear: async (req: Request, res: Response) => {

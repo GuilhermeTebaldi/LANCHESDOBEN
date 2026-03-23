@@ -5,6 +5,8 @@ const MAX_STACK_LENGTH = 12000;
 const RECENT_EVENT_WINDOW_MS = 8000;
 const MAX_RECENT_EVENTS = 500;
 const MONITOR_INSTALL_KEY = '__xburger_error_monitor_installed__';
+const OPERATIONAL_EVENT_SOURCE_PREFIX = 'sistema:ops:event';
+const OPERATIONAL_EVENTS_ENDPOINT_PATH = '/api/v1/errors/ops/events';
 
 type ErrorMonitorLevel = 'error' | 'warn' | 'info';
 
@@ -17,6 +19,41 @@ interface ErrorMonitorEventPayload {
   path?: string;
   stack?: string;
   context?: Record<string, unknown>;
+}
+
+type OperationalPanelEventType =
+  | 'OPS_HEALTH'
+  | 'HEALTH_SNAPSHOT'
+  | 'QUEUE_HEALTH'
+  | 'FAILSAFE_ACTIVATED'
+  | 'FAILSAFE_CLEARED'
+  | 'BACKPRESSURE'
+  | 'PAYMENT_FLOW'
+  | 'COMMAND_SKIPPED_OBSOLETE'
+  | 'CART_REMOVE_LOCAL_PENDING'
+  | 'CART_REMOVE_REMOTE'
+  | 'PENDING_ADD_CANCELLED';
+
+export interface OperationalPanelEventPayload {
+  id: string;
+  type: OperationalPanelEventType;
+  message: string;
+  timestamp: string;
+  context?: Record<string, unknown>;
+}
+
+interface ReportOperationalPanelEventInput {
+  clientId: string;
+  event: OperationalPanelEventPayload;
+}
+
+export interface OperationalPanelEventFeedEntry extends OperationalPanelEventPayload {
+  source: string;
+  createdAt: string;
+  requestId: string | null;
+  ipAddress: string | null;
+  userAgent: string | null;
+  clientId: string | null;
 }
 
 const recentEvents = new Map<string, number>();
@@ -36,6 +73,8 @@ const resolveApiBaseUrl = (): string => {
 };
 
 const resolveErrorMonitorEndpoint = (): string => `${resolveApiBaseUrl()}/api/v1/errors/events`;
+const resolveOperationalEventsEndpoint = (): string =>
+  `${resolveApiBaseUrl()}${OPERATIONAL_EVENTS_ENDPOINT_PATH}`;
 
 const currentPath = (): string => {
   if (typeof window === 'undefined') return '';
@@ -147,6 +186,97 @@ export const reportErrorMonitorEvent = (input: ErrorMonitorEventPayload): void =
     stack: normalizeText(input.stack, MAX_STACK_LENGTH),
     context: input.context,
   });
+};
+
+export const reportOperationalPanelEvent = (input: ReportOperationalPanelEventInput): void => {
+  const clientId = normalizeText(input.clientId, 120);
+  if (!clientId) return;
+  const eventId = normalizeText(input.event.id, 120);
+  const eventMessage = normalizeText(input.event.message, MAX_MESSAGE_LENGTH);
+  const eventTimestamp = normalizeText(input.event.timestamp, 80);
+  if (!eventId || !eventMessage || !eventTimestamp || Number.isNaN(Date.parse(eventTimestamp))) {
+    return;
+  }
+  reportErrorMonitorEvent({
+    source: `${OPERATIONAL_EVENT_SOURCE_PREFIX}:${clientId}`,
+    level: 'info',
+    message: eventMessage,
+    context: {
+      clientId,
+      operationalPanelEvent: {
+        id: eventId,
+        type: input.event.type,
+        message: eventMessage,
+        timestamp: eventTimestamp,
+        context: input.event.context,
+      },
+    },
+  });
+};
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  !!value && typeof value === 'object' && !Array.isArray(value);
+
+const normalizeOperationalPanelFeedEntry = (value: unknown): OperationalPanelEventFeedEntry | null => {
+  if (!isRecord(value)) return null;
+  const id = normalizeText(value.id, 120);
+  const type = normalizeText(value.type, 60);
+  const message = normalizeText(value.message, MAX_MESSAGE_LENGTH);
+  const timestamp = normalizeText(value.timestamp, 80);
+  const source = normalizeText(value.source, 160);
+  const createdAt = normalizeText(value.createdAt, 80);
+  if (
+    !id ||
+    !type ||
+    !message ||
+    !timestamp ||
+    Number.isNaN(Date.parse(timestamp)) ||
+    !source ||
+    !createdAt ||
+    Number.isNaN(Date.parse(createdAt))
+  ) {
+    return null;
+  }
+  const context = isRecord(value.context) ? value.context : undefined;
+  return {
+    id,
+    type: type as OperationalPanelEventType,
+    message,
+    timestamp,
+    context,
+    source,
+    createdAt,
+    requestId: normalizeText(value.requestId, 120) || null,
+    ipAddress: normalizeText(value.ipAddress, 64) || null,
+    userAgent: normalizeText(value.userAgent, 512) || null,
+    clientId: normalizeText(value.clientId, 120) || null,
+  };
+};
+
+export const fetchOperationalPanelEvents = async (
+  options: { limit?: number; signal?: AbortSignal } = {}
+): Promise<OperationalPanelEventFeedEntry[]> => {
+  const limit =
+    typeof options.limit === 'number' && Number.isFinite(options.limit)
+      ? Math.min(Math.max(Math.floor(options.limit), 1), 200)
+      : 60;
+  const query = new URLSearchParams({
+    limit: String(limit),
+  });
+  const response = await fetch(`${resolveOperationalEventsEndpoint()}?${query.toString()}`, {
+    method: 'GET',
+    cache: 'no-store',
+    headers: {
+      Accept: 'application/json',
+    },
+    signal: options.signal,
+  });
+  if (!response.ok) return [];
+  const payload = (await response.json()) as unknown;
+  if (!Array.isArray(payload)) return [];
+  return payload
+    .map((entry) => normalizeOperationalPanelFeedEntry(entry))
+    .filter((entry): entry is OperationalPanelEventFeedEntry => entry !== null);
 };
 
 export const installGlobalErrorMonitor = (sourcePrefix = 'frontend'): void => {

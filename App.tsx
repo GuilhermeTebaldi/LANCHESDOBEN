@@ -60,7 +60,11 @@ import {
   type ReceiptPrintPayload,
   type ReceiptPrintPayloadInput,
 } from './utils/receiptPrintPayload';
-import { reportErrorMonitorEvent } from './utils/errorMonitorClient';
+import {
+  fetchOperationalPanelEvents,
+  reportErrorMonitorEvent,
+  reportOperationalPanelEvent,
+} from './utils/errorMonitorClient';
 import {
   operationalStorage,
   type OperationalStorageResolvedResult,
@@ -99,6 +103,8 @@ const AUTO_UPDATE_SCROLL_STATE_KEY = 'qb_auto_update_scroll_state_v1';
 const LEGACY_PENDING_ADDS_DIAGNOSE_WINDOW_KEY = '__qbDiagnoseLegacyPendingAdds';
 const AUTO_UPDATE_CHECK_INTERVAL_MS = 45_000;
 const AUTO_UPDATE_FORCE_RELOAD_AFTER_MS = 10 * 60 * 1000;
+const OPS_CLIENT_INSTANCE_KEY = 'qb_ops_client_instance_v1';
+const OPS_REMOTE_EVENTS_POLL_INTERVAL_MS = 12_000;
 
 type SaleRegisterCommand = Extract<StateCommand, { type: 'SALE_REGISTER' }>;
 type SaleDraftAddItemCommand = Extract<StateCommand, { type: 'SALE_DRAFT_ADD_ITEM' }>;
@@ -308,6 +314,7 @@ interface OperationalHealthSnapshot {
 interface OperationalEventLogEntry {
   id: string;
   type:
+    | 'OPS_HEALTH'
     | 'HEALTH_SNAPSHOT'
     | 'QUEUE_HEALTH'
     | 'FAILSAFE_ACTIVATED'
@@ -717,6 +724,25 @@ const createClientId = (prefix: string): string => {
     return `${prefix}-${crypto.randomUUID()}`;
   }
   return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+};
+
+const readOrCreateOpsClientInstanceId = (): string => {
+  if (typeof window === 'undefined') return createClientId('ops-client');
+  try {
+    const existing = window.localStorage.getItem(OPS_CLIENT_INSTANCE_KEY);
+    if (existing && existing.trim()) {
+      return existing.trim();
+    }
+  } catch {
+    // ignore storage read failures
+  }
+  const created = createClientId('ops-client');
+  try {
+    window.localStorage.setItem(OPS_CLIENT_INSTANCE_KEY, created);
+  } catch {
+    // ignore storage write failures
+  }
+  return created;
 };
 
 const isLocalPendingDraftItemId = (itemId: string): boolean =>
@@ -2068,6 +2094,7 @@ const normalizeOperationalEventLogEntry = (value: unknown): OperationalEventLogE
   const id = typeof source.id === 'string' && source.id.trim() ? source.id.trim() : createClientId('ops');
   const typeCandidate = typeof source.type === 'string' ? source.type : '';
   const isSupportedType =
+    typeCandidate === 'OPS_HEALTH' ||
     typeCandidate === 'HEALTH_SNAPSHOT' ||
     typeCandidate === 'QUEUE_HEALTH' ||
     typeCandidate === 'FAILSAFE_ACTIVATED' ||
@@ -2104,6 +2131,32 @@ const normalizeOperationalEventLog = (parsed: unknown): OperationalEventLogEntry
   return parsed
     .map((entry) => normalizeOperationalEventLogEntry(entry))
     .filter((entry): entry is OperationalEventLogEntry => entry !== null)
+    .slice(0, 20);
+};
+
+const mergeOperationalEventLogs = (
+  localEvents: OperationalEventLogEntry[],
+  remoteEvents: OperationalEventLogEntry[]
+): OperationalEventLogEntry[] => {
+  const byId = new Map<string, OperationalEventLogEntry>();
+
+  [...localEvents, ...remoteEvents].forEach((entry) => {
+    const current = byId.get(entry.id);
+    if (!current) {
+      byId.set(entry.id, entry);
+      return;
+    }
+    const currentTs = Date.parse(current.timestamp);
+    const nextTs = Date.parse(entry.timestamp);
+    const currentMs = Number.isFinite(currentTs) ? currentTs : 0;
+    const nextMs = Number.isFinite(nextTs) ? nextTs : 0;
+    if (nextMs >= currentMs) {
+      byId.set(entry.id, entry);
+    }
+  });
+
+  return Array.from(byId.values())
+    .sort((left, right) => right.timestamp.localeCompare(left.timestamp))
     .slice(0, 20);
 };
 
@@ -2517,6 +2570,8 @@ const App: React.FC = () => {
   const paymentFlowTelemetryByDraftRef = useRef<Map<string, PaymentFlowTelemetryEntry>>(new Map());
   const paymentFlowTelemetryRecentRef = useRef<PaymentFlowTelemetryRecord[]>([]);
   const operationalEventLogRef = useRef<OperationalEventLogEntry[]>([]);
+  const operationalRemoteEventLogRef = useRef<OperationalEventLogEntry[]>([]);
+  const opsClientInstanceIdRef = useRef<string>(readOrCreateOpsClientInstanceId());
   const optimisticRemovedDraftItemsRef = useRef<Map<string, Set<string>>>(new Map());
   const draftItemRemoteMutationRetryAttemptsRef = useRef<Map<string, number>>(new Map());
   const draftLifecycleStageRef = useRef<Map<string, DraftLifecycleStage>>(new Map());
@@ -3125,6 +3180,11 @@ const App: React.FC = () => {
     setSyncingPaidDraftIds(Array.from(nextSet));
   }, []);
 
+  const applyOperationalEventLogState = useCallback((localEvents: OperationalEventLogEntry[]): void => {
+    const merged = mergeOperationalEventLogs(localEvents, operationalRemoteEventLogRef.current);
+    setOperationalEventLog(merged);
+  }, []);
+
   const pushOperationalEvent = useCallback(
     (
       type: OperationalEventLogEntry['type'],
@@ -3140,10 +3200,14 @@ const App: React.FC = () => {
       };
       const nextList = [next, ...operationalEventLogRef.current].slice(0, 20);
       operationalEventLogRef.current = nextList;
-      setOperationalEventLog(nextList);
+      applyOperationalEventLogState(nextList);
       saveOperationalEventLog(nextList);
+      reportOperationalPanelEvent({
+        clientId: opsClientInstanceIdRef.current,
+        event: next,
+      });
     },
-    []
+    [applyOperationalEventLogState]
   );
 
   useEffect(() => {
@@ -3729,7 +3793,7 @@ const App: React.FC = () => {
     if (!isAccessVerified) return;
     const fallbackEvents = loadOperationalEventLogLocalFallback();
     operationalEventLogRef.current = fallbackEvents;
-    setOperationalEventLog(fallbackEvents);
+    applyOperationalEventLogState(fallbackEvents);
 
     let cancelled = false;
     void (async () => {
@@ -3737,14 +3801,46 @@ const App: React.FC = () => {
       if (cancelled) return;
       const events = resolved.value || [];
       operationalEventLogRef.current = events;
-      setOperationalEventLog(events);
+      applyOperationalEventLogState(events);
       saveOperationalEventLog(events);
     })();
 
     return () => {
       cancelled = true;
     };
-  }, [isAccessVerified]);
+  }, [applyOperationalEventLogState, isAccessVerified]);
+
+  useEffect(() => {
+    if (!isAccessVerified) return;
+    let cancelled = false;
+    let inFlight = false;
+
+    const syncRemoteOperationalEvents = async (): Promise<void> => {
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const remoteEvents = await fetchOperationalPanelEvents({ limit: 120 });
+        if (cancelled) return;
+        const normalizedRemote = normalizeOperationalEventLog(remoteEvents);
+        operationalRemoteEventLogRef.current = normalizedRemote;
+        applyOperationalEventLogState(operationalEventLogRef.current);
+      } catch {
+        // keep local-only view when remote feed is unavailable
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    void syncRemoteOperationalEvents();
+    const intervalId = window.setInterval(() => {
+      void syncRemoteOperationalEvents();
+    }, OPS_REMOTE_EVENTS_POLL_INTERVAL_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+    };
+  }, [applyOperationalEventLogState, isAccessVerified]);
 
   useEffect(() => {
     const handleTogglePanel = (event: KeyboardEvent): void => {
