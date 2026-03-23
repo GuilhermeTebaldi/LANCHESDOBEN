@@ -2200,6 +2200,7 @@ const PENDING_PAID_SYNC_ORDER_SETTLE_RETRY_STEPS_MS = [1_200, 1_800, 2_600, 3_80
 const PENDING_PAID_SYNC_EMPTY_DRAFT_RECOVERY_DELAY_MS = 1800;
 const PENDING_PAID_SYNC_EMPTY_DRAFT_RECOVERY_MAX_ATTEMPTS = 5;
 const PENDING_PAID_SYNC_QUEUE_EMPTY_DRAFT_MAX_RECOVERY_ATTEMPTS = 2;
+const PAID_SYNC_UI_LOCK_MAX_MS = 15_000;
 const PAID_SYNC_ASSISTANT_STATUS_TTL_MS = 2800;
 const DRAFT_PAYMENT_TRANSITION_GRACE_MS = 12_000;
 const DRAFT_REOPEN_CONFIRMATION_MS = 2_500;
@@ -2462,6 +2463,7 @@ const App: React.FC = () => {
   const pendingDraftAddsIngressBlockedUntilRef = useRef(0);
   const pendingPaidSyncActiveWorkersRef = useRef(0);
   const pendingPaidSyncRunningDraftIdsRef = useRef<Set<string>>(new Set());
+  const paidSyncUiLockStartedAtRef = useRef<number | null>(null);
   const isFlushingOfflineSalesRef = useRef(false);
   const isOfflineQueueHydratedRef = useRef(false);
   const pendingVersionDetectedAtRef = useRef<number | null>(null);
@@ -8869,6 +8871,12 @@ const App: React.FC = () => {
           bumpEpoch: false,
         });
         const atomicFinalizeAndConfirmCommand = buildAtomicFinalizeAndConfirmCommand();
+        pushOperationalEvent('PAYMENT_FLOW', 'PAID_SYNC_BACKEND_SENT', {
+          draftId: currentJob.draftId,
+          jobId: currentJob.id,
+          commandType: atomicFinalizeAndConfirmCommand.type,
+          commandId: atomicFinalizeAndConfirmCommand.commandId || null,
+        });
         const atomicStartedAt = performance.now();
         try {
           const atomicErrorSink: RunCommandErrorSink = {};
@@ -8898,6 +8906,12 @@ const App: React.FC = () => {
               commandId: atomicFinalizeAndConfirmCommand.commandId || null,
             }
           );
+          pushOperationalEvent('PAYMENT_FLOW', 'PAID_SYNC_BACKEND_ACK', {
+            draftId: currentJob.draftId,
+            jobId: currentJob.id,
+            commandType: atomicFinalizeAndConfirmCommand.type,
+            commandId: atomicFinalizeAndConfirmCommand.commandId || null,
+          });
         } finally {
           markPaymentFlowTelemetryStageDuration(
             currentJob.draftId,
@@ -9170,6 +9184,74 @@ const App: React.FC = () => {
       }
     };
   }, [requestPendingPaidSyncProcessing]);
+
+  useEffect(() => {
+    if (!isAccessVerified) return;
+    if (!isConfirmingPaid) {
+      paidSyncUiLockStartedAtRef.current = null;
+      return;
+    }
+    paidSyncUiLockStartedAtRef.current = Date.now();
+    const timerId = window.setTimeout(() => {
+      if (!isConfirmingPaid) return;
+      setIsConfirmingPaid(false);
+      pushOperationalEvent(
+        'PAYMENT_FLOW',
+        'PAID_SYNC_UI_LOCK_RELEASED_BY_RECOVERY',
+        {
+          lockDurationMs: PAID_SYNC_UI_LOCK_MAX_MS,
+          pendingQueue: pendingPaidSyncQueueRef.current.length,
+          failedQueue: failedPaidSyncQueueRef.current.length,
+          syncingDrafts: Array.from(syncingPaidDraftIdsRef.current),
+        }
+      );
+      reportErrorMonitorEvent({
+        source: 'sistema:paid-sync:ui-lock-recovery',
+        level: 'warn',
+        message: 'UI lock de confirmação pago liberado automaticamente por watchdog.',
+        context: {
+          lockDurationMs: PAID_SYNC_UI_LOCK_MAX_MS,
+          pendingQueue: pendingPaidSyncQueueRef.current.length,
+          failedQueue: failedPaidSyncQueueRef.current.length,
+          syncingDrafts: Array.from(syncingPaidDraftIdsRef.current),
+        },
+      });
+      showCornerSync('error', 'Tela destravada automaticamente. Continuando sincronização...', 2600);
+    }, PAID_SYNC_UI_LOCK_MAX_MS);
+
+    return () => {
+      window.clearTimeout(timerId);
+    };
+  }, [isAccessVerified, isConfirmingPaid, pushOperationalEvent, showCornerSync]);
+
+  useEffect(() => {
+    if (!isAccessVerified) return;
+    if (typeof window === 'undefined') return;
+
+    const emitReturnEvent = (source: 'focus' | 'visibilitychange') => {
+      if (document.visibilityState === 'hidden') return;
+      pushOperationalEvent('PAYMENT_FLOW', 'PAID_SYNC_RETURNED_TO_MAIN', {
+        source,
+        pendingQueue: pendingPaidSyncQueueRef.current.length,
+        failedQueue: failedPaidSyncQueueRef.current.length,
+        syncingDrafts: Array.from(syncingPaidDraftIdsRef.current),
+      });
+    };
+
+    const handleFocus = () => emitReturnEvent('focus');
+    const handleVisibility = () => {
+      if (!document.hidden) {
+        emitReturnEvent('visibilitychange');
+      }
+    };
+
+    window.addEventListener('focus', handleFocus);
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      window.removeEventListener('focus', handleFocus);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [isAccessVerified, pushOperationalEvent]);
 
   const handleRetryFailedPaidSyncJob = useCallback(
     async (jobId: string, options: { autoRetry?: boolean } = {}) => {
@@ -9833,6 +9915,15 @@ const App: React.FC = () => {
     const pendingItemsCount = countVisiblePendingDraftAdds(pendingDraftAddsRef.current[draftId] || []);
     const paymentClickAtMs = Date.now();
     setIsConfirmingPaid(true);
+    const uiLockStartedAt = Date.now();
+    paidSyncUiLockStartedAtRef.current = uiLockStartedAt;
+    pushOperationalEvent('PAYMENT_FLOW', 'PAID_SYNC_START', {
+      draftId,
+      paymentMethod: paymentSnapshot.paymentMethod,
+      saleOrigin: paymentSnapshot.saleOrigin,
+      pendingVisibleItems: pendingItemsCount,
+      clickAt: new Date(paymentClickAtMs).toISOString(),
+    });
     let syncQueued = false;
     try {
       void moveVisiblePendingDraftAddsToRecovery(draftId).catch((error) => {
@@ -9856,6 +9947,12 @@ const App: React.FC = () => {
         attempts: 0,
       };
       registerPaymentFlowTelemetryStart(draftId, queuedJob.id, paymentClickAtMs);
+      pushOperationalEvent('PAYMENT_FLOW', 'PAID_SYNC_COMMAND_CREATED', {
+        draftId,
+        jobId: queuedJob.id,
+        finalizeCommandId: queuedJob.finalizeCommandId,
+        confirmCommandId: queuedJob.confirmCommandId,
+      });
 
       setDraftSyncInProgress(draftId, true);
       setIsSaleOriginSetupOpen(false);
@@ -9892,6 +9989,11 @@ const App: React.FC = () => {
       requestPendingPaidSyncProcessing('confirm-paid-enqueued');
       // Kick off immediately in the current tab before any print navigation can block timers/event-loop.
       void processPendingPaidSyncQueue();
+      pushOperationalEvent('PAYMENT_FLOW', 'PAID_SYNC_SYNC_TRIGGERED', {
+        draftId,
+        jobId: queuedJob.id,
+        pendingQueue: pendingPaidSyncQueueRef.current.length,
+      });
 
       const receiptPrintId = receiptPayload?.id || draftId;
       window.setTimeout(() => {
@@ -9904,7 +10006,18 @@ const App: React.FC = () => {
           showNotification(
             'Não foi possível abrir o cupom agora. Use o Histórico para segunda via.'
           );
+          pushOperationalEvent('PAYMENT_FLOW', 'PAID_SYNC_PRINT_OPEN_FAILED', {
+            draftId,
+            receiptPrintId,
+            jobId: queuedJob.id,
+          });
+          return;
         }
+        pushOperationalEvent('PAYMENT_FLOW', 'PAID_SYNC_PRINT_OPENED', {
+          draftId,
+          receiptPrintId,
+          jobId: queuedJob.id,
+        });
       }, 0);
     } catch (error) {
       reportErrorMonitorEvent({
@@ -9934,6 +10047,16 @@ const App: React.FC = () => {
       showNotification('Erro inesperado ao confirmar pagamento. Tente novamente.');
     } finally {
       setIsConfirmingPaid(false);
+      const unlockedAtMs = Date.now();
+      const lockDurationMs = Math.max(0, unlockedAtMs - uiLockStartedAt);
+      paidSyncUiLockStartedAtRef.current = null;
+      pushOperationalEvent('PAYMENT_FLOW', 'PAID_SYNC_UI_UNLOCKED', {
+        draftId,
+        lockDurationMs,
+        syncQueued,
+        pendingQueue: pendingPaidSyncQueueRef.current.length,
+        failedQueue: failedPaidSyncQueueRef.current.length,
+      });
     }
   };
 
