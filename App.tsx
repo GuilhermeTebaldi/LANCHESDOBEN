@@ -9651,6 +9651,13 @@ const App: React.FC = () => {
     } catch {
       // ignore cross-window write errors
     }
+    try {
+      // Keep POS tab active so paid-sync can continue even if browser opens the print tab focused.
+      printWindow.blur();
+      window.focus();
+    } catch {
+      // ignore focus management failures
+    }
     return printWindow;
   };
 
@@ -9826,78 +9833,108 @@ const App: React.FC = () => {
     const pendingItemsCount = countVisiblePendingDraftAdds(pendingDraftAddsRef.current[draftId] || []);
     const paymentClickAtMs = Date.now();
     setIsConfirmingPaid(true);
-    void moveVisiblePendingDraftAddsToRecovery(draftId).catch((error) => {
-      reportErrorMonitorEvent({
-        source: 'sistema:paid-sync:move-visible-to-recovery',
-        level: 'warn',
-        message: 'Falha ao transferir pendencias visiveis para buffer de recovery.',
-        stack: error instanceof Error ? error.stack : undefined,
-        context: {
-          draftId,
-        },
+    let syncQueued = false;
+    try {
+      void moveVisiblePendingDraftAddsToRecovery(draftId).catch((error) => {
+        reportErrorMonitorEvent({
+          source: 'sistema:paid-sync:move-visible-to-recovery',
+          level: 'warn',
+          message: 'Falha ao transferir pendencias visiveis para buffer de recovery.',
+          stack: error instanceof Error ? error.stack : undefined,
+          context: {
+            draftId,
+          },
+        });
       });
-    });
-    const queuedJob: PendingPaidSyncJob = {
-      id: createClientId('paid-sync-job'),
-      draftId,
-      snapshot: clonePaymentCommitSnapshot(paymentSnapshot),
-      finalizeCommandId: createClientId('cmd'),
-      confirmCommandId: createClientId('cmd'),
-      createdAt: new Date().toISOString(),
-      attempts: 0,
-    };
-    registerPaymentFlowTelemetryStart(draftId, queuedJob.id, paymentClickAtMs);
+      const queuedJob: PendingPaidSyncJob = {
+        id: createClientId('paid-sync-job'),
+        draftId,
+        snapshot: clonePaymentCommitSnapshot(paymentSnapshot),
+        finalizeCommandId: createClientId('cmd'),
+        confirmCommandId: createClientId('cmd'),
+        createdAt: new Date().toISOString(),
+        attempts: 0,
+      };
+      registerPaymentFlowTelemetryStart(draftId, queuedJob.id, paymentClickAtMs);
 
-    setDraftSyncInProgress(draftId, true);
-    setIsSaleOriginSetupOpen(false);
-    setIsSplitSetupOpen(false);
-    setIsPaymentOpen(false);
-    setIsCartOpen(false);
+      setDraftSyncInProgress(draftId, true);
+      setIsSaleOriginSetupOpen(false);
+      setIsSplitSetupOpen(false);
+      setIsPaymentOpen(false);
+      setIsCartOpen(false);
 
-    if (activeDraftIdRef.current === draftId) {
-      activeDraftIdRef.current = null;
-    }
-    setActiveDraftId(null);
-
-    const queued = enqueuePendingPaidSyncJob(queuedJob);
-    if (!queued) {
-      setDraftSyncInProgress(draftId, false);
-      setDraftLifecycleStage(draftId, 'OPEN', {
-        reason: 'pending_paid_enqueue_rejected',
-        bumpEpoch: false,
-      });
-      if (receiptPayload) {
-        removeReceiptPrintPayload(receiptPayload.id);
+      if (activeDraftIdRef.current === draftId) {
+        activeDraftIdRef.current = null;
       }
-      closePreparedReceiptWindow(preparedPrintWindow);
-      setIsConfirmingPaid(false);
-      return;
-    }
-    markPaymentFlowTelemetryLocalPersisted(draftId, queuedJob.id);
-    showCornerSync(
-      'syncing',
-      pendingItemsCount > 0
-        ? `Pedido em fila. Enviando ${pendingItemsCount} item(ns)...`
-        : 'Pedido em fila. Confirmando no banco...'
-    );
-    requestPendingPaidSyncProcessing('confirm-paid-enqueued');
-    // Kick off immediately in the current tab before any print navigation can block timers/event-loop.
-    void processPendingPaidSyncQueue();
-    setIsConfirmingPaid(false);
+      setActiveDraftId(null);
 
-    const receiptPrintId = receiptPayload?.id || draftId;
-    window.setTimeout(() => {
-      const openedPrintWindow = navigatePreparedReceiptWindow(preparedPrintWindow, receiptPrintId);
-      if (!openedPrintWindow) {
+      const queued = enqueuePendingPaidSyncJob(queuedJob);
+      if (!queued) {
+        setDraftSyncInProgress(draftId, false);
+        setDraftLifecycleStage(draftId, 'OPEN', {
+          reason: 'pending_paid_enqueue_rejected',
+          bumpEpoch: false,
+        });
         if (receiptPayload) {
           removeReceiptPrintPayload(receiptPayload.id);
         }
         closePreparedReceiptWindow(preparedPrintWindow);
-        showNotification(
-          'Não foi possível abrir o cupom agora. Use o Histórico para segunda via.'
-        );
+        return;
       }
-    }, 0);
+      syncQueued = true;
+      markPaymentFlowTelemetryLocalPersisted(draftId, queuedJob.id);
+      showCornerSync(
+        'syncing',
+        pendingItemsCount > 0
+          ? `Pedido em fila. Enviando ${pendingItemsCount} item(ns)...`
+          : 'Pedido em fila. Confirmando no banco...'
+      );
+      requestPendingPaidSyncProcessing('confirm-paid-enqueued');
+      // Kick off immediately in the current tab before any print navigation can block timers/event-loop.
+      void processPendingPaidSyncQueue();
+
+      const receiptPrintId = receiptPayload?.id || draftId;
+      window.setTimeout(() => {
+        const openedPrintWindow = navigatePreparedReceiptWindow(preparedPrintWindow, receiptPrintId);
+        if (!openedPrintWindow) {
+          if (receiptPayload) {
+            removeReceiptPrintPayload(receiptPayload.id);
+          }
+          closePreparedReceiptWindow(preparedPrintWindow);
+          showNotification(
+            'Não foi possível abrir o cupom agora. Use o Histórico para segunda via.'
+          );
+        }
+      }, 0);
+    } catch (error) {
+      reportErrorMonitorEvent({
+        source: 'sistema:paid-sync:confirm-paid-unexpected-error',
+        level: 'error',
+        message: 'Falha inesperada ao iniciar sincronização de pagamento.',
+        stack: error instanceof Error ? error.stack : undefined,
+        context: {
+          draftId,
+          paymentMethod: paymentSnapshot.paymentMethod,
+          saleOrigin: paymentSnapshot.saleOrigin,
+          syncQueued,
+        },
+      });
+      if (!syncQueued) {
+        setDraftSyncInProgress(draftId, false);
+        setDraftLifecycleStage(draftId, 'OPEN', {
+          reason: 'pending_paid_unexpected_error',
+          bumpEpoch: false,
+        });
+        if (receiptPayload) {
+          removeReceiptPrintPayload(receiptPayload.id);
+        }
+        closePreparedReceiptWindow(preparedPrintWindow);
+      }
+      showCornerSync('error', 'Falha ao iniciar envio da venda.', 2600);
+      showNotification('Erro inesperado ao confirmar pagamento. Tente novamente.');
+    } finally {
+      setIsConfirmingPaid(false);
+    }
   };
 
   const handleUndoLastSale = () => {
