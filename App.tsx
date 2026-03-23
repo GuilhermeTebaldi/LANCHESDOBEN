@@ -2212,7 +2212,7 @@ const PENDING_DRAFT_BACKGROUND_SYNC_RETRY_BASE_MS = 1800;
 const PENDING_DRAFT_BACKGROUND_SYNC_RETRY_MAX_MS = 45000;
 const PENDING_DRAFT_BACKGROUND_SYNC_RETRY_JITTER = 0.2;
 const MAX_CONCURRENT_COMMANDS = 2;
-const PENDING_PAID_SYNC_MAX_WORKERS = 1;
+const PENDING_PAID_SYNC_MAX_WORKERS = 2;
 const BACKEND_OPERATION_TIMEOUT_MS = 25_000;
 const PENDING_PAID_SYNC_QUEUE_MAX_SIZE = 50;
 const PENDING_DRAFT_ADDS_MAX_SIZE = 100;
@@ -9026,6 +9026,7 @@ const App: React.FC = () => {
     (source: string, delayMs = 0): void => {
       const safeDelayMs = Math.max(0, Math.round(delayMs));
       if (safeDelayMs === 0) {
+        void processPendingPaidSyncQueue();
         enqueueRetryDispatchTask('pending-paid-sync-main', () => processPendingPaidSyncQueue());
         return;
       }
