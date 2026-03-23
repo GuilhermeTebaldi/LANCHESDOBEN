@@ -51,6 +51,7 @@ import {
   getStockQuantityFromRecipeQuantity,
   normalizeStockMovementByUnit,
   normalizeStockQuantityByUnit,
+  synchronizeComboProductRecipes,
 } from './utils/recipe';
 import {
   removeReceiptPrintPayload,
@@ -95,6 +96,7 @@ const RECEIPT_PRINT_PRESET_STORAGE_KEY = 'qb_receipt_print_preset_v1';
 const RESTAURANT_NAME_STORAGE_KEY = 'qb_restaurant_name';
 const DEFAULT_RECEIPT_RESTAURANT_NAME = 'LANCHESDOBEN';
 const AUTO_UPDATE_SCROLL_STATE_KEY = 'qb_auto_update_scroll_state_v1';
+const LEGACY_PENDING_ADDS_DIAGNOSE_WINDOW_KEY = '__qbDiagnoseLegacyPendingAdds';
 const AUTO_UPDATE_CHECK_INTERVAL_MS = 45_000;
 const AUTO_UPDATE_FORCE_RELOAD_AFTER_MS = 10 * 60 * 1000;
 
@@ -130,6 +132,32 @@ interface PendingDraftAdd {
   updatedAt: string;
   status: PendingDraftAddStatus;
   terminalReason?: string;
+}
+
+interface LegacyPendingAddDiagnosticEntry {
+  source: PendingDraftAddsSource;
+  draftId: string;
+  localItemId: string;
+  commandId: string;
+  productId: string;
+  productName: string;
+  quantity: number;
+  status: PendingDraftAddStatus;
+  queuedAt: string;
+  updatedAt: string;
+  recipeOverrideLength: 0;
+  fallbackProductRecipeLength: number;
+}
+
+interface LegacyPendingAddsDiagnosisReport {
+  generatedAt: string;
+  totals: {
+    scannedEntries: number;
+    legacyWithoutRecipeOverride: number;
+    bySource: Record<PendingDraftAddsSource, number>;
+    byStatus: Record<PendingDraftAddStatus, number>;
+  };
+  legacyEntries: LegacyPendingAddDiagnosticEntry[];
 }
 
 interface PendingDraftAddCancellationIntent {
@@ -2669,6 +2697,101 @@ const App: React.FC = () => {
       syncingPaidDraftIds,
     ]
   );
+
+  const diagnoseLegacyPendingAdds = useCallback((): LegacyPendingAddsDiagnosisReport => {
+    const productById = new Map<string, Product>(
+      products.map((product): [string, Product] => [product.id, product])
+    );
+    const byStatus: Record<PendingDraftAddStatus, number> = {
+      ACTIVE: 0,
+      IN_FLIGHT: 0,
+      CANCELLED: 0,
+      APPLIED: 0,
+      RECONCILED: 0,
+      FAILED_TERMINAL: 0,
+    };
+    const bySource: Record<PendingDraftAddsSource, number> = {
+      visible: 0,
+      recovery: 0,
+    };
+    const legacyEntries: LegacyPendingAddDiagnosticEntry[] = [];
+    let scannedEntries = 0;
+
+    const scanRecord = (
+      source: PendingDraftAddsSource,
+      record: PendingDraftAddsByDraftId
+    ): void => {
+      Object.entries(record).forEach(([draftId, entries]) => {
+        entries.forEach((entry) => {
+          scannedEntries += 1;
+          bySource[source] += 1;
+          byStatus[entry.status] += 1;
+
+          const normalizedOverride = normalizeRecipeOverride(entry.recipeOverride);
+          if (normalizedOverride && normalizedOverride.length > 0) {
+            return;
+          }
+
+          const sourceProduct = productById.get(entry.productId);
+          legacyEntries.push({
+            source,
+            draftId,
+            localItemId: entry.localItemId,
+            commandId: entry.commandId,
+            productId: entry.productId,
+            productName: sourceProduct?.name || entry.productId,
+            quantity: Math.max(1, Math.round(Number(entry.quantity) || 1)),
+            status: entry.status,
+            queuedAt: entry.queuedAt,
+            updatedAt: entry.updatedAt,
+            recipeOverrideLength: 0,
+            fallbackProductRecipeLength: sourceProduct?.recipe?.length || 0,
+          });
+        });
+      });
+    };
+
+    scanRecord('visible', pendingDraftAddsRef.current);
+    scanRecord('recovery', recoveryPendingDraftAddsRef.current);
+
+    const report: LegacyPendingAddsDiagnosisReport = {
+      generatedAt: new Date().toISOString(),
+      totals: {
+        scannedEntries,
+        legacyWithoutRecipeOverride: legacyEntries.length,
+        bySource,
+        byStatus,
+      },
+      legacyEntries,
+    };
+
+    return report;
+  }, [products]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const target = window as Window & Record<string, unknown>;
+    const runDiagnosis = () => {
+      const report = diagnoseLegacyPendingAdds();
+      console.groupCollapsed(
+        `[diagnostic] legacy pending adds sem recipeOverride: ${report.totals.legacyWithoutRecipeOverride}`
+      );
+      console.log(report);
+      if (report.legacyEntries.length > 0) {
+        console.table(report.legacyEntries);
+      }
+      console.groupEnd();
+      return report;
+    };
+
+    target[LEGACY_PENDING_ADDS_DIAGNOSE_WINDOW_KEY] = runDiagnosis;
+
+    return () => {
+      if (target[LEGACY_PENDING_ADDS_DIAGNOSE_WINDOW_KEY] === runDiagnosis) {
+        delete target[LEGACY_PENDING_ADDS_DIAGNOSE_WINDOW_KEY];
+      }
+    };
+  }, [diagnoseLegacyPendingAdds]);
 
   const performSilentAutoReload = useCallback(() => {
     if (typeof window === 'undefined') return;
@@ -10887,6 +11010,10 @@ const App: React.FC = () => {
       return matchesCategory && matchesSearch;
     });
   }, [products, activeCategory, searchQuery]);
+  const resolvedRecipeByProductId = useMemo(() => {
+    const synchronizedProducts = synchronizeComboProductRecipes(products);
+    return new Map(synchronizedProducts.map((entry) => [entry.id, entry.recipe]));
+  }, [products]);
 
   const categories = ['All', 'Snack', 'Drink', 'Side', 'Combo'];
   const categoryLabels: Record<string, string> = {
@@ -11191,6 +11318,8 @@ const App: React.FC = () => {
                   product={product} 
                   onSale={handleSale} 
                   allIngredients={ingredientsForSale}
+                  allProducts={products}
+                  resolvedRecipe={resolvedRecipeByProductId.get(product.id)}
                   onDelete={handleDeleteProduct}
                   onEdit={handleEditProduct}
                 />

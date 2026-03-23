@@ -198,6 +198,182 @@ export const normalizeRecipeItems = (recipe: RecipeItem[] = []): RecipeItem[] =>
 const formatTrimmed = (value: number, precision = 3): string =>
   Number.isInteger(value) ? String(value) : value.toFixed(precision).replace(/\.?0+$/, '');
 
+const recipeTotalsToItems = (totals: Record<string, number>): RecipeItem[] => {
+  return Object.entries(totals)
+    .map(([ingredientId, quantity]) => ({
+      ingredientId,
+      quantity: normalizeRecipeQuantity(quantity),
+    }))
+    .filter((item) => Number.isFinite(item.quantity) && item.quantity > 0)
+    .sort((a, b) => a.ingredientId.localeCompare(b.ingredientId));
+};
+
+const normalizeComboItems = (
+  comboItems: ComboItem[] | undefined,
+  currentProductId?: string
+): ComboItem[] => {
+  const totalsByProductId: Record<string, number> = {};
+
+  (comboItems || []).forEach((item) => {
+    const productId = item?.productId?.trim();
+    if (!productId) return;
+    if (currentProductId && productId === currentProductId) return;
+
+    const quantity = Number(item.quantity);
+    if (!Number.isFinite(quantity) || quantity <= 0) return;
+
+    totalsByProductId[productId] = (totalsByProductId[productId] || 0) + Math.max(1, Math.round(quantity));
+  });
+
+  return Object.entries(totalsByProductId)
+    .map(([productId, quantity]) => ({ productId, quantity }))
+    .sort((a, b) => a.productId.localeCompare(b.productId));
+};
+
+const areRecipeItemsEqual = (left: RecipeItem[] | undefined, right: RecipeItem[] | undefined): boolean => {
+  const safeLeft = normalizeRecipeItems(left || []);
+  const safeRight = normalizeRecipeItems(right || []);
+  if (safeLeft.length !== safeRight.length) return false;
+
+  return safeLeft.every((item, index) => {
+    const target = safeRight[index];
+    if (!target) return false;
+    return item.ingredientId === target.ingredientId && item.quantity === target.quantity;
+  });
+};
+
+const areComboItemsEqual = (left: ComboItem[] | undefined, right: ComboItem[] | undefined): boolean => {
+  const safeLeft = normalizeComboItems(left);
+  const safeRight = normalizeComboItems(right);
+  if (safeLeft.length !== safeRight.length) return false;
+
+  return safeLeft.every((item, index) => {
+    const target = safeRight[index];
+    if (!target) return false;
+    return item.productId === target.productId && item.quantity === target.quantity;
+  });
+};
+
+const resolveComboProductRecipe = (
+  productId: string,
+  productsById: Map<string, Product>,
+  normalizedRecipesById: Map<string, RecipeItem[]>,
+  normalizedComboItemsById: Map<string, ComboItem[]>,
+  cache: Map<string, RecipeItem[]>,
+  visiting: Set<string>
+): RecipeItem[] => {
+  const cached = cache.get(productId);
+  if (cached) return cached;
+
+  const product = productsById.get(productId);
+  const normalizedRecipe = normalizeRecipeItems(normalizedRecipesById.get(productId) || []);
+  if (!product) {
+    cache.set(productId, normalizedRecipe);
+    return normalizedRecipe;
+  }
+
+  const comboItems = normalizedComboItemsById.get(productId) || [];
+  if (product.category !== 'Combo' || comboItems.length === 0) {
+    cache.set(productId, normalizedRecipe);
+    return normalizedRecipe;
+  }
+
+  if (visiting.has(productId)) {
+    cache.set(productId, normalizedRecipe);
+    return normalizedRecipe;
+  }
+
+  visiting.add(productId);
+  const totals: Record<string, number> = {};
+
+  comboItems.forEach((comboItem) => {
+    const sourceRecipe = resolveComboProductRecipe(
+      comboItem.productId,
+      productsById,
+      normalizedRecipesById,
+      normalizedComboItemsById,
+      cache,
+      visiting
+    );
+    const sourceTotals = aggregateRecipe(sourceRecipe);
+
+    Object.entries(sourceTotals).forEach(([ingredientId, quantity]) => {
+      totals[ingredientId] = (totals[ingredientId] || 0) + quantity * comboItem.quantity;
+    });
+  });
+
+  visiting.delete(productId);
+  const rebuiltRecipe = recipeTotalsToItems(totals);
+  const resolvedRecipe =
+    rebuiltRecipe.length > 0
+      ? (() => {
+          const baseTotals = aggregateRecipe(rebuiltRecipe);
+          const mergedTotals: Record<string, number> = { ...baseTotals };
+          const storedTotals = aggregateRecipe(normalizedRecipe);
+
+          Object.entries(storedTotals).forEach(([ingredientId, quantity]) => {
+            if (Object.prototype.hasOwnProperty.call(baseTotals, ingredientId)) {
+              return;
+            }
+            mergedTotals[ingredientId] = quantity;
+          });
+
+          return recipeTotalsToItems(mergedTotals);
+        })()
+      : normalizedRecipe;
+  cache.set(productId, resolvedRecipe);
+  return resolvedRecipe;
+};
+
+export const synchronizeComboProductRecipes = (products: Product[] = []): Product[] => {
+  if (!Array.isArray(products) || products.length === 0) return [];
+
+  const productsById = new Map(products.map((product) => [product.id, product]));
+  const normalizedRecipesById = new Map<string, RecipeItem[]>();
+  const normalizedComboItemsById = new Map<string, ComboItem[]>();
+
+  products.forEach((product) => {
+    normalizedRecipesById.set(product.id, normalizeRecipeItems(product.recipe || []));
+    normalizedComboItemsById.set(
+      product.id,
+      normalizeComboItems(product.comboItems, product.id)
+    );
+  });
+
+  const cache = new Map<string, RecipeItem[]>();
+  const visiting = new Set<string>();
+
+  return products.map((product) => {
+    const normalizedComboItems = normalizedComboItemsById.get(product.id) || [];
+    const normalizedRecipe = normalizedRecipesById.get(product.id) || [];
+    const resolvedRecipe =
+      product.category === 'Combo' && normalizedComboItems.length > 0
+        ? resolveComboProductRecipe(
+            product.id,
+            productsById,
+            normalizedRecipesById,
+            normalizedComboItemsById,
+            cache,
+            visiting
+          )
+        : normalizedRecipe;
+
+    const nextComboItems = normalizedComboItems.length > 0 ? normalizedComboItems : undefined;
+    const recipeChanged = !areRecipeItemsEqual(product.recipe, resolvedRecipe);
+    const comboChanged = !areComboItemsEqual(product.comboItems, nextComboItems);
+
+    if (!recipeChanged && !comboChanged) {
+      return product;
+    }
+
+    return {
+      ...product,
+      recipe: resolvedRecipe,
+      comboItems: nextComboItems,
+    };
+  });
+};
+
 export const formatStockQuantityByUnit = (unitValue: string, quantity: number): string => {
   if (!Number.isFinite(quantity)) return '0';
   const unit = normalizeUnit(unitValue || '');

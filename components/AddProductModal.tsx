@@ -8,6 +8,7 @@ import {
   getRecipeQuantityUnitLabel,
   normalizeRecipeItems,
   normalizeRecipeQuantity,
+  synchronizeComboProductRecipes,
 } from '../utils/recipe';
 import {
   convertImageFileToDataUrl,
@@ -45,10 +46,14 @@ const AddProductModal: React.FC<AddProductModalProps> = ({
   const [comboItems, setComboItems] = useState<ComboItem[]>([]);
   const galleryInputRef = useRef<HTMLInputElement | null>(null);
   const isCloudinaryConfigured = isCloudinaryUploadConfigured();
+  const normalizedProducts = useMemo(
+    () => synchronizeComboProductRecipes(products),
+    [products]
+  );
 
   const comboRecipe = useMemo(() => {
-    return buildRecipeFromComboItems(products, comboItems);
-  }, [products, comboItems]);
+    return buildRecipeFromComboItems(normalizedProducts, comboItems);
+  }, [normalizedProducts, comboItems]);
 
   const isCombo = category === 'Combo';
   const recipeToPersist = normalizeRecipeItems(isCombo ? comboRecipe : recipe);

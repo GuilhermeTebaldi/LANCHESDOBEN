@@ -16,14 +16,28 @@ interface ProductCardProps {
   product: Product;
   onSale: (product: Product, recipeOverride?: RecipeItem[], priceOverride?: number) => void;
   allIngredients: Ingredient[];
+  allProducts: Product[];
+  resolvedRecipe?: RecipeItem[];
   onDelete?: (id: string) => void;
   onEdit?: (product: Product) => void;
 }
 
-const ProductCard: React.FC<ProductCardProps> = ({ product, onSale, allIngredients, onDelete, onEdit }) => {
+const ProductCard: React.FC<ProductCardProps> = ({
+  product,
+  onSale,
+  allIngredients,
+  allProducts,
+  resolvedRecipe,
+  onDelete,
+  onEdit,
+}) => {
+  const saleBaseRecipe = React.useMemo(
+    () => normalizeRecipeItems(resolvedRecipe ?? product.recipe),
+    [resolvedRecipe, product.recipe]
+  );
   const [isAnimating, setIsAnimating] = useState(false);
   const [showCustomizer, setShowCustomizer] = useState(false);
-  const [customRecipe, setCustomRecipe] = useState<RecipeItem[]>(product.recipe);
+  const [customRecipe, setCustomRecipe] = useState<RecipeItem[]>(saleBaseRecipe);
   const [editingPrice, setEditingPrice] = useState<string>(product.price.toString());
   const [isPriceManual, setIsPriceManual] = useState(false);
   const [showDeleteMenu, setShowDeleteMenu] = useState(false);
@@ -39,9 +53,9 @@ const ProductCard: React.FC<ProductCardProps> = ({ product, onSale, allIngredien
 
   // Calcula disponibilidade baseada no ingrediente mais limitante
   const canMakeCount = React.useMemo(() => {
-    if (!product.recipe || product.recipe.length === 0) return 0;
+    if (!saleBaseRecipe || saleBaseRecipe.length === 0) return 0;
     
-    const totals = aggregateRecipe(product.recipe);
+    const totals = aggregateRecipe(saleBaseRecipe);
     const entries = Object.entries(totals);
     if (entries.length === 0) return 0;
 
@@ -54,9 +68,27 @@ const ProductCard: React.FC<ProductCardProps> = ({ product, onSale, allIngredien
     });
     
     return Math.min(...limits);
-  }, [product.recipe, allIngredients]);
+  }, [saleBaseRecipe, allIngredients]);
 
   const isAvailable = canMakeCount > 0;
+  const productsById = React.useMemo(
+    () => new Map(allProducts.map((entry) => [entry.id, entry])),
+    [allProducts]
+  );
+  const comboCompositionLabel = React.useMemo(() => {
+    if (product.category !== 'Combo' || !product.comboItems || product.comboItems.length === 0) {
+      return '';
+    }
+
+    return product.comboItems
+      .filter((item) => Number.isFinite(item.quantity) && item.quantity > 0)
+      .map((item) => {
+        const source = productsById.get(item.productId);
+        const sourceName = source?.name || 'Produto';
+        return `${item.quantity}x ${sourceName}`;
+      })
+      .join(' + ');
+  }, [product.category, product.comboItems, productsById]);
 
   const handleQuickSale = (e: React.MouseEvent) => {
     if (showDeleteMenu) {
@@ -65,7 +97,7 @@ const ProductCard: React.FC<ProductCardProps> = ({ product, onSale, allIngredien
     }
     if (!isAvailable) return;
     setIsAnimating(true);
-    onSale(product);
+    onSale(product, saleBaseRecipe);
     setTimeout(() => setIsAnimating(false), 200);
   };
 
@@ -89,7 +121,7 @@ const ProductCard: React.FC<ProductCardProps> = ({ product, onSale, allIngredien
 
   const handleOpenCustomizer = (e: React.MouseEvent) => {
     e.stopPropagation();
-    setCustomRecipe(normalizeRecipeItems(product.recipe));
+    setCustomRecipe(saleBaseRecipe);
     setIsPriceManual(false);
     setEditingPrice(product.price.toFixed(2));
     setShowCustomizer(true);
@@ -186,8 +218,8 @@ const ProductCard: React.FC<ProductCardProps> = ({ product, onSale, allIngredien
   };
 
   const baseCostInfo = React.useMemo(() => {
-    return calculateRecipeCost(allIngredients, product.recipe);
-  }, [allIngredients, product.recipe]);
+    return calculateRecipeCost(allIngredients, saleBaseRecipe);
+  }, [allIngredients, saleBaseRecipe]);
 
   const baseCost = baseCostInfo.totalCost;
   const markupFactor = baseCost > 0 ? product.price / baseCost : 1;
@@ -197,7 +229,7 @@ const ProductCard: React.FC<ProductCardProps> = ({ product, onSale, allIngredien
   }, [allIngredients]);
 
   const autoPrice = React.useMemo(() => {
-    const baseTotals = aggregateRecipe(product.recipe);
+    const baseTotals = aggregateRecipe(saleBaseRecipe);
     const customTotals = aggregateRecipe(customRecipe);
     const allIds = new Set([...Object.keys(baseTotals), ...Object.keys(customTotals)]);
     let extraPrice = 0;
@@ -220,7 +252,7 @@ const ProductCard: React.FC<ProductCardProps> = ({ product, onSale, allIngredien
 
     const computed = product.price + extraPrice;
     return Math.max(0, computed);
-  }, [customRecipe, ingredientsById, markupFactor, product.price, product.recipe]);
+  }, [customRecipe, ingredientsById, markupFactor, product.price, saleBaseRecipe]);
 
   const canConfirmCustomSale = React.useMemo(() => {
     const finalRecipe = normalizeRecipeItems(customRecipe);
@@ -355,10 +387,18 @@ const ProductCard: React.FC<ProductCardProps> = ({ product, onSale, allIngredien
 
               {product.category !== 'Drink' && (
                 <div className="space-y-4">
+                  {comboCompositionLabel && (
+                    <div className="rounded-2xl bg-white border border-slate-200 px-3 py-2">
+                      <p className="text-[9px] font-black text-slate-400 uppercase tracking-widest">Composição do Combo</p>
+                      <p className="text-[11px] font-extrabold text-slate-700 uppercase leading-snug">
+                        {comboCompositionLabel}
+                      </p>
+                    </div>
+                  )}
                   <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2">Ingredientes da Receita</p>
                   
                   {allIngredients.filter(ing => 
-                    product.recipe.some(r => r.ingredientId === ing.id) || 
+                    saleBaseRecipe.some(r => r.ingredientId === ing.id) || 
                     customRecipe.some(r => r.ingredientId === ing.id)
                   ).map(ing => {
                     const currentQty = customTotals[ing.id] || 0;

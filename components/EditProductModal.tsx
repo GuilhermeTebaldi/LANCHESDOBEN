@@ -8,6 +8,7 @@ import {
   getRecipeQuantityUnitLabel,
   normalizeRecipeItems,
   normalizeRecipeQuantity,
+  synchronizeComboProductRecipes,
 } from '../utils/recipe';
 import {
   convertImageFileToDataUrl,
@@ -48,19 +49,19 @@ const combineRecipes = (...recipes: RecipeItem[][]): RecipeItem[] => {
   return recipeTotalsToItems(totals);
 };
 
-const subtractRecipe = (source: RecipeItem[], subtracting: RecipeItem[]): RecipeItem[] => {
+const extractStandaloneRecipeExtras = (source: RecipeItem[], baseRecipe: RecipeItem[]): RecipeItem[] => {
   const sourceTotals = aggregateRecipe(source);
-  const subtractingTotals = aggregateRecipe(subtracting);
-  const resultTotals: Record<string, number> = {};
+  const baseTotals = aggregateRecipe(baseRecipe);
+  const extrasTotals: Record<string, number> = {};
 
   Object.entries(sourceTotals).forEach(([ingredientId, sourceQty]) => {
-    const remaining = sourceQty - (subtractingTotals[ingredientId] || 0);
-    if (remaining > 0) {
-      resultTotals[ingredientId] = remaining;
+    if (Object.prototype.hasOwnProperty.call(baseTotals, ingredientId)) {
+      return;
     }
+    extrasTotals[ingredientId] = sourceQty;
   });
 
-  return recipeTotalsToItems(resultTotals);
+  return recipeTotalsToItems(extrasTotals);
 };
 
 const updateRecipeItemQuantity = (
@@ -123,6 +124,10 @@ const EditProductModal: React.FC<EditProductModalProps> = ({
   const [hasTouchedComboExtras, setHasTouchedComboExtras] = useState(false);
   const galleryInputRef = useRef<HTMLInputElement | null>(null);
   const isCloudinaryConfigured = isCloudinaryUploadConfigured();
+  const normalizedProducts = useMemo(
+    () => synchronizeComboProductRecipes(products),
+    [products]
+  );
 
   useEffect(() => {
     if (!product) return;
@@ -134,13 +139,13 @@ const EditProductModal: React.FC<EditProductModalProps> = ({
     const initialComboItems = product.comboItems || [];
     setComboItems(initialComboItems);
     const initialComboBaseRecipe = buildRecipeFromComboItems(
-      products.filter((item) => item.id !== product.id),
+      normalizedProducts.filter((item) => item.id !== product.id),
       initialComboItems
     );
     setComboExtraRecipe(
       product.category === 'Combo'
         ? initialComboItems.length > 0
-          ? subtractRecipe(normalizeRecipeItems(product.recipe), initialComboBaseRecipe)
+          ? extractStandaloneRecipeExtras(normalizeRecipeItems(product.recipe), initialComboBaseRecipe)
           : normalizeRecipeItems(product.recipe)
         : []
     );
@@ -152,17 +157,17 @@ const EditProductModal: React.FC<EditProductModalProps> = ({
     if (galleryInputRef.current) {
       galleryInputRef.current.value = '';
     }
-  }, [product]);
+  }, [normalizedProducts, product]);
 
   const currentProductId = product?.id ?? null;
 
   const comboRecipe = useMemo(() => {
     if (!currentProductId) return [];
     return buildRecipeFromComboItems(
-      products.filter((item) => item.id !== currentProductId),
+      normalizedProducts.filter((item) => item.id !== currentProductId),
       comboItems
     );
-  }, [products, comboItems, currentProductId]);
+  }, [normalizedProducts, comboItems, currentProductId]);
   const comboRecipeWithExtras = useMemo(
     () => combineRecipes(comboRecipe, comboExtraRecipe),
     [comboRecipe, comboExtraRecipe]
