@@ -304,23 +304,8 @@ const resolveComboProductRecipe = (
 
   visiting.delete(productId);
   const rebuiltRecipe = recipeTotalsToItems(totals);
-  const resolvedRecipe =
-    rebuiltRecipe.length > 0
-      ? (() => {
-          const baseTotals = aggregateRecipe(rebuiltRecipe);
-          const mergedTotals: Record<string, number> = { ...baseTotals };
-          const storedTotals = aggregateRecipe(normalizedRecipe);
-
-          Object.entries(storedTotals).forEach(([ingredientId, quantity]) => {
-            if (Object.prototype.hasOwnProperty.call(baseTotals, ingredientId)) {
-              return;
-            }
-            mergedTotals[ingredientId] = quantity;
-          });
-
-          return recipeTotalsToItems(mergedTotals);
-        })()
-      : normalizedRecipe;
+  // Combo deve refletir estritamente a soma dos produtos da composição.
+  const resolvedRecipe = rebuiltRecipe.length > 0 ? rebuiltRecipe : normalizedRecipe;
   cache.set(productId, resolvedRecipe);
   return resolvedRecipe;
 };

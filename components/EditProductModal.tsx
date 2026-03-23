@@ -36,34 +36,6 @@ const recipeTotalsToItems = (totals: Record<string, number>): RecipeItem[] => {
     .sort((a, b) => a.ingredientId.localeCompare(b.ingredientId));
 };
 
-const combineRecipes = (...recipes: RecipeItem[][]): RecipeItem[] => {
-  const totals: Record<string, number> = {};
-
-  recipes.forEach((recipe) => {
-    const partialTotals = aggregateRecipe(recipe);
-    Object.entries(partialTotals).forEach(([ingredientId, quantity]) => {
-      totals[ingredientId] = (totals[ingredientId] || 0) + quantity;
-    });
-  });
-
-  return recipeTotalsToItems(totals);
-};
-
-const extractStandaloneRecipeExtras = (source: RecipeItem[], baseRecipe: RecipeItem[]): RecipeItem[] => {
-  const sourceTotals = aggregateRecipe(source);
-  const baseTotals = aggregateRecipe(baseRecipe);
-  const extrasTotals: Record<string, number> = {};
-
-  Object.entries(sourceTotals).forEach(([ingredientId, sourceQty]) => {
-    if (Object.prototype.hasOwnProperty.call(baseTotals, ingredientId)) {
-      return;
-    }
-    extrasTotals[ingredientId] = sourceQty;
-  });
-
-  return recipeTotalsToItems(extrasTotals);
-};
-
 const updateRecipeItemQuantity = (
   currentRecipe: RecipeItem[],
   ingredientId: string,
@@ -119,9 +91,6 @@ const EditProductModal: React.FC<EditProductModalProps> = ({
   const [uploadErrorMessage, setUploadErrorMessage] = useState('');
   const [recipe, setRecipe] = useState<RecipeItem[]>([]);
   const [comboItems, setComboItems] = useState<ComboItem[]>([]);
-  const [comboExtraRecipe, setComboExtraRecipe] = useState<RecipeItem[]>([]);
-  const [hasTouchedComboItems, setHasTouchedComboItems] = useState(false);
-  const [hasTouchedComboExtras, setHasTouchedComboExtras] = useState(false);
   const galleryInputRef = useRef<HTMLInputElement | null>(null);
   const isCloudinaryConfigured = isCloudinaryUploadConfigured();
   const normalizedProducts = useMemo(
@@ -138,19 +107,6 @@ const EditProductModal: React.FC<EditProductModalProps> = ({
     setRecipe(normalizeRecipeItems(product.recipe));
     const initialComboItems = product.comboItems || [];
     setComboItems(initialComboItems);
-    const initialComboBaseRecipe = buildRecipeFromComboItems(
-      normalizedProducts.filter((item) => item.id !== product.id),
-      initialComboItems
-    );
-    setComboExtraRecipe(
-      product.category === 'Combo'
-        ? initialComboItems.length > 0
-          ? extractStandaloneRecipeExtras(normalizeRecipeItems(product.recipe), initialComboBaseRecipe)
-          : normalizeRecipeItems(product.recipe)
-        : []
-    );
-    setHasTouchedComboItems(false);
-    setHasTouchedComboExtras(false);
     setIsImageUrlVisible(false);
     setIsUploadingImage(false);
     setUploadErrorMessage('');
@@ -168,18 +124,9 @@ const EditProductModal: React.FC<EditProductModalProps> = ({
       comboItems
     );
   }, [normalizedProducts, comboItems, currentProductId]);
-  const comboRecipeWithExtras = useMemo(
-    () => combineRecipes(comboRecipe, comboExtraRecipe),
-    [comboRecipe, comboExtraRecipe]
-  );
 
   const isCombo = category === 'Combo';
-  const isLegacyCombo = product?.category === 'Combo' && (product.comboItems?.length || 0) === 0;
-  const shouldKeepLegacyRecipe =
-    isCombo && isLegacyCombo && !hasTouchedComboItems && !hasTouchedComboExtras && comboItems.length === 0;
-  const recipeToPersist = normalizeRecipeItems(
-    isCombo ? (shouldKeepLegacyRecipe ? recipe : comboRecipeWithExtras) : recipe
-  );
+  const recipeToPersist = normalizeRecipeItems(isCombo ? (comboItems.length > 0 ? comboRecipe : recipe) : recipe);
   const normalizedImageUrl = imageUrl.trim();
   const hasImageSelected = normalizedImageUrl.length > 0;
   const isLocalImagePreview = normalizedImageUrl.startsWith('data:image/');
@@ -224,27 +171,11 @@ const EditProductModal: React.FC<EditProductModalProps> = ({
   };
 
   const handleComboItemsChange = (items: ComboItem[]) => {
-    if (isLegacyCombo && !hasTouchedComboItems && !hasTouchedComboExtras && comboItems.length === 0 && items.length > 0) {
-      setComboExtraRecipe([]);
-    }
-    setHasTouchedComboItems(true);
     setComboItems(items);
   };
 
   const handleUpdateRecipe = (ingredientId: string, delta: number) => {
     setRecipe((prev) => {
-      const ingredient = ingredients.find((item) => item.id === ingredientId);
-      if (!ingredient) return prev;
-      const currentQty = prev.find((item) => item.ingredientId === ingredientId)?.quantity || 0;
-      const step = getRecipeAdjustmentStep(ingredient, currentQty);
-      const nextDelta = delta > 0 ? step : -step;
-      return updateRecipeItemQuantity(prev, ingredientId, nextDelta);
-    });
-  };
-
-  const handleUpdateComboExtraRecipe = (ingredientId: string, delta: number) => {
-    setHasTouchedComboExtras(true);
-    setComboExtraRecipe((prev) => {
       const ingredient = ingredients.find((item) => item.id === ingredientId);
       if (!ingredient) return prev;
       const currentQty = prev.find((item) => item.ingredientId === ingredientId)?.quantity || 0;
@@ -264,19 +195,6 @@ const EditProductModal: React.FC<EditProductModalProps> = ({
     const parsed = Number(normalizedRaw);
     if (!Number.isFinite(parsed) || parsed < 0) return;
     setRecipe((prev) => setRecipeItemQuantity(prev, ingredientId, parsed));
-  };
-
-  const handleSetComboExtraRecipeQuantity = (ingredientId: string, rawValue: string) => {
-    setHasTouchedComboExtras(true);
-    const normalizedRaw = rawValue.trim().replace(',', '.');
-    if (!normalizedRaw) {
-      setComboExtraRecipe((prev) => setRecipeItemQuantity(prev, ingredientId, 0));
-      return;
-    }
-
-    const parsed = Number(normalizedRaw);
-    if (!Number.isFinite(parsed) || parsed < 0) return;
-    setComboExtraRecipe((prev) => setRecipeItemQuantity(prev, ingredientId, parsed));
   };
 
   const renderIngredientSelector = (
@@ -516,7 +434,7 @@ const EditProductModal: React.FC<EditProductModalProps> = ({
               </label>
               <span className="text-[10px] font-black text-red-500 uppercase">
                 {isCombo
-                  ? `${comboItems.length} Produtos + ${comboExtraRecipe.length} Extras`
+                  ? `${comboItems.length} Produtos`
                   : `${recipe.length} Itens Selecionados`}
               </span>
             </div>
@@ -532,29 +450,14 @@ const EditProductModal: React.FC<EditProductModalProps> = ({
                 <div className="rounded-2xl bg-slate-100 px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-500">
                   Insumos vindos dos produtos do combo: {comboRecipe.length}
                 </div>
-                <div className="space-y-3">
-                  <div className="flex justify-between items-center">
-                    <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
-                      Ingredientes Extras do Combo (Opcional)
-                    </label>
-                    <span className="text-[10px] font-black text-red-500 uppercase">
-                      {comboExtraRecipe.length} Itens Extras
-                    </span>
-                  </div>
-                  {renderIngredientSelector(
-                    comboExtraRecipe,
-                    handleUpdateComboExtraRecipe,
-                    handleSetComboExtraRecipeQuantity
-                  )}
-            </div>
-            <div className="rounded-2xl bg-slate-100 px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-500">
-              Receita final do combo: {recipeToPersist.length} insumos
-            </div>
-          </>
-        ) : (
-          renderIngredientSelector(recipe, handleUpdateRecipe, handleSetRecipeQuantity)
-        )}
-      </div>
+                <div className="rounded-2xl bg-slate-100 px-4 py-3 text-[10px] font-black uppercase tracking-widest text-slate-500">
+                  Receita final do combo: {recipeToPersist.length} insumos
+                </div>
+              </>
+            ) : (
+              renderIngredientSelector(recipe, handleUpdateRecipe, handleSetRecipeQuantity)
+            )}
+          </div>
 
           <div className="pt-4">
             <button 
