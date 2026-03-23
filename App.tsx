@@ -9230,12 +9230,21 @@ const App: React.FC = () => {
 
     const emitReturnEvent = (source: 'focus' | 'visibilitychange') => {
       if (document.visibilityState === 'hidden') return;
+      const hasPendingMainQueue = pendingPaidSyncQueueRef.current.length > 0;
+      const hasFailedQueue = failedPaidSyncQueueRef.current.length > 0;
+      const hasSyncingDrafts = syncingPaidDraftIdsRef.current.size > 0;
+      if (!hasPendingMainQueue && !hasFailedQueue && !hasSyncingDrafts && !isConfirmingPaid) {
+        return;
+      }
       pushOperationalEvent('PAYMENT_FLOW', 'PAID_SYNC_RETURNED_TO_MAIN', {
         source,
         pendingQueue: pendingPaidSyncQueueRef.current.length,
         failedQueue: failedPaidSyncQueueRef.current.length,
         syncingDrafts: Array.from(syncingPaidDraftIdsRef.current),
       });
+      if (hasPendingMainQueue) {
+        requestPendingPaidSyncProcessing('returned-to-main');
+      }
     };
 
     const handleFocus = () => emitReturnEvent('focus');
@@ -9251,7 +9260,7 @@ const App: React.FC = () => {
       window.removeEventListener('focus', handleFocus);
       document.removeEventListener('visibilitychange', handleVisibility);
     };
-  }, [isAccessVerified, pushOperationalEvent]);
+  }, [isAccessVerified, isConfirmingPaid, pushOperationalEvent, requestPendingPaidSyncProcessing]);
 
   const handleRetryFailedPaidSyncJob = useCallback(
     async (jobId: string, options: { autoRetry?: boolean } = {}) => {
