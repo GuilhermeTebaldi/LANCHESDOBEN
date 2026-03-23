@@ -2425,12 +2425,18 @@ const App: React.FC = () => {
   const [isStateHydrating, setIsStateHydrating] = useState(true);
   const [pendingStateOps, setPendingStateOps] = useState(0);
   const [pendingOfflineSales, setPendingOfflineSales] = useState(0);
-  const [pendingPaidSyncJobs, setPendingPaidSyncJobs] = useState(0);
+  const [pendingPaidSyncJobs, setPendingPaidSyncJobs] = useState(
+    () => loadPendingPaidSyncQueueLocalFallback().length
+  );
   const [hasPendingVersionUpdate, setHasPendingVersionUpdate] = useState(false);
   const commandQueueRef = useRef<Promise<void>>(Promise.resolve());
   const offlineSalesQueueRef = useRef<OfflineQueuedSale[]>([]);
-  const pendingPaidSyncQueueRef = useRef<PendingPaidSyncJob[]>([]);
-  const failedPaidSyncQueueRef = useRef<PendingPaidSyncJob[]>([]);
+  const pendingPaidSyncQueueRef = useRef<PendingPaidSyncJob[]>(
+    loadPendingPaidSyncQueueLocalFallback()
+  );
+  const failedPaidSyncQueueRef = useRef<PendingPaidSyncJob[]>(
+    loadFailedPaidSyncQueueLocalFallback()
+  );
   const pendingDraftAddsRef = useRef<PendingDraftAddsByDraftId>({});
   const pendingDraftAddCancellationIntentsRef = useRef<
     Map<string, PendingDraftAddCancellationIntent>
@@ -2543,8 +2549,12 @@ const App: React.FC = () => {
   const [pendingDraftAddsByDraft, setPendingDraftAddsByDraft] =
     useState<PendingDraftAddsByDraftId>({});
   const [syncingPaidDraftIds, setSyncingPaidDraftIds] = useState<string[]>([]);
-  const [pendingPaidSyncQueueSnapshot, setPendingPaidSyncQueueSnapshot] = useState<PendingPaidSyncJob[]>([]);
-  const [failedPaidSyncQueue, setFailedPaidSyncQueue] = useState<PendingPaidSyncJob[]>([]);
+  const [pendingPaidSyncQueueSnapshot, setPendingPaidSyncQueueSnapshot] = useState<
+    PendingPaidSyncJob[]
+  >(() => loadPendingPaidSyncQueueLocalFallback());
+  const [failedPaidSyncQueue, setFailedPaidSyncQueue] = useState<PendingPaidSyncJob[]>(
+    () => loadFailedPaidSyncQueueLocalFallback()
+  );
   const [failedPaidSyncAutoRetryRevision, setFailedPaidSyncAutoRetryRevision] = useState(0);
   const [paidSyncAssistantState, setPaidSyncAssistantState] = useState<PaidSyncAssistantState>({
     mode: 'idle',
@@ -8890,7 +8900,6 @@ const App: React.FC = () => {
               silentErrorNotification: true,
               errorSink: atomicErrorSink,
               failFastOnVersionConflict: false,
-              bypassGlobalCommandQueue: true,
               onSnapshotAppliedMs: recordSnapshotApplyMs,
             }
           );
