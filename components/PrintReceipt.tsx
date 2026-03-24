@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { DEFAULT_APP_STATE, loadAppState, type AppState } from '../data/appStorage';
 import type { Sale, SaleBasePaymentMethod, SaleDraft, SaleOrigin, SalePaymentMethod, SalePaymentSplitEntry } from '../types';
@@ -418,6 +418,7 @@ const PrintReceipt: React.FC<PrintReceiptProps> = ({ receiptId }) => {
   const [isLoading, setIsLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const hasTriggeredPrintRef = useRef(false);
+  const printTimerRef = useRef<number | null>(null);
   const paperWidthMm = useMemo(() => getReceiptPaperWidthMm(), []);
 
   useEffect(() => {
@@ -429,6 +430,10 @@ const PrintReceipt: React.FC<PrintReceiptProps> = ({ receiptId }) => {
     setErrorMessage(null);
     setReceipt(null);
     hasTriggeredPrintRef.current = false;
+    if (printTimerRef.current !== null) {
+      window.clearTimeout(printTimerRef.current);
+      printTimerRef.current = null;
+    }
 
     const localPayload = consumeReceiptPrintPayload(receiptId);
     if (localPayload) {
@@ -488,17 +493,55 @@ const PrintReceipt: React.FC<PrintReceiptProps> = ({ receiptId }) => {
     };
   }, [receiptId]);
 
+  const triggerAutoPrint = useCallback((): boolean => {
+    if (!receipt) return false;
+    if (hasTriggeredPrintRef.current) return false;
+    if (document.visibilityState === 'hidden') return false;
+
+    hasTriggeredPrintRef.current = true;
+    if (printTimerRef.current !== null) {
+      window.clearTimeout(printTimerRef.current);
+      printTimerRef.current = null;
+    }
+
+    printTimerRef.current = window.setTimeout(() => {
+      printTimerRef.current = null;
+      try {
+        window.focus();
+      } catch {
+        // ignore focus failures
+      }
+      try {
+        window.print();
+      } catch {
+        hasTriggeredPrintRef.current = false;
+      }
+    }, 180);
+
+    return true;
+  }, [receipt]);
+
   useEffect(() => {
     if (!receipt) return;
-    if (hasTriggeredPrintRef.current) return;
-    hasTriggeredPrintRef.current = true;
-    const timer = window.setTimeout(() => {
-      window.print();
-    }, 180);
-    return () => {
-      window.clearTimeout(timer);
+    const tryPrint = () => {
+      void triggerAutoPrint();
     };
-  }, [receipt]);
+
+    tryPrint();
+    window.addEventListener('focus', tryPrint);
+    window.addEventListener('pageshow', tryPrint);
+    document.addEventListener('visibilitychange', tryPrint);
+
+    return () => {
+      window.removeEventListener('focus', tryPrint);
+      window.removeEventListener('pageshow', tryPrint);
+      document.removeEventListener('visibilitychange', tryPrint);
+      if (printTimerRef.current !== null) {
+        window.clearTimeout(printTimerRef.current);
+        printTimerRef.current = null;
+      }
+    };
+  }, [receipt, triggerAutoPrint]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;

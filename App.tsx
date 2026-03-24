@@ -9948,9 +9948,15 @@ const App: React.FC = () => {
       if (!normalizedId) return false;
       const printWindow = window.open(
         buildReceiptPrintRoutePath(normalizedId),
-        '_blank',
-        'noopener,noreferrer'
+        '_blank'
       );
+      if (printWindow && !printWindow.closed) {
+        try {
+          printWindow.focus();
+        } catch {
+          // ignore focus failures
+        }
+      }
       return Boolean(printWindow);
     },
     []
@@ -9970,13 +9976,6 @@ const App: React.FC = () => {
       }
     } catch {
       // ignore cross-window write errors
-    }
-    try {
-      // Keep POS tab active so paid-sync can continue even if browser opens the print tab focused.
-      printWindow.blur();
-      window.focus();
-    } catch {
-      // ignore focus management failures
     }
     return printWindow;
   };
@@ -10059,6 +10058,11 @@ const App: React.FC = () => {
       if (printWindow && !printWindow.closed) {
         try {
           printWindow.location.href = targetPath;
+          try {
+            printWindow.focus();
+          } catch {
+            // ignore focus failures
+          }
           return true;
         } catch {
           // fallback below
