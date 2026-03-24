@@ -39,7 +39,7 @@ app.use(
     }) satisfies CorsOptions['origin'],
     credentials: true,
     maxAge: 86400,
-    exposedHeaders: ['ETag', 'X-State-Version', 'X-State-Token'],
+    exposedHeaders: ['ETag', 'X-State-Version', 'X-State-Token', 'X-Backend-Processing-Ms'],
   })
 );
 app.use(morgan(env.NODE_ENV === 'production' ? 'combined' : 'dev'));

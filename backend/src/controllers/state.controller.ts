@@ -99,6 +99,11 @@ export const stateController = {
   },
 
   runCommand: async (req: Request, res: Response) => {
+    const backendProcessingStartedAtMs = Date.now();
+    const setBackendProcessingHeader = (): void => {
+      const elapsedMs = Math.max(0, Date.now() - backendProcessingStartedAtMs);
+      res.setHeader('X-Backend-Processing-Ms', String(elapsedMs));
+    };
     const requestMeta = buildStateCommandRequestMeta(req);
     const rawCommandIdentifiers = commandIdentifiersFromInput(req.body);
     logStateCommandIngressEvent({
@@ -136,6 +141,7 @@ export const stateController = {
       }
       setStateHeaders(req, res, snapshot.version);
       if (shouldReturnHeadersOnly(req)) {
+        setBackendProcessingHeader();
         logStateCommandIngressEvent({
           ...requestMeta,
           origin: 'sync',
@@ -147,6 +153,7 @@ export const stateController = {
         res.status(204).end();
         return;
       }
+      setBackendProcessingHeader();
       logStateCommandIngressEvent({
         ...requestMeta,
         origin: 'sync',

@@ -42,6 +42,7 @@ interface StateCommandSyncErrorOptions {
 interface RunStateCommandOptions {
   failFastOnVersionConflict?: boolean;
   responseMode?: 'snapshot' | 'headers-only';
+  onRoundtripTiming?: (timing: { requestMs: number; backendMs: number }) => void;
 }
 
 export class StateCommandSyncError extends Error {
@@ -828,6 +829,7 @@ export const runStateCommand = async (
 
     let response: Response;
     try {
+      const requestStartedAt = performance.now();
       response = await fetchWithTimeout(getStateCommandsApiUrl(), {
         method: 'POST',
         headers: {
@@ -838,6 +840,17 @@ export const runStateCommand = async (
           'X-State-Response-Mode': options.responseMode === 'headers-only' ? 'headers-only' : 'snapshot',
         },
         body: JSON.stringify(payloadCommand),
+      });
+      const roundtripMs = Math.max(0, performance.now() - requestStartedAt);
+      const backendProcessingHeaderRaw = Number(response.headers.get('x-backend-processing-ms'));
+      const backendMs =
+        Number.isFinite(backendProcessingHeaderRaw) && backendProcessingHeaderRaw >= 0
+          ? Math.max(0, backendProcessingHeaderRaw)
+          : roundtripMs;
+      const requestMs = Math.max(0, roundtripMs - backendMs);
+      options.onRoundtripTiming?.({
+        requestMs,
+        backendMs,
       });
     } catch (error) {
       const syncError = asRetryableNetworkError(error);
