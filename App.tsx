@@ -226,6 +226,9 @@ interface RunCommandOptions {
   bypassGlobalCommandQueue?: boolean;
   onSnapshotAppliedMs?: (durationMs: number) => void;
   onStateCommandRoundtripTiming?: (timing: { requestMs: number; backendMs: number }) => void;
+  onDraftLockWaitMs?: (durationMs: number) => void;
+  onGlobalQueueWaitMs?: (durationMs: number) => void;
+  onBackendSchedulerWaitMs?: (durationMs: number) => void;
 }
 
 interface BackendExecutionOptions {
@@ -234,6 +237,7 @@ interface BackendExecutionOptions {
   commandId?: string;
   draftId?: string | null;
   retryCount?: number;
+  onSchedulerWaitMs?: (durationMs: number) => void;
 }
 
 interface PaymentCommitSnapshot {
@@ -295,6 +299,13 @@ interface PaymentFlowTelemetryEntry {
   flushOperationalPersistMs: number;
   flushUiReleaseMs: number;
   flushPostReturnMs: number;
+  confirmCommandInvokeMs: number;
+  confirmDraftLockWaitMs: number;
+  confirmGlobalQueueWaitMs: number;
+  confirmSchedulerWaitMs: number;
+  confirmPostCommandApplyMs: number;
+  confirmOpsMs: number;
+  confirmFailureHandlingMs: number;
   retries: number;
   hadRecovery: boolean;
   hadReconciliation: boolean;
@@ -336,6 +347,14 @@ interface PaymentFlowTelemetryRecord {
   flushUiReleaseMs: number | null;
   flushPostReturnMs: number | null;
   flushOtherMs: number | null;
+  confirmCommandInvokeMs: number | null;
+  confirmDraftLockWaitMs: number | null;
+  confirmGlobalQueueWaitMs: number | null;
+  confirmSchedulerWaitMs: number | null;
+  confirmPostCommandApplyMs: number | null;
+  confirmOpsMs: number | null;
+  confirmFailureHandlingMs: number | null;
+  confirmOtherMs: number | null;
   clickToBackendConfirmMs: number | null;
   retries: number;
   hadRecovery: boolean;
@@ -1984,6 +2003,14 @@ const normalizePaymentFlowTelemetryRecord = (
   const flushUiReleaseRaw = Number(source.flushUiReleaseMs);
   const flushPostReturnRaw = Number(source.flushPostReturnMs);
   const flushOtherRaw = Number(source.flushOtherMs);
+  const confirmCommandInvokeRaw = Number(source.confirmCommandInvokeMs);
+  const confirmDraftLockWaitRaw = Number(source.confirmDraftLockWaitMs);
+  const confirmGlobalQueueWaitRaw = Number(source.confirmGlobalQueueWaitMs);
+  const confirmSchedulerWaitRaw = Number(source.confirmSchedulerWaitMs);
+  const confirmPostCommandApplyRaw = Number(source.confirmPostCommandApplyMs);
+  const confirmOpsRaw = Number(source.confirmOpsMs);
+  const confirmFailureHandlingRaw = Number(source.confirmFailureHandlingMs);
+  const confirmOtherRaw = Number(source.confirmOtherMs);
   const clickToBackendConfirmRaw = Number(source.clickToBackendConfirmMs);
   const retriesRaw = Number(source.retries);
   const timestamp =
@@ -2102,6 +2129,34 @@ const normalizePaymentFlowTelemetryRecord = (
         : null,
     flushOtherMs:
       Number.isFinite(flushOtherRaw) && flushOtherRaw >= 0 ? Math.floor(flushOtherRaw) : null,
+    confirmCommandInvokeMs:
+      Number.isFinite(confirmCommandInvokeRaw) && confirmCommandInvokeRaw >= 0
+        ? Math.floor(confirmCommandInvokeRaw)
+        : null,
+    confirmDraftLockWaitMs:
+      Number.isFinite(confirmDraftLockWaitRaw) && confirmDraftLockWaitRaw >= 0
+        ? Math.floor(confirmDraftLockWaitRaw)
+        : null,
+    confirmGlobalQueueWaitMs:
+      Number.isFinite(confirmGlobalQueueWaitRaw) && confirmGlobalQueueWaitRaw >= 0
+        ? Math.floor(confirmGlobalQueueWaitRaw)
+        : null,
+    confirmSchedulerWaitMs:
+      Number.isFinite(confirmSchedulerWaitRaw) && confirmSchedulerWaitRaw >= 0
+        ? Math.floor(confirmSchedulerWaitRaw)
+        : null,
+    confirmPostCommandApplyMs:
+      Number.isFinite(confirmPostCommandApplyRaw) && confirmPostCommandApplyRaw >= 0
+        ? Math.floor(confirmPostCommandApplyRaw)
+        : null,
+    confirmOpsMs:
+      Number.isFinite(confirmOpsRaw) && confirmOpsRaw >= 0 ? Math.floor(confirmOpsRaw) : null,
+    confirmFailureHandlingMs:
+      Number.isFinite(confirmFailureHandlingRaw) && confirmFailureHandlingRaw >= 0
+        ? Math.floor(confirmFailureHandlingRaw)
+        : null,
+    confirmOtherMs:
+      Number.isFinite(confirmOtherRaw) && confirmOtherRaw >= 0 ? Math.floor(confirmOtherRaw) : null,
     clickToBackendConfirmMs:
       Number.isFinite(clickToBackendConfirmRaw) && clickToBackendConfirmRaw >= 0
         ? Math.floor(clickToBackendConfirmRaw)
@@ -3626,6 +3681,13 @@ const App: React.FC = () => {
         flushOperationalPersistMs: 0,
         flushUiReleaseMs: 0,
         flushPostReturnMs: 0,
+        confirmCommandInvokeMs: 0,
+        confirmDraftLockWaitMs: 0,
+        confirmGlobalQueueWaitMs: 0,
+        confirmSchedulerWaitMs: 0,
+        confirmPostCommandApplyMs: 0,
+        confirmOpsMs: 0,
+        confirmFailureHandlingMs: 0,
         retries: 0,
         hadRecovery: false,
         hadReconciliation: false,
@@ -3703,7 +3765,14 @@ const App: React.FC = () => {
         | 'flushTerminalCleanupMs'
         | 'flushOperationalPersistMs'
         | 'flushUiReleaseMs'
-        | 'flushPostReturnMs',
+        | 'flushPostReturnMs'
+        | 'confirmCommandInvokeMs'
+        | 'confirmDraftLockWaitMs'
+        | 'confirmGlobalQueueWaitMs'
+        | 'confirmSchedulerWaitMs'
+        | 'confirmPostCommandApplyMs'
+        | 'confirmOpsMs'
+        | 'confirmFailureHandlingMs',
       durationMs: number
     ): void => {
       const normalizedDraftId = draftId.trim();
@@ -3810,6 +3879,19 @@ const App: React.FC = () => {
         flushUiReleaseMs +
         flushPostReturnMs;
       const flushOtherMs = Math.max(0, Math.round(Math.max(0, current.pFlushMs) - flushMeasuredMs));
+      const confirmCommandInvokeMs = Math.max(0, Math.round(current.confirmCommandInvokeMs));
+      const confirmDraftLockWaitMs = Math.max(0, Math.round(current.confirmDraftLockWaitMs));
+      const confirmGlobalQueueWaitMs = Math.max(0, Math.round(current.confirmGlobalQueueWaitMs));
+      const confirmSchedulerWaitMs = Math.max(0, Math.round(current.confirmSchedulerWaitMs));
+      const confirmPostCommandApplyMs = Math.max(0, Math.round(current.confirmPostCommandApplyMs));
+      const confirmOpsMs = Math.max(0, Math.round(current.confirmOpsMs));
+      const confirmFailureHandlingMs = Math.max(0, Math.round(current.confirmFailureHandlingMs));
+      const confirmMeasuredExclusiveMs =
+        confirmCommandInvokeMs + confirmOpsMs + confirmFailureHandlingMs;
+      const confirmOtherMs = Math.max(
+        0,
+        Math.round(Math.max(0, current.confirmMs) - confirmMeasuredExclusiveMs)
+      );
 
       const record: PaymentFlowTelemetryRecord = {
         draftId: current.draftId,
@@ -3847,6 +3929,14 @@ const App: React.FC = () => {
         flushUiReleaseMs,
         flushPostReturnMs,
         flushOtherMs,
+        confirmCommandInvokeMs,
+        confirmDraftLockWaitMs,
+        confirmGlobalQueueWaitMs,
+        confirmSchedulerWaitMs,
+        confirmPostCommandApplyMs,
+        confirmOpsMs,
+        confirmFailureHandlingMs,
+        confirmOtherMs,
         clickToBackendConfirmMs: totalConfMs,
         retries: normalizedRetries,
         hadRecovery,
@@ -3894,6 +3984,14 @@ const App: React.FC = () => {
         flush_ui_release_ms: record.flushUiReleaseMs,
         flush_post_return_ms: record.flushPostReturnMs,
         flush_other_ms: record.flushOtherMs,
+        confirm_command_invoke_ms: record.confirmCommandInvokeMs,
+        confirm_draft_lock_wait_ms: record.confirmDraftLockWaitMs,
+        confirm_global_queue_wait_ms: record.confirmGlobalQueueWaitMs,
+        confirm_scheduler_wait_ms: record.confirmSchedulerWaitMs,
+        confirm_post_command_apply_ms: record.confirmPostCommandApplyMs,
+        confirm_ops_ms: record.confirmOpsMs,
+        confirm_failure_handling_ms: record.confirmFailureHandlingMs,
+        confirm_other_ms: record.confirmOtherMs,
         clickToBackendConfirmMs: record.clickToBackendConfirmMs,
         retries: record.retries,
         hadRecovery: record.hadRecovery,
@@ -3940,6 +4038,14 @@ const App: React.FC = () => {
           flush_ui_release_ms: record.flushUiReleaseMs,
           flush_post_return_ms: record.flushPostReturnMs,
           flush_other_ms: record.flushOtherMs,
+          confirm_command_invoke_ms: record.confirmCommandInvokeMs,
+          confirm_draft_lock_wait_ms: record.confirmDraftLockWaitMs,
+          confirm_global_queue_wait_ms: record.confirmGlobalQueueWaitMs,
+          confirm_scheduler_wait_ms: record.confirmSchedulerWaitMs,
+          confirm_post_command_apply_ms: record.confirmPostCommandApplyMs,
+          confirm_ops_ms: record.confirmOpsMs,
+          confirm_failure_handling_ms: record.confirmFailureHandlingMs,
+          confirm_other_ms: record.confirmOtherMs,
           clickToBackendConfirmMs: record.clickToBackendConfirmMs,
           retries: record.retries,
           hadRecovery: record.hadRecovery,
@@ -4240,12 +4346,16 @@ const App: React.FC = () => {
           });
         }
 
+        const schedulerQueuedAt = performance.now();
         const result = ENABLE_COMMAND_SCHEDULER
           ? await scheduler!.enqueue({
               key: dedupeKey,
               priority,
               groupKey,
-              run: executeWithTimeout,
+              run: async () => {
+                options.onSchedulerWaitMs?.(Math.max(0, performance.now() - schedulerQueuedAt));
+                return executeWithTimeout();
+              },
             })
           : await executeWithTimeout();
 
@@ -4312,7 +4422,11 @@ const App: React.FC = () => {
   );
 
   const runWithDraftLock = useCallback(
-    async <T,>(draftId: string | null | undefined, task: () => Promise<T>): Promise<T> => {
+    async <T,>(
+      draftId: string | null | undefined,
+      task: () => Promise<T>,
+      options: { onLockWaitMs?: (durationMs: number) => void } = {}
+    ): Promise<T> => {
       const normalizedDraftId = (draftId || '').trim();
       if (!normalizedDraftId) {
         return task();
@@ -4320,7 +4434,12 @@ const App: React.FC = () => {
 
       const queue = commandDraftLocksRef.current;
       const previous = queue.get(normalizedDraftId) ?? Promise.resolve();
-      const next = previous.then(task, task);
+      const queuedAt = performance.now();
+      const executeTask = () => {
+        options.onLockWaitMs?.(Math.max(0, performance.now() - queuedAt));
+        return task();
+      };
+      const next = previous.then(executeTask, executeTask);
       const settled = next.then(
         () => undefined,
         () => undefined
@@ -5035,6 +5154,8 @@ const App: React.FC = () => {
         bypassGlobalCommandQueue?: boolean;
         onSnapshotAppliedMs?: (durationMs: number) => void;
         onStateCommandRoundtripTiming?: (timing: { requestMs: number; backendMs: number }) => void;
+        onGlobalQueueWaitMs?: (durationMs: number) => void;
+        onBackendSchedulerWaitMs?: (durationMs: number) => void;
       } = {}
     ): Promise<{ ok: true } | { ok: false; error: unknown }> => {
       const shouldTrackPendingState = options.trackPendingState !== false;
@@ -5078,6 +5199,7 @@ const App: React.FC = () => {
               command,
               draftId: commandDraftId,
               retryCount: 0,
+              onSchedulerWaitMs: options.onBackendSchedulerWaitMs,
             },
             () =>
               runStateCommand(command, {
@@ -5164,9 +5286,16 @@ const App: React.FC = () => {
         return executeCommand();
       }
 
+      const queuedAt = performance.now();
       const scheduledExecution = commandQueueRef.current.then(
-        () => executeCommand(),
-        () => executeCommand()
+        () => {
+          options.onGlobalQueueWaitMs?.(Math.max(0, performance.now() - queuedAt));
+          return executeCommand();
+        },
+        () => {
+          options.onGlobalQueueWaitMs?.(Math.max(0, performance.now() - queuedAt));
+          return executeCommand();
+        }
       );
 
       commandQueueRef.current = scheduledExecution.then(
@@ -5283,7 +5412,11 @@ const App: React.FC = () => {
           bypassGlobalCommandQueue: options.bypassGlobalCommandQueue,
           onSnapshotAppliedMs: options.onSnapshotAppliedMs,
           onStateCommandRoundtripTiming: options.onStateCommandRoundtripTiming,
+          onGlobalQueueWaitMs: options.onGlobalQueueWaitMs,
+          onBackendSchedulerWaitMs: options.onBackendSchedulerWaitMs,
         });
+      }, {
+        onLockWaitMs: options.onDraftLockWaitMs,
       });
 
       if (result.ok) {
@@ -9278,6 +9411,19 @@ const App: React.FC = () => {
             return;
           }
         };
+        const recordConfirmPhaseDuration = (
+          stage:
+            | 'confirmCommandInvokeMs'
+            | 'confirmDraftLockWaitMs'
+            | 'confirmGlobalQueueWaitMs'
+            | 'confirmSchedulerWaitMs'
+            | 'confirmPostCommandApplyMs'
+            | 'confirmOpsMs'
+            | 'confirmFailureHandlingMs',
+          durationMs: number
+        ): void => {
+          markPaymentFlowTelemetryStageDuration(currentJob.draftId, currentJob.id, stage, durationMs);
+        };
         const flushPendingReadStartedAt = performance.now();
         const visiblePendingEntries = pendingDraftAddsRef.current[currentJob.draftId] || [];
         const recoveryPendingEntries = recoveryPendingDraftAddsRef.current[currentJob.draftId] || [];
@@ -9530,10 +9676,12 @@ const App: React.FC = () => {
           };
         };
         const prepareAtomicCommandStartedAt = performance.now();
-        setDraftLifecycleStage(currentJob.draftId, 'PENDING_CONFIRM', {
-          reason: 'atomic_finalize_confirm_dispatch',
-          bumpEpoch: false,
-        });
+        if (resolveDraftLifecycleStage(currentJob.draftId) !== 'PENDING_CONFIRM') {
+          setDraftLifecycleStage(currentJob.draftId, 'PENDING_CONFIRM', {
+            reason: 'atomic_finalize_confirm_dispatch',
+            bumpEpoch: false,
+          });
+        }
         const atomicFinalizeAndConfirmCommand = buildAtomicFinalizeAndConfirmCommand();
         markPaymentFlowTelemetryStageDuration(
           currentJob.draftId,
@@ -9557,6 +9705,7 @@ const App: React.FC = () => {
         const atomicStartedAt = performance.now();
         try {
           const atomicErrorSink: RunCommandErrorSink = {};
+          const confirmCommandStartedAt = performance.now();
           const atomicallyConfirmed = await runCommandWithSync(
             atomicFinalizeAndConfirmCommand,
             undefined,
@@ -9567,7 +9716,19 @@ const App: React.FC = () => {
               silentErrorNotification: true,
               errorSink: atomicErrorSink,
               failFastOnVersionConflict: false,
-              onSnapshotAppliedMs: recordSnapshotApplyMs,
+              onDraftLockWaitMs: (durationMs) => {
+                recordConfirmPhaseDuration('confirmDraftLockWaitMs', durationMs);
+              },
+              onGlobalQueueWaitMs: (durationMs) => {
+                recordConfirmPhaseDuration('confirmGlobalQueueWaitMs', durationMs);
+              },
+              onBackendSchedulerWaitMs: (durationMs) => {
+                recordConfirmPhaseDuration('confirmSchedulerWaitMs', durationMs);
+              },
+              onSnapshotAppliedMs: (durationMs) => {
+                recordSnapshotApplyMs(durationMs);
+                recordConfirmPhaseDuration('confirmPostCommandApplyMs', durationMs);
+              },
               onStateCommandRoundtripTiming: (timing) => {
                 markPaymentFlowTelemetryStageDuration(
                   currentJob.draftId,
@@ -9584,8 +9745,20 @@ const App: React.FC = () => {
               },
             }
           );
+          recordConfirmPhaseDuration(
+            'confirmCommandInvokeMs',
+            performance.now() - confirmCommandStartedAt
+          );
           if (!atomicallyConfirmed) {
-            await markJobAsFailed('Falha ao finalizar e confirmar pagamento.', atomicErrorSink);
+            const confirmFailureHandlingStartedAt = performance.now();
+            try {
+              await markJobAsFailed('Falha ao finalizar e confirmar pagamento.', atomicErrorSink);
+            } finally {
+              recordConfirmPhaseDuration(
+                'confirmFailureHandlingMs',
+                performance.now() - confirmFailureHandlingStartedAt
+              );
+            }
             return;
           }
           const backendAckOpsStartedAt = performance.now();
@@ -9603,11 +9776,13 @@ const App: React.FC = () => {
             commandType: atomicFinalizeAndConfirmCommand.type,
             commandId: atomicFinalizeAndConfirmCommand.commandId || null,
           });
+          const backendAckOpsDurationMs = performance.now() - backendAckOpsStartedAt;
+          recordConfirmPhaseDuration('confirmOpsMs', backendAckOpsDurationMs);
           markPaymentFlowTelemetryStageDuration(
             currentJob.draftId,
             currentJob.id,
             'pOpsMs',
-            performance.now() - backendAckOpsStartedAt
+            backendAckOpsDurationMs
           );
         } finally {
           markPaymentFlowTelemetryStageDuration(
@@ -9632,10 +9807,12 @@ const App: React.FC = () => {
             }
           );
         } else {
-          setDraftLifecycleStage(currentJob.draftId, 'PENDING_CONFIRM', {
-            reason: 'confirm_completed_waiting_terminal_snapshot',
-            bumpEpoch: false,
-          });
+          if (resolveDraftLifecycleStage(currentJob.draftId) !== 'PENDING_CONFIRM') {
+            setDraftLifecycleStage(currentJob.draftId, 'PENDING_CONFIRM', {
+              reason: 'confirm_completed_waiting_terminal_snapshot',
+              bumpEpoch: false,
+            });
+          }
         }
         const persistAfterConfirmStartedAt = performance.now();
         setDraftSyncInProgress(currentJob.draftId, false);
@@ -9730,6 +9907,7 @@ const App: React.FC = () => {
     markPaymentFlowTelemetryProcessingStarted,
     markPaymentFlowTelemetryStageDuration,
     markPaymentFlowTelemetryProgress,
+    resolveDraftLifecycleStage,
     runCommandWithSync,
     setDraftLifecycleStage,
     setPaidSyncAssistantActivity,
@@ -11684,6 +11862,11 @@ const App: React.FC = () => {
               {latestPaymentFlowTelemetry && (
                 <p className="truncate">
                   f_lock:{latestPaymentFlowTelemetry.flushLockWaitMs ?? '-'} f_read:{latestPaymentFlowTelemetry.flushPendingReadMs ?? '-'} f_snap:{latestPaymentFlowTelemetry.flushSnapshotPrepareMs ?? '-'} f_vis:{latestPaymentFlowTelemetry.flushVisibleRunMs ?? '-'} f_rec:{latestPaymentFlowTelemetry.flushRecoveryRunMs ?? '-'} f_sr:{latestPaymentFlowTelemetry.flushStateRefreshMs ?? '-'} f_sn:{latestPaymentFlowTelemetry.flushApplySnapshotMs ?? '-'} f_ps:{latestPaymentFlowTelemetry.flushOperationalPersistMs ?? '-'} f_cl:{latestPaymentFlowTelemetry.flushTerminalCleanupMs ?? '-'} f_ui:{latestPaymentFlowTelemetry.flushUiReleaseMs ?? '-'} f_post:{latestPaymentFlowTelemetry.flushPostReturnMs ?? '-'} f_oth:{latestPaymentFlowTelemetry.flushOtherMs ?? '-'}
+                </p>
+              )}
+              {latestPaymentFlowTelemetry && (
+                <p className="truncate">
+                  c_cmd:{latestPaymentFlowTelemetry.confirmCommandInvokeMs ?? '-'} c_lock:{latestPaymentFlowTelemetry.confirmDraftLockWaitMs ?? '-'} c_gq:{latestPaymentFlowTelemetry.confirmGlobalQueueWaitMs ?? '-'} c_sched:{latestPaymentFlowTelemetry.confirmSchedulerWaitMs ?? '-'} c_apply:{latestPaymentFlowTelemetry.confirmPostCommandApplyMs ?? '-'} c_ops:{latestPaymentFlowTelemetry.confirmOpsMs ?? '-'} c_fail:{latestPaymentFlowTelemetry.confirmFailureHandlingMs ?? '-'} c_oth:{latestPaymentFlowTelemetry.confirmOtherMs ?? '-'}
                 </p>
               )}
             </div>
