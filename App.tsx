@@ -7205,7 +7205,12 @@ const App: React.FC = () => {
       draftId: string,
       source: PendingDraftAddsSource,
       matcher: (entry: PendingDraftAdd) => boolean,
-      updater: (entry: PendingDraftAdd) => PendingDraftAdd
+      updater: (entry: PendingDraftAdd) => PendingDraftAdd,
+      options: {
+        deferVisiblePersistence?: boolean;
+        skipVisibleStateSync?: boolean;
+        skipVisibleQueueHealthLog?: boolean;
+      } = {}
     ): boolean => {
       if (source === 'recovery') {
         const currentEntries = recoveryPendingDraftAddsRef.current[draftId] || [];
@@ -7232,10 +7237,22 @@ const App: React.FC = () => {
       if (!changed) return false;
       const nextPendingByDraft = { ...pendingDraftAddsRef.current };
       nextPendingByDraft[draftId] = nextEntries;
+      if (options.deferVisiblePersistence) {
+        pendingDraftAddsRef.current = nextPendingByDraft;
+        if (!options.skipVisibleStateSync) {
+          setPendingDraftAddsByDraft(nextPendingByDraft);
+        }
+        pendingDraftAddsRevisionRef.current += 1;
+        if (!options.skipVisibleQueueHealthLog) {
+          logQueueHealth('pending-draft-adds');
+        }
+        isPendingDraftAddsHydratedRef.current = true;
+        return true;
+      }
       replacePendingDraftAdds(nextPendingByDraft);
       return true;
     },
-    [replacePendingDraftAdds]
+    [logQueueHealth, replacePendingDraftAdds]
   );
 
   const collectRestoreBlockedPendingSemanticKeysForDraft = useCallback((draftId: string): Set<string> => {
@@ -7307,6 +7324,9 @@ const App: React.FC = () => {
         onLockWaitMs?: (durationMs: number) => void;
         onPhaseTiming?: (phase: PendingDraftFlushPhase, durationMs: number) => void;
         suppressOperationalEvents?: boolean;
+        deferVisiblePersistence?: boolean;
+        skipVisibleStateSync?: boolean;
+        skipVisibleQueueHealthLog?: boolean;
       } = {}
     ): Promise<boolean> => {
       const emitFlushOperationalEvent = (
@@ -7317,49 +7337,59 @@ const App: React.FC = () => {
         if (options.suppressOperationalEvents) return;
         pushOperationalEvent(type, message, context);
       };
+      const source: PendingDraftAddsSource = options.source === 'recovery' ? 'recovery' : 'visible';
+      const shouldDeferVisiblePersistence =
+        source === 'visible' && options.deferVisiblePersistence === true;
+      let hasDeferredVisiblePersistence = false;
       const runPendingStatusUpdate = (
         matcher: (entry: PendingDraftAdd) => boolean,
         updater: (entry: PendingDraftAdd) => PendingDraftAdd
       ): boolean => {
         const persistStartedAt = performance.now();
-        const changed = updatePendingDraftAddInSource(draftId, source, matcher, updater);
+        const changed = updatePendingDraftAddInSource(draftId, source, matcher, updater, {
+          deferVisiblePersistence: shouldDeferVisiblePersistence,
+          skipVisibleStateSync: options.skipVisibleStateSync,
+          skipVisibleQueueHealthLog: options.skipVisibleQueueHealthLog,
+        });
+        if (changed && shouldDeferVisiblePersistence) {
+          hasDeferredVisiblePersistence = true;
+        }
         options.onPhaseTiming?.('status_persist', performance.now() - persistStartedAt);
         return changed;
       };
       const hydrateStartedAt = performance.now();
       hydratePendingDraftAdds();
       options.onPhaseTiming?.('hydrate', performance.now() - hydrateStartedAt);
-      const source: PendingDraftAddsSource = options.source === 'recovery' ? 'recovery' : 'visible';
       const snapshotPrepareStartedAt = performance.now();
       const productById = new Map<string, Product>(
         products.map((entry): [string, Product] => [entry.id, entry])
       );
       const ingredientIdSet = new Set<string>(ingredients.map((ingredient) => ingredient.id));
       options.onPhaseTiming?.('snapshot_prepare', performance.now() - snapshotPrepareStartedAt);
+      try {
+        const hasServerDraft = saleDraftsRef.current.some((draft) => draft.id === draftId);
+        if (!hasServerDraft) {
+          const createDraftStartedAt = performance.now();
+          const created = await runCommandWithSync(
+            {
+              type: 'SALE_DRAFT_CREATE',
+              draftId,
+              customerType,
+            },
+            undefined,
+            {
+              silentSuccessNotification: true,
+              silentErrorNotification: options.silentErrorNotification,
+              errorSink: options.errorSink,
+              trackPendingState: false,
+              failFastOnVersionConflict: options.failFastOnVersionConflict,
+            }
+          );
+          options.onPhaseTiming?.('create_draft', performance.now() - createDraftStartedAt);
+          if (!created) return false;
+        }
 
-      const hasServerDraft = saleDraftsRef.current.some((draft) => draft.id === draftId);
-      if (!hasServerDraft) {
-        const createDraftStartedAt = performance.now();
-        const created = await runCommandWithSync(
-          {
-            type: 'SALE_DRAFT_CREATE',
-            draftId,
-            customerType,
-          },
-          undefined,
-          {
-            silentSuccessNotification: true,
-            silentErrorNotification: options.silentErrorNotification,
-            errorSink: options.errorSink,
-            trackPendingState: false,
-            failFastOnVersionConflict: options.failFastOnVersionConflict,
-          }
-        );
-        options.onPhaseTiming?.('create_draft', performance.now() - createDraftStartedAt);
-        if (!created) return false;
-      }
-
-      while (true) {
+        while (true) {
         const loopReadStartedAt = performance.now();
         const currentPendingAdds =
           source === 'recovery'
@@ -7647,12 +7677,19 @@ const App: React.FC = () => {
             entry.localItemId === current.localItemId && entry.commandId === current.commandId,
           (entry) => withPendingDraftAddStatus(entry, 'APPLIED')
         );
-        emitFlushOperationalEvent('QUEUE_HEALTH', 'Pending add aplicado com sucesso.', {
-          draftId,
-          localItemId: current.localItemId,
-          commandId: current.commandId,
-          source,
-        });
+          emitFlushOperationalEvent('QUEUE_HEALTH', 'Pending add aplicado com sucesso.', {
+            draftId,
+            localItemId: current.localItemId,
+            commandId: current.commandId,
+            source,
+          });
+        }
+      } finally {
+        if (hasDeferredVisiblePersistence) {
+          const persistStartedAt = performance.now();
+          replacePendingDraftAdds(pendingDraftAddsRef.current);
+          options.onPhaseTiming?.('status_persist', performance.now() - persistStartedAt);
+        }
       }
     },
     [
@@ -7682,6 +7719,9 @@ const App: React.FC = () => {
         onLockWaitMs?: (durationMs: number) => void;
         onPhaseTiming?: (phase: PendingDraftFlushPhase, durationMs: number) => void;
         suppressOperationalEvents?: boolean;
+        deferVisiblePersistence?: boolean;
+        skipVisibleStateSync?: boolean;
+        skipVisibleQueueHealthLog?: boolean;
       } = {}
     ): Promise<boolean> => {
       const normalizedDraftId = draftId.trim();
@@ -9267,6 +9307,9 @@ const App: React.FC = () => {
                   source: 'visible',
                   skipSnapshotApply: true,
                   suppressOperationalEvents: true,
+                  deferVisiblePersistence: true,
+                  skipVisibleStateSync: true,
+                  skipVisibleQueueHealthLog: true,
                   onLockWaitMs: (durationMs) => {
                     recordFlushPhaseDuration('flushLockWaitMs', durationMs);
                   },
