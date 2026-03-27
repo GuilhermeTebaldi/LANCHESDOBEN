@@ -9241,24 +9241,19 @@ const App: React.FC = () => {
         const flushPendingReadStartedAt = performance.now();
         const visiblePendingEntries = pendingDraftAddsRef.current[currentJob.draftId] || [];
         const recoveryPendingEntries = recoveryPendingDraftAddsRef.current[currentJob.draftId] || [];
-        const visiblePendingCount = visiblePendingEntries.filter((entry) =>
-          isPendingDraftAddExecutable(entry)
-        ).length;
-        const recoveryPendingCount = recoveryPendingEntries.filter((entry) =>
-          isPendingDraftAddExecutable(entry)
-        ).length;
-        const hasVisiblePendingSyncWork = hasPendingDraftAddBackgroundSyncWork(visiblePendingEntries);
-        const hasRecoveryPendingSyncWork = hasPendingDraftAddBackgroundSyncWork(recoveryPendingEntries);
+        const visiblePendingCount = countVisiblePendingDraftAdds(visiblePendingEntries);
+        const recoveryPendingCount = countVisiblePendingDraftAdds(recoveryPendingEntries);
         recordFlushPhaseDuration('flushPendingReadMs', performance.now() - flushPendingReadStartedAt);
         const shouldFlushDraftAdds =
           !currentServerDraft ||
           currentServerDraft.status === 'DRAFT' ||
-          hasVisiblePendingSyncWork ||
-          hasRecoveryPendingSyncWork;
+          visiblePendingCount > 0 ||
+          recoveryPendingCount > 0;
         if (shouldFlushDraftAdds) {
           const flushPendingDraftAddsStartedAt = performance.now();
           try {
-            const shouldFlushVisibleDraftAdds = hasVisiblePendingSyncWork;
+            const shouldFlushVisibleDraftAdds =
+              !currentServerDraft || currentServerDraft.status === 'DRAFT' || visiblePendingCount > 0;
             if (shouldFlushVisibleDraftAdds) {
               const draftAddsErrorSink: RunCommandErrorSink = {};
               const flushVisibleStartedAt = performance.now();
@@ -9285,7 +9280,7 @@ const App: React.FC = () => {
               }
             }
 
-            if (hasRecoveryPendingSyncWork) {
+            if (recoveryPendingCount > 0) {
               const recoveryAddsErrorSink: RunCommandErrorSink = {};
               const flushRecoveryStartedAt = performance.now();
               const flushedRecovery = await flushPendingDraftAdds(
