@@ -118,6 +118,13 @@ type PendingDraftAddStatus =
   | 'FAILED_TERMINAL';
 
 type DraftLifecycleStage = 'OPEN' | 'FINALIZING' | 'PENDING_CONFIRM' | 'PAID' | 'CANCELLED';
+type PendingDraftFlushPhase =
+  | 'hydrate'
+  | 'create_draft'
+  | 'loop_read'
+  | 'snapshot_prepare'
+  | 'run_command'
+  | 'status_persist';
 
 interface OfflineQueuedSale {
   command: SaleRegisterCommand;
@@ -277,6 +284,17 @@ interface PaymentFlowTelemetryEntry {
   pPersistMs: number;
   pOpsMs: number;
   pFinalizeMs: number;
+  flushLockWaitMs: number;
+  flushPendingReadMs: number;
+  flushSnapshotPrepareMs: number;
+  flushVisibleRunMs: number;
+  flushRecoveryRunMs: number;
+  flushStateRefreshMs: number;
+  flushApplySnapshotMs: number;
+  flushTerminalCleanupMs: number;
+  flushOperationalPersistMs: number;
+  flushUiReleaseMs: number;
+  flushPostReturnMs: number;
   retries: number;
   hadRecovery: boolean;
   hadReconciliation: boolean;
@@ -306,6 +324,18 @@ interface PaymentFlowTelemetryRecord {
   pPersistMs: number | null;
   pOpsMs: number | null;
   pFinalizeMs: number | null;
+  flushLockWaitMs: number | null;
+  flushPendingReadMs: number | null;
+  flushSnapshotPrepareMs: number | null;
+  flushVisibleRunMs: number | null;
+  flushRecoveryRunMs: number | null;
+  flushStateRefreshMs: number | null;
+  flushApplySnapshotMs: number | null;
+  flushTerminalCleanupMs: number | null;
+  flushOperationalPersistMs: number | null;
+  flushUiReleaseMs: number | null;
+  flushPostReturnMs: number | null;
+  flushOtherMs: number | null;
   clickToBackendConfirmMs: number | null;
   retries: number;
   hadRecovery: boolean;
@@ -1942,6 +1972,18 @@ const normalizePaymentFlowTelemetryRecord = (
   const pPersistRaw = Number(source.pPersistMs);
   const pOpsRaw = Number(source.pOpsMs);
   const pFinalizeRaw = Number(source.pFinalizeMs);
+  const flushLockWaitRaw = Number(source.flushLockWaitMs);
+  const flushPendingReadRaw = Number(source.flushPendingReadMs);
+  const flushSnapshotPrepareRaw = Number(source.flushSnapshotPrepareMs);
+  const flushVisibleRunRaw = Number(source.flushVisibleRunMs);
+  const flushRecoveryRunRaw = Number(source.flushRecoveryRunMs);
+  const flushStateRefreshRaw = Number(source.flushStateRefreshMs);
+  const flushApplySnapshotRaw = Number(source.flushApplySnapshotMs);
+  const flushTerminalCleanupRaw = Number(source.flushTerminalCleanupMs);
+  const flushOperationalPersistRaw = Number(source.flushOperationalPersistMs);
+  const flushUiReleaseRaw = Number(source.flushUiReleaseMs);
+  const flushPostReturnRaw = Number(source.flushPostReturnMs);
+  const flushOtherRaw = Number(source.flushOtherMs);
   const clickToBackendConfirmRaw = Number(source.clickToBackendConfirmMs);
   const retriesRaw = Number(source.retries);
   const timestamp =
@@ -2016,6 +2058,50 @@ const normalizePaymentFlowTelemetryRecord = (
       Number.isFinite(pOpsRaw) && pOpsRaw >= 0 ? Math.floor(pOpsRaw) : null,
     pFinalizeMs:
       Number.isFinite(pFinalizeRaw) && pFinalizeRaw >= 0 ? Math.floor(pFinalizeRaw) : null,
+    flushLockWaitMs:
+      Number.isFinite(flushLockWaitRaw) && flushLockWaitRaw >= 0 ? Math.floor(flushLockWaitRaw) : null,
+    flushPendingReadMs:
+      Number.isFinite(flushPendingReadRaw) && flushPendingReadRaw >= 0
+        ? Math.floor(flushPendingReadRaw)
+        : null,
+    flushSnapshotPrepareMs:
+      Number.isFinite(flushSnapshotPrepareRaw) && flushSnapshotPrepareRaw >= 0
+        ? Math.floor(flushSnapshotPrepareRaw)
+        : null,
+    flushVisibleRunMs:
+      Number.isFinite(flushVisibleRunRaw) && flushVisibleRunRaw >= 0
+        ? Math.floor(flushVisibleRunRaw)
+        : null,
+    flushRecoveryRunMs:
+      Number.isFinite(flushRecoveryRunRaw) && flushRecoveryRunRaw >= 0
+        ? Math.floor(flushRecoveryRunRaw)
+        : null,
+    flushStateRefreshMs:
+      Number.isFinite(flushStateRefreshRaw) && flushStateRefreshRaw >= 0
+        ? Math.floor(flushStateRefreshRaw)
+        : null,
+    flushApplySnapshotMs:
+      Number.isFinite(flushApplySnapshotRaw) && flushApplySnapshotRaw >= 0
+        ? Math.floor(flushApplySnapshotRaw)
+        : null,
+    flushTerminalCleanupMs:
+      Number.isFinite(flushTerminalCleanupRaw) && flushTerminalCleanupRaw >= 0
+        ? Math.floor(flushTerminalCleanupRaw)
+        : null,
+    flushOperationalPersistMs:
+      Number.isFinite(flushOperationalPersistRaw) && flushOperationalPersistRaw >= 0
+        ? Math.floor(flushOperationalPersistRaw)
+        : null,
+    flushUiReleaseMs:
+      Number.isFinite(flushUiReleaseRaw) && flushUiReleaseRaw >= 0
+        ? Math.floor(flushUiReleaseRaw)
+        : null,
+    flushPostReturnMs:
+      Number.isFinite(flushPostReturnRaw) && flushPostReturnRaw >= 0
+        ? Math.floor(flushPostReturnRaw)
+        : null,
+    flushOtherMs:
+      Number.isFinite(flushOtherRaw) && flushOtherRaw >= 0 ? Math.floor(flushOtherRaw) : null,
     clickToBackendConfirmMs:
       Number.isFinite(clickToBackendConfirmRaw) && clickToBackendConfirmRaw >= 0
         ? Math.floor(clickToBackendConfirmRaw)
@@ -3529,6 +3615,17 @@ const App: React.FC = () => {
         pPersistMs: 0,
         pOpsMs: 0,
         pFinalizeMs: 0,
+        flushLockWaitMs: 0,
+        flushPendingReadMs: 0,
+        flushSnapshotPrepareMs: 0,
+        flushVisibleRunMs: 0,
+        flushRecoveryRunMs: 0,
+        flushStateRefreshMs: 0,
+        flushApplySnapshotMs: 0,
+        flushTerminalCleanupMs: 0,
+        flushOperationalPersistMs: 0,
+        flushUiReleaseMs: 0,
+        flushPostReturnMs: 0,
         retries: 0,
         hadRecovery: false,
         hadReconciliation: false,
@@ -3595,7 +3692,18 @@ const App: React.FC = () => {
         | 'pReconcileMs'
         | 'pPersistMs'
         | 'pOpsMs'
-        | 'pFinalizeMs',
+        | 'pFinalizeMs'
+        | 'flushLockWaitMs'
+        | 'flushPendingReadMs'
+        | 'flushSnapshotPrepareMs'
+        | 'flushVisibleRunMs'
+        | 'flushRecoveryRunMs'
+        | 'flushStateRefreshMs'
+        | 'flushApplySnapshotMs'
+        | 'flushTerminalCleanupMs'
+        | 'flushOperationalPersistMs'
+        | 'flushUiReleaseMs'
+        | 'flushPostReturnMs',
       durationMs: number
     ): void => {
       const normalizedDraftId = draftId.trim();
@@ -3678,6 +3786,30 @@ const App: React.FC = () => {
           ? Math.max(0, nowMs - current.processingStartedAtMs)
           : null;
       const totalConfMs = Math.max(0, nowMs - current.clickAtMs);
+      const flushLockWaitMs = Math.max(0, Math.round(current.flushLockWaitMs));
+      const flushPendingReadMs = Math.max(0, Math.round(current.flushPendingReadMs));
+      const flushSnapshotPrepareMs = Math.max(0, Math.round(current.flushSnapshotPrepareMs));
+      const flushVisibleRunMs = Math.max(0, Math.round(current.flushVisibleRunMs));
+      const flushRecoveryRunMs = Math.max(0, Math.round(current.flushRecoveryRunMs));
+      const flushStateRefreshMs = Math.max(0, Math.round(current.flushStateRefreshMs));
+      const flushApplySnapshotMs = Math.max(0, Math.round(current.flushApplySnapshotMs));
+      const flushTerminalCleanupMs = Math.max(0, Math.round(current.flushTerminalCleanupMs));
+      const flushOperationalPersistMs = Math.max(0, Math.round(current.flushOperationalPersistMs));
+      const flushUiReleaseMs = Math.max(0, Math.round(current.flushUiReleaseMs));
+      const flushPostReturnMs = Math.max(0, Math.round(current.flushPostReturnMs));
+      const flushMeasuredMs =
+        flushLockWaitMs +
+        flushPendingReadMs +
+        flushSnapshotPrepareMs +
+        flushVisibleRunMs +
+        flushRecoveryRunMs +
+        flushStateRefreshMs +
+        flushApplySnapshotMs +
+        flushTerminalCleanupMs +
+        flushOperationalPersistMs +
+        flushUiReleaseMs +
+        flushPostReturnMs;
+      const flushOtherMs = Math.max(0, Math.round(Math.max(0, current.pFlushMs) - flushMeasuredMs));
 
       const record: PaymentFlowTelemetryRecord = {
         draftId: current.draftId,
@@ -3703,6 +3835,18 @@ const App: React.FC = () => {
         pPersistMs: Math.max(0, Math.round(current.pPersistMs)),
         pOpsMs: Math.max(0, Math.round(current.pOpsMs)),
         pFinalizeMs: Math.max(0, Math.round(current.pFinalizeMs)),
+        flushLockWaitMs,
+        flushPendingReadMs,
+        flushSnapshotPrepareMs,
+        flushVisibleRunMs,
+        flushRecoveryRunMs,
+        flushStateRefreshMs,
+        flushApplySnapshotMs,
+        flushTerminalCleanupMs,
+        flushOperationalPersistMs,
+        flushUiReleaseMs,
+        flushPostReturnMs,
+        flushOtherMs,
         clickToBackendConfirmMs: totalConfMs,
         retries: normalizedRetries,
         hadRecovery,
@@ -3738,6 +3882,18 @@ const App: React.FC = () => {
         p_persist: record.pPersistMs,
         p_ops: record.pOpsMs,
         p_finalize: record.pFinalizeMs,
+        flush_lock_wait_ms: record.flushLockWaitMs,
+        flush_pending_read_ms: record.flushPendingReadMs,
+        flush_snapshot_prepare_ms: record.flushSnapshotPrepareMs,
+        flush_visible_run_ms: record.flushVisibleRunMs,
+        flush_recovery_run_ms: record.flushRecoveryRunMs,
+        flush_state_refresh_ms: record.flushStateRefreshMs,
+        flush_apply_snapshot_ms: record.flushApplySnapshotMs,
+        flush_terminal_cleanup_ms: record.flushTerminalCleanupMs,
+        flush_operational_persist_ms: record.flushOperationalPersistMs,
+        flush_ui_release_ms: record.flushUiReleaseMs,
+        flush_post_return_ms: record.flushPostReturnMs,
+        flush_other_ms: record.flushOtherMs,
         clickToBackendConfirmMs: record.clickToBackendConfirmMs,
         retries: record.retries,
         hadRecovery: record.hadRecovery,
@@ -3772,6 +3928,18 @@ const App: React.FC = () => {
           p_persist: record.pPersistMs,
           p_ops: record.pOpsMs,
           p_finalize: record.pFinalizeMs,
+          flush_lock_wait_ms: record.flushLockWaitMs,
+          flush_pending_read_ms: record.flushPendingReadMs,
+          flush_snapshot_prepare_ms: record.flushSnapshotPrepareMs,
+          flush_visible_run_ms: record.flushVisibleRunMs,
+          flush_recovery_run_ms: record.flushRecoveryRunMs,
+          flush_state_refresh_ms: record.flushStateRefreshMs,
+          flush_apply_snapshot_ms: record.flushApplySnapshotMs,
+          flush_terminal_cleanup_ms: record.flushTerminalCleanupMs,
+          flush_operational_persist_ms: record.flushOperationalPersistMs,
+          flush_ui_release_ms: record.flushUiReleaseMs,
+          flush_post_return_ms: record.flushPostReturnMs,
+          flush_other_ms: record.flushOtherMs,
           clickToBackendConfirmMs: record.clickToBackendConfirmMs,
           retries: record.retries,
           hadRecovery: record.hadRecovery,
@@ -7136,13 +7304,42 @@ const App: React.FC = () => {
         failFastOnVersionConflict?: boolean;
         source?: PendingDraftAddsSource;
         skipSnapshotApply?: boolean;
+        onLockWaitMs?: (durationMs: number) => void;
+        onPhaseTiming?: (phase: PendingDraftFlushPhase, durationMs: number) => void;
+        suppressOperationalEvents?: boolean;
       } = {}
     ): Promise<boolean> => {
+      const emitFlushOperationalEvent = (
+        type: OperationalEventLogEntry['type'],
+        message: string,
+        context?: Record<string, unknown>
+      ): void => {
+        if (options.suppressOperationalEvents) return;
+        pushOperationalEvent(type, message, context);
+      };
+      const runPendingStatusUpdate = (
+        matcher: (entry: PendingDraftAdd) => boolean,
+        updater: (entry: PendingDraftAdd) => PendingDraftAdd
+      ): boolean => {
+        const persistStartedAt = performance.now();
+        const changed = updatePendingDraftAddInSource(draftId, source, matcher, updater);
+        options.onPhaseTiming?.('status_persist', performance.now() - persistStartedAt);
+        return changed;
+      };
+      const hydrateStartedAt = performance.now();
       hydratePendingDraftAdds();
+      options.onPhaseTiming?.('hydrate', performance.now() - hydrateStartedAt);
       const source: PendingDraftAddsSource = options.source === 'recovery' ? 'recovery' : 'visible';
+      const snapshotPrepareStartedAt = performance.now();
+      const productById = new Map<string, Product>(
+        products.map((entry): [string, Product] => [entry.id, entry])
+      );
+      const ingredientIdSet = new Set<string>(ingredients.map((ingredient) => ingredient.id));
+      options.onPhaseTiming?.('snapshot_prepare', performance.now() - snapshotPrepareStartedAt);
 
       const hasServerDraft = saleDraftsRef.current.some((draft) => draft.id === draftId);
       if (!hasServerDraft) {
+        const createDraftStartedAt = performance.now();
         const created = await runCommandWithSync(
           {
             type: 'SALE_DRAFT_CREATE',
@@ -7158,19 +7355,23 @@ const App: React.FC = () => {
             failFastOnVersionConflict: options.failFastOnVersionConflict,
           }
         );
+        options.onPhaseTiming?.('create_draft', performance.now() - createDraftStartedAt);
         if (!created) return false;
       }
 
       while (true) {
+        const loopReadStartedAt = performance.now();
         const currentPendingAdds =
           source === 'recovery'
             ? recoveryPendingDraftAddsRef.current[draftId] || []
             : pendingDraftAddsRef.current[draftId] || [];
         if (currentPendingAdds.length === 0) {
+          options.onPhaseTiming?.('loop_read', performance.now() - loopReadStartedAt);
           return true;
         }
 
         const current = currentPendingAdds.find((entry) => isPendingDraftAddExecutable(entry));
+        options.onPhaseTiming?.('loop_read', performance.now() - loopReadStartedAt);
         if (!current) {
           const staleInFlight = currentPendingAdds.find((entry) =>
             isPendingDraftAddInFlightStale(entry)
@@ -7181,7 +7382,7 @@ const App: React.FC = () => {
               staleInFlight.localItemId
             );
             const staleCancelIntent = pendingDraftAddCancellationIntentsRef.current.get(staleRuntimeKey);
-            pushOperationalEvent(
+            emitFlushOperationalEvent(
               'QUEUE_HEALTH',
               'Pending add IN_FLIGHT stale detectado; reexecução automática bloqueada.',
               {
@@ -7197,9 +7398,7 @@ const App: React.FC = () => {
             if (staleCancelIntent && staleCancelIntent.commandId === staleInFlight.commandId) {
               const reconciled = await reconcileCancelledPendingDraftAddIntent(staleCancelIntent);
               pendingDraftAddCancellationIntentsRef.current.delete(staleRuntimeKey);
-              updatePendingDraftAddInSource(
-                draftId,
-                source,
+              runPendingStatusUpdate(
                 (entry) =>
                   entry.localItemId === staleInFlight.localItemId &&
                   entry.commandId === staleInFlight.commandId,
@@ -7217,7 +7416,7 @@ const App: React.FC = () => {
                       : 'stale_in_flight_cancelled_reconcile_failed'
                   )
               );
-              pushOperationalEvent(
+              emitFlushOperationalEvent(
                 reconciled ? 'PENDING_ADD_CANCELLED' : 'COMMAND_SKIPPED_OBSOLETE',
                 reconciled
                   ? 'Pending add IN_FLIGHT stale reconciliado sem reexecução.'
@@ -7232,9 +7431,7 @@ const App: React.FC = () => {
               continue;
             }
 
-            updatePendingDraftAddInSource(
-              draftId,
-              source,
+            runPendingStatusUpdate(
               (entry) =>
                 entry.localItemId === staleInFlight.localItemId &&
                 entry.commandId === staleInFlight.commandId,
@@ -7248,7 +7445,7 @@ const App: React.FC = () => {
                   'stale_in_flight_without_cancel_intent'
                 )
             );
-            pushOperationalEvent(
+            emitFlushOperationalEvent(
               'COMMAND_SKIPPED_OBSOLETE',
               'Pending add IN_FLIGHT stale descartado sem retorno a ACTIVE.',
               {
@@ -7268,15 +7465,13 @@ const App: React.FC = () => {
           currentRuntimeKey
         );
         if (cancelledBeforeSend && cancelledBeforeSend.commandId === current.commandId) {
-          updatePendingDraftAddInSource(
-            draftId,
-            source,
+          runPendingStatusUpdate(
             (entry) =>
               entry.localItemId === current.localItemId && entry.commandId === current.commandId,
             (entry) => withPendingDraftAddStatus(entry, 'CANCELLED', 'cancelled_before_send')
           );
           pendingDraftAddCancellationIntentsRef.current.delete(currentRuntimeKey);
-          pushOperationalEvent(
+          emitFlushOperationalEvent(
             'COMMAND_SKIPPED_OBSOLETE',
             'Pending add descartado antes do envio por remoção local.',
             {
@@ -7289,17 +7484,16 @@ const App: React.FC = () => {
           continue;
         }
 
-        const product = products.find((entry) => entry.id === current.productId) || null;
-        const ingredientIdSet = new Set<string>(ingredients.map((ingredient) => ingredient.id));
+        const product = productById.get(current.productId) || null;
+        const recipePrepareStartedAt = performance.now();
         const recipeValidation = validateDraftItemRecipe(
           product,
           current.recipeOverride ?? product?.recipe,
           ingredientIdSet
         );
+        options.onPhaseTiming?.('snapshot_prepare', performance.now() - recipePrepareStartedAt);
         if (recipeValidation.ok === false) {
-          updatePendingDraftAddInSource(
-            draftId,
-            source,
+          runPendingStatusUpdate(
             (entry) =>
               entry.localItemId === current.localItemId && entry.commandId === current.commandId,
             (entry) =>
@@ -7312,7 +7506,7 @@ const App: React.FC = () => {
                 'invalid_recipe'
               )
           );
-          pushOperationalEvent(
+          emitFlushOperationalEvent(
             'COMMAND_SKIPPED_OBSOLETE',
             'Pending add marcado como terminal por receita inválida.',
             {
@@ -7334,14 +7528,12 @@ const App: React.FC = () => {
           return false;
         }
 
-        updatePendingDraftAddInSource(
-          draftId,
-          source,
+        runPendingStatusUpdate(
           (entry) =>
             entry.localItemId === current.localItemId && entry.commandId === current.commandId,
           (entry) => withPendingDraftAddStatus(entry, 'IN_FLIGHT')
         );
-        pushOperationalEvent('QUEUE_HEALTH', 'Pending add entrou em execução (IN_FLIGHT).', {
+        emitFlushOperationalEvent('QUEUE_HEALTH', 'Pending add entrou em execução (IN_FLIGHT).', {
           draftId,
           localItemId: current.localItemId,
           commandId: current.commandId,
@@ -7361,6 +7553,7 @@ const App: React.FC = () => {
 
         pendingDraftAddsInFlightRef.current.set(currentRuntimeKey, current);
         let ok = false;
+        const runCommandStartedAt = performance.now();
         try {
           ok = await runCommandWithSync(syncCommand, undefined, {
             silentSuccessNotification: true,
@@ -7371,6 +7564,7 @@ const App: React.FC = () => {
             skipSnapshotApply: options.skipSnapshotApply,
           });
         } finally {
+          options.onPhaseTiming?.('run_command', performance.now() - runCommandStartedAt);
           const inFlight = pendingDraftAddsInFlightRef.current.get(currentRuntimeKey);
           if (
             inFlight &&
@@ -7382,9 +7576,7 @@ const App: React.FC = () => {
         }
         if (!ok) {
           const shouldReturnToActive = !isDraftLifecycleLocked(draftId);
-          updatePendingDraftAddInSource(
-            draftId,
-            source,
+          runPendingStatusUpdate(
             (entry) =>
               entry.localItemId === current.localItemId && entry.commandId === current.commandId,
             (entry) =>
@@ -7400,7 +7592,7 @@ const App: React.FC = () => {
                   )
           );
           if (!shouldReturnToActive) {
-            pushOperationalEvent(
+            emitFlushOperationalEvent(
               'COMMAND_SKIPPED_OBSOLETE',
               'Pending add falhou com draft travado e foi terminalizado sem reexecução.',
               {
@@ -7420,9 +7612,7 @@ const App: React.FC = () => {
         if (cancelledDuringSync && cancelledDuringSync.commandId === current.commandId) {
           const reconciled = await reconcileCancelledPendingDraftAddIntent(cancelledDuringSync);
           pendingDraftAddCancellationIntentsRef.current.delete(currentRuntimeKey);
-          updatePendingDraftAddInSource(
-            draftId,
-            source,
+          runPendingStatusUpdate(
             (entry) =>
               entry.localItemId === current.localItemId && entry.commandId === current.commandId,
             (entry) =>
@@ -7437,7 +7627,7 @@ const App: React.FC = () => {
                 reconciled ? 'cancelled_reconciled' : 'cancelled_reconcile_failed'
               )
           );
-          pushOperationalEvent(
+          emitFlushOperationalEvent(
             reconciled ? 'PENDING_ADD_CANCELLED' : 'COMMAND_SKIPPED_OBSOLETE',
             reconciled
               ? 'Pending add reconciliado e finalizado.'
@@ -7452,14 +7642,12 @@ const App: React.FC = () => {
           continue;
         }
 
-        updatePendingDraftAddInSource(
-          draftId,
-          source,
+        runPendingStatusUpdate(
           (entry) =>
             entry.localItemId === current.localItemId && entry.commandId === current.commandId,
           (entry) => withPendingDraftAddStatus(entry, 'APPLIED')
         );
-        pushOperationalEvent('QUEUE_HEALTH', 'Pending add aplicado com sucesso.', {
+        emitFlushOperationalEvent('QUEUE_HEALTH', 'Pending add aplicado com sucesso.', {
           draftId,
           localItemId: current.localItemId,
           commandId: current.commandId,
@@ -7491,6 +7679,9 @@ const App: React.FC = () => {
         failFastOnVersionConflict?: boolean;
         source?: PendingDraftAddsSource;
         skipSnapshotApply?: boolean;
+        onLockWaitMs?: (durationMs: number) => void;
+        onPhaseTiming?: (phase: PendingDraftFlushPhase, durationMs: number) => void;
+        suppressOperationalEvents?: boolean;
       } = {}
     ): Promise<boolean> => {
       const normalizedDraftId = draftId.trim();
@@ -7500,7 +7691,11 @@ const App: React.FC = () => {
 
       const queue = pendingDraftFlushQueueRef.current;
       const previous = queue.get(normalizedDraftId) ?? Promise.resolve(true);
-      const execute = () => flushPendingDraftAddsCore(normalizedDraftId, customerType, options);
+      const queuedAt = performance.now();
+      const execute = () => {
+        options.onLockWaitMs?.(Math.max(0, performance.now() - queuedAt));
+        return flushPendingDraftAddsCore(normalizedDraftId, customerType, options);
+      };
       const next = previous.then(execute, execute);
       queue.set(normalizedDraftId, next);
 
@@ -9012,25 +9207,61 @@ const App: React.FC = () => {
           );
         };
 
-        const visiblePendingCount = (pendingDraftAddsRef.current[currentJob.draftId] || []).filter((entry) =>
+        const recordFlushPhaseDuration = (
+          stage:
+            | 'flushLockWaitMs'
+            | 'flushPendingReadMs'
+            | 'flushSnapshotPrepareMs'
+            | 'flushVisibleRunMs'
+            | 'flushRecoveryRunMs'
+            | 'flushStateRefreshMs'
+            | 'flushApplySnapshotMs'
+            | 'flushTerminalCleanupMs'
+            | 'flushOperationalPersistMs'
+            | 'flushUiReleaseMs'
+            | 'flushPostReturnMs',
+          durationMs: number
+        ): void => {
+          markPaymentFlowTelemetryStageDuration(currentJob.draftId, currentJob.id, stage, durationMs);
+        };
+        const recordFlushInternalPhase = (phase: PendingDraftFlushPhase, durationMs: number): void => {
+          if (phase === 'loop_read') {
+            recordFlushPhaseDuration('flushPendingReadMs', durationMs);
+            return;
+          }
+          if (phase === 'status_persist') {
+            recordFlushPhaseDuration('flushOperationalPersistMs', durationMs);
+            return;
+          }
+          if (phase === 'snapshot_prepare' || phase === 'hydrate' || phase === 'create_draft') {
+            recordFlushPhaseDuration('flushSnapshotPrepareMs', durationMs);
+            return;
+          }
+        };
+        const flushPendingReadStartedAt = performance.now();
+        const visiblePendingEntries = pendingDraftAddsRef.current[currentJob.draftId] || [];
+        const recoveryPendingEntries = recoveryPendingDraftAddsRef.current[currentJob.draftId] || [];
+        const visiblePendingCount = visiblePendingEntries.filter((entry) =>
           isPendingDraftAddExecutable(entry)
         ).length;
-        const recoveryPendingCount =
-          (recoveryPendingDraftAddsRef.current[currentJob.draftId] || []).filter((entry) =>
-            isPendingDraftAddExecutable(entry)
-          ).length;
+        const recoveryPendingCount = recoveryPendingEntries.filter((entry) =>
+          isPendingDraftAddExecutable(entry)
+        ).length;
+        const hasVisiblePendingSyncWork = hasPendingDraftAddBackgroundSyncWork(visiblePendingEntries);
+        const hasRecoveryPendingSyncWork = hasPendingDraftAddBackgroundSyncWork(recoveryPendingEntries);
+        recordFlushPhaseDuration('flushPendingReadMs', performance.now() - flushPendingReadStartedAt);
         const shouldFlushDraftAdds =
           !currentServerDraft ||
           currentServerDraft.status === 'DRAFT' ||
-          visiblePendingCount > 0 ||
-          recoveryPendingCount > 0;
+          hasVisiblePendingSyncWork ||
+          hasRecoveryPendingSyncWork;
         if (shouldFlushDraftAdds) {
           const flushPendingDraftAddsStartedAt = performance.now();
           try {
-            const shouldFlushVisibleDraftAdds =
-              !currentServerDraft || currentServerDraft.status === 'DRAFT' || visiblePendingCount > 0;
+            const shouldFlushVisibleDraftAdds = hasVisiblePendingSyncWork;
             if (shouldFlushVisibleDraftAdds) {
               const draftAddsErrorSink: RunCommandErrorSink = {};
+              const flushVisibleStartedAt = performance.now();
               const flushedVisible = await flushPendingDraftAdds(
                 currentJob.draftId,
                 (currentJob.snapshot.draft.customerType || 'BALCAO') as SaleCustomerType,
@@ -9040,16 +9271,23 @@ const App: React.FC = () => {
                   failFastOnVersionConflict: false,
                   source: 'visible',
                   skipSnapshotApply: true,
+                  suppressOperationalEvents: true,
+                  onLockWaitMs: (durationMs) => {
+                    recordFlushPhaseDuration('flushLockWaitMs', durationMs);
+                  },
+                  onPhaseTiming: recordFlushInternalPhase,
                 }
               );
+              recordFlushPhaseDuration('flushVisibleRunMs', performance.now() - flushVisibleStartedAt);
               if (!flushedVisible) {
                 await markJobAsFailed('Falha ao enviar itens pendentes.', draftAddsErrorSink);
                 return;
               }
             }
 
-            if (recoveryPendingCount > 0) {
+            if (hasRecoveryPendingSyncWork) {
               const recoveryAddsErrorSink: RunCommandErrorSink = {};
+              const flushRecoveryStartedAt = performance.now();
               const flushedRecovery = await flushPendingDraftAdds(
                 currentJob.draftId,
                 (currentJob.snapshot.draft.customerType || 'BALCAO') as SaleCustomerType,
@@ -9059,8 +9297,14 @@ const App: React.FC = () => {
                   failFastOnVersionConflict: false,
                   source: 'recovery',
                   skipSnapshotApply: true,
+                  suppressOperationalEvents: true,
+                  onLockWaitMs: (durationMs) => {
+                    recordFlushPhaseDuration('flushLockWaitMs', durationMs);
+                  },
+                  onPhaseTiming: recordFlushInternalPhase,
                 }
               );
+              recordFlushPhaseDuration('flushRecoveryRunMs', performance.now() - flushRecoveryStartedAt);
               if (!flushedRecovery) {
                 await markJobAsFailed('Falha ao enviar itens pendentes da recuperação.', recoveryAddsErrorSink);
                 return;
@@ -9069,19 +9313,30 @@ const App: React.FC = () => {
             try {
               const stateRefreshStartedAt = performance.now();
               const refreshedStateAfterFlush = await fetchStateSnapshotControlled(currentJob.draftId);
+              const flushApplySnapshotStartedAt = performance.now();
               applySnapshotForCurrentJob(
                 refreshedStateAfterFlush,
                 'pending_paid_refresh_after_flush'
               );
-              recordStateRefreshMs(performance.now() - stateRefreshStartedAt);
+              const flushApplySnapshotDurationMs = performance.now() - flushApplySnapshotStartedAt;
+              const flushStateRefreshDurationMs = performance.now() - stateRefreshStartedAt;
+              recordStateRefreshMs(flushStateRefreshDurationMs);
+              recordFlushPhaseDuration(
+                'flushStateRefreshMs',
+                Math.max(0, flushStateRefreshDurationMs - flushApplySnapshotDurationMs)
+              );
+              recordFlushPhaseDuration('flushApplySnapshotMs', flushApplySnapshotDurationMs);
             } catch {
               // best-effort refresh; fallback to local state below
             }
+            const flushPostReturnStartedAt = performance.now();
             currentServerDraft = saleDraftsRef.current.find((entry) => entry.id === currentJob.draftId);
             if (
               currentServerDraft &&
               (currentServerDraft.status === 'PAID' || currentServerDraft.status === 'CANCELLED')
             ) {
+              recordFlushPhaseDuration('flushPostReturnMs', performance.now() - flushPostReturnStartedAt);
+              const flushTerminalCleanupStartedAt = performance.now();
               setDraftLifecycleStage(
                 currentJob.draftId,
                 currentServerDraft.status === 'PAID' ? 'PAID' : 'CANCELLED',
@@ -9090,16 +9345,28 @@ const App: React.FC = () => {
                   bumpEpoch: false,
                 }
               );
+              const flushOperationalPersistStartedAt = performance.now();
+              setDraftSyncInProgress(currentJob.draftId, false);
+              cleanupDraftOperationalArtifacts(currentJob.draftId);
+              clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
+              recordFlushPhaseDuration(
+                'flushOperationalPersistMs',
+                performance.now() - flushOperationalPersistStartedAt
+              );
+              const flushUiReleaseStartedAt = performance.now();
+              showCornerSync('success', 'Pedido já estava concluído no banco.', 1800);
+              recordFlushPhaseDuration('flushUiReleaseMs', performance.now() - flushUiReleaseStartedAt);
+              recordFlushPhaseDuration(
+                'flushTerminalCleanupMs',
+                performance.now() - flushTerminalCleanupStartedAt
+              );
               completePaymentFlowTelemetry(currentJob.draftId, {
                 retries: currentJob.attempts,
                 hadReconciliation: true,
               });
-              setDraftSyncInProgress(currentJob.draftId, false);
-              cleanupDraftOperationalArtifacts(currentJob.draftId);
-              clearRecoveryPendingDraftAddsForDraft(currentJob.draftId);
-              showCornerSync('success', 'Pedido já estava concluído no banco.', 1800);
               return;
             }
+            recordFlushPhaseDuration('flushPostReturnMs', performance.now() - flushPostReturnStartedAt);
           } finally {
             const flushDurationMs = performance.now() - flushPendingDraftAddsStartedAt;
             markPaymentFlowTelemetryStageDuration(
@@ -11374,6 +11641,11 @@ const App: React.FC = () => {
               {latestPaymentFlowBreakdown && (
                 <p className="truncate">
                   f:{latestPaymentFlowBreakdown.flushPendingDraftAddsMs} fi:{latestPaymentFlowBreakdown.finalizeMs} cf:{latestPaymentFlowBreakdown.confirmMs} sn:{latestPaymentFlowBreakdown.snapshotApplyMs} sr:{latestPaymentFlowBreakdown.stateRefreshMs} rv:{latestPaymentFlowBreakdown.recoveryMs} rb:{latestPaymentFlowBreakdown.retryBackoffMs} fr:{latestPaymentFlowBreakdown.frontendReconcileMs} oth:{latestPaymentFlowBreakdown.residualMs}
+                </p>
+              )}
+              {latestPaymentFlowTelemetry && (
+                <p className="truncate">
+                  f_lock:{latestPaymentFlowTelemetry.flushLockWaitMs ?? '-'} f_read:{latestPaymentFlowTelemetry.flushPendingReadMs ?? '-'} f_snap:{latestPaymentFlowTelemetry.flushSnapshotPrepareMs ?? '-'} f_vis:{latestPaymentFlowTelemetry.flushVisibleRunMs ?? '-'} f_rec:{latestPaymentFlowTelemetry.flushRecoveryRunMs ?? '-'} f_sr:{latestPaymentFlowTelemetry.flushStateRefreshMs ?? '-'} f_sn:{latestPaymentFlowTelemetry.flushApplySnapshotMs ?? '-'} f_ps:{latestPaymentFlowTelemetry.flushOperationalPersistMs ?? '-'} f_cl:{latestPaymentFlowTelemetry.flushTerminalCleanupMs ?? '-'} f_ui:{latestPaymentFlowTelemetry.flushUiReleaseMs ?? '-'} f_post:{latestPaymentFlowTelemetry.flushPostReturnMs ?? '-'} f_oth:{latestPaymentFlowTelemetry.flushOtherMs ?? '-'}
                 </p>
               )}
             </div>
