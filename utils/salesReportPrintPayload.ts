@@ -166,10 +166,10 @@ export const saveSalesReportPrintPayload = (
 
   try {
     window.localStorage.setItem(buildStorageKey(payload.id), JSON.stringify(payload));
-    return payload;
   } catch {
-    return null;
+    // Mantém o payload utilizável via fallback em window.name/hash, como no fluxo do cupom.
   }
+  return payload;
 };
 
 export const consumeSalesReportPrintPayload = (payloadId: string): SalesReportPrintPayload | null => {

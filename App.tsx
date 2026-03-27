@@ -105,6 +105,7 @@ const AUTO_UPDATE_CHECK_INTERVAL_MS = 45_000;
 const AUTO_UPDATE_FORCE_RELOAD_AFTER_MS = 10 * 60 * 1000;
 const OPS_CLIENT_INSTANCE_KEY = 'qb_ops_client_instance_v1';
 const OPS_REMOTE_EVENTS_POLL_INTERVAL_MS = 12_000;
+const PRINT_RETURN_FOCUS_GUARD_MS = 1800;
 
 type SaleRegisterCommand = Extract<StateCommand, { type: 'SALE_REGISTER' }>;
 type SaleDraftAddItemCommand = Extract<StateCommand, { type: 'SALE_DRAFT_ADD_ITEM' }>;
@@ -2768,6 +2769,15 @@ const App: React.FC = () => {
   const cornerSyncTimeoutRef = useRef<number | null>(null);
   const appOrderTotalInputRef = useRef<HTMLInputElement | null>(null);
   const splitCurrentAmountInputRef = useRef<HTMLInputElement | null>(null);
+  const printReturnFocusGuardUntilRef = useRef(0);
+  const armPrintReturnFocusGuard = useCallback((guardMs = PRINT_RETURN_FOCUS_GUARD_MS): void => {
+    const normalizedGuardMs = Math.max(250, Math.round(guardMs));
+    printReturnFocusGuardUntilRef.current = Date.now() + normalizedGuardMs;
+  }, []);
+  const isPrintReturnFocusGuardActive = useCallback(
+    (): boolean => Date.now() < printReturnFocusGuardUntilRef.current,
+    []
+  );
   const selectedReceiptPrintPreset = useMemo(
     () => getReceiptPrintPresetById(receiptPrintPresetId),
     [receiptPrintPresetId]
@@ -3053,6 +3063,7 @@ const App: React.FC = () => {
     if (!isAdminAuthenticated) return;
 
     const reinforce = () => {
+      if (isPrintReturnFocusGuardActive()) return;
       reinforceAdminSessionBarrier();
     };
 
@@ -3090,7 +3101,7 @@ const App: React.FC = () => {
       window.removeEventListener('storage', handleStorage);
       document.removeEventListener('visibilitychange', handleVisibility);
     };
-  }, [isAccessVerified, isAdminAuthenticated]);
+  }, [isAccessVerified, isAdminAuthenticated, isPrintReturnFocusGuardActive]);
 
   const applyCashHistorySnapshot = useCallback(
     (state: AppState) => {
@@ -9631,6 +9642,7 @@ const App: React.FC = () => {
     if (typeof window === 'undefined') return;
 
     const emitReturnEvent = (source: 'focus' | 'visibilitychange') => {
+      if (isPrintReturnFocusGuardActive()) return;
       if (document.visibilityState === 'hidden') return;
       const hasPendingMainQueue = pendingPaidSyncQueueRef.current.length > 0;
       const hasFailedQueue = failedPaidSyncQueueRef.current.length > 0;
@@ -9662,7 +9674,13 @@ const App: React.FC = () => {
       window.removeEventListener('focus', handleFocus);
       document.removeEventListener('visibilitychange', handleVisibility);
     };
-  }, [isAccessVerified, isConfirmingPaid, pushOperationalEvent, requestPendingPaidSyncProcessing]);
+  }, [
+    isAccessVerified,
+    isConfirmingPaid,
+    isPrintReturnFocusGuardActive,
+    pushOperationalEvent,
+    requestPendingPaidSyncProcessing,
+  ]);
 
   const handleRetryFailedPaidSyncJob = useCallback(
     async (jobId: string, options: { autoRetry?: boolean } = {}) => {
@@ -10411,6 +10429,7 @@ const App: React.FC = () => {
       });
 
       const receiptPrintId = receiptPayload?.id || draftId;
+      armPrintReturnFocusGuard();
       window.setTimeout(() => {
         const openedPrintWindow = navigatePreparedReceiptWindow(preparedPrintWindow, receiptPrintId);
         if (!openedPrintWindow) {
@@ -10571,6 +10590,7 @@ const App: React.FC = () => {
       return;
     }
 
+    armPrintReturnFocusGuard();
     const opened = openReceiptPrintWindow(receiptId);
     if (!opened) {
       showNotification('Não foi possível abrir a tela de impressão. Verifique o bloqueio de pop-up.');

@@ -1030,7 +1030,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
           return true;
         }
 
-        const openedWindow = window.open(printRouteWithHash, '_blank', 'noopener,noreferrer');
+        const openedWindow = window.open(printRouteWithHash, '_blank');
         if (!openedWindow) {
           removeSalesReportPrintPayload(payloadId);
           return false;
