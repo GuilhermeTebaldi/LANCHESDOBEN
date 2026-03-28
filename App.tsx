@@ -2576,6 +2576,7 @@ const PENDING_DRAFT_BACKGROUND_SYNC_SWEEP_MS = 10000;
 const PENDING_DRAFT_BACKGROUND_SYNC_RETRY_BASE_MS = 1800;
 const PENDING_DRAFT_BACKGROUND_SYNC_RETRY_MAX_MS = 45000;
 const PENDING_DRAFT_BACKGROUND_SYNC_RETRY_JITTER = 0.2;
+const PAID_SYNC_PRINT_DEFER_POLL_MS = 180;
 const MAX_CONCURRENT_COMMANDS = 2;
 const PENDING_PAID_SYNC_MAX_WORKERS = 2;
 const BACKEND_OPERATION_TIMEOUT_MS = 25_000;
@@ -11288,8 +11289,42 @@ const App: React.FC = () => {
       });
 
       const receiptPrintId = receiptPayload?.id || draftId;
-      armPrintReturnFocusGuard();
-      window.setTimeout(() => {
+      const printDeferralStartedAt = Date.now();
+      pushOperationalEvent('PAYMENT_FLOW', 'PAID_SYNC_PRINT_DEFERRED', {
+        draftId,
+        receiptPrintId,
+        jobId: queuedJob.id,
+        reason: 'wait_paid_sync_release',
+      });
+      const pollDeferredReceiptPrintOpen = () => {
+        const hasFailedSyncForDraft = failedPaidSyncQueueRef.current.some(
+          (job) => job.draftId === draftId
+        );
+        if (hasFailedSyncForDraft) {
+          if (receiptPayload) {
+            removeReceiptPrintPayload(receiptPayload.id);
+          }
+          closePreparedReceiptWindow(preparedPrintWindow);
+          pushOperationalEvent('PAYMENT_FLOW', 'PAID_SYNC_PRINT_SKIPPED_FAILED', {
+            draftId,
+            receiptPrintId,
+            jobId: queuedJob.id,
+            deferredMs: Math.max(0, Date.now() - printDeferralStartedAt),
+          });
+          return;
+        }
+
+        const hasOngoingPaidSyncForDraft =
+          syncingPaidDraftIdsRef.current.has(draftId) ||
+          pendingPaidSyncRunningDraftIdsRef.current.has(draftId) ||
+          pendingPaidSyncQueueRef.current.some((job) => job.draftId === draftId);
+
+        if (hasOngoingPaidSyncForDraft) {
+          window.setTimeout(pollDeferredReceiptPrintOpen, PAID_SYNC_PRINT_DEFER_POLL_MS);
+          return;
+        }
+
+        armPrintReturnFocusGuard();
         const openedPrintWindow = navigatePreparedReceiptWindow(preparedPrintWindow, receiptPrintId);
         if (!openedPrintWindow) {
           if (receiptPayload) {
@@ -11303,6 +11338,7 @@ const App: React.FC = () => {
             draftId,
             receiptPrintId,
             jobId: queuedJob.id,
+            deferredMs: Math.max(0, Date.now() - printDeferralStartedAt),
           });
           return;
         }
@@ -11310,8 +11346,10 @@ const App: React.FC = () => {
           draftId,
           receiptPrintId,
           jobId: queuedJob.id,
+          deferredMs: Math.max(0, Date.now() - printDeferralStartedAt),
         });
-      }, 0);
+      };
+      window.setTimeout(pollDeferredReceiptPrintOpen, PAID_SYNC_PRINT_DEFER_POLL_MS);
     } catch (error) {
       reportErrorMonitorEvent({
         source: 'sistema:paid-sync:confirm-paid-unexpected-error',
