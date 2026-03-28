@@ -226,6 +226,10 @@ interface GlobalQueueWaitMeta {
   queueDepthAtEnqueue: number;
   activeCommandType: StateCommand['type'] | null;
   activeDraftId: string | null;
+  activeCommandElapsedMs: number;
+  lastCompletedCommandType: StateCommand['type'] | null;
+  lastCompletedDraftId: string | null;
+  lastCompletedDurationMs: number;
 }
 
 interface RunCommandOptions {
@@ -2796,6 +2800,12 @@ const App: React.FC = () => {
     token: string;
     commandType: StateCommand['type'];
     draftId: string | null;
+    startedAtMs: number;
+  } | null>(null);
+  const globalCommandQueueLastCompletedRef = useRef<{
+    commandType: StateCommand['type'];
+    draftId: string | null;
+    durationMs: number;
   } | null>(null);
   const offlineSalesQueueRef = useRef<OfflineQueuedSale[]>([]);
   const pendingPaidSyncQueueRef = useRef<PendingPaidSyncJob[]>(
@@ -5528,23 +5538,39 @@ const App: React.FC = () => {
 
       const queueDepthAtEnqueue = Math.max(0, Math.floor(globalCommandQueueDepthRef.current));
       const activeCommandAtEnqueue = globalCommandQueueActiveRef.current;
+      const lastCompletedAtEnqueue = globalCommandQueueLastCompletedRef.current;
       globalCommandQueueDepthRef.current += 1;
       const queuedAt = performance.now();
       const runQueuedExecution = () => {
         globalCommandQueueDepthRef.current = Math.max(0, globalCommandQueueDepthRef.current - 1);
-        options.onGlobalQueueWaitMs?.(Math.max(0, performance.now() - queuedAt));
+        const runStartedAt = performance.now();
+        const commandDraftId = getCommandDraftId(command);
+        options.onGlobalQueueWaitMs?.(Math.max(0, runStartedAt - queuedAt));
         options.onGlobalQueueMeta?.({
           queueDepthAtEnqueue,
           activeCommandType: activeCommandAtEnqueue?.commandType ?? null,
           activeDraftId: activeCommandAtEnqueue?.draftId ?? null,
+          activeCommandElapsedMs: activeCommandAtEnqueue
+            ? Math.max(0, runStartedAt - activeCommandAtEnqueue.startedAtMs)
+            : 0,
+          lastCompletedCommandType: lastCompletedAtEnqueue?.commandType ?? null,
+          lastCompletedDraftId: lastCompletedAtEnqueue?.draftId ?? null,
+          lastCompletedDurationMs: Math.max(0, lastCompletedAtEnqueue?.durationMs ?? 0),
         });
         const token = createClientId('gq');
         globalCommandQueueActiveRef.current = {
           token,
           commandType: command.type,
-          draftId: getCommandDraftId(command),
+          draftId: commandDraftId,
+          startedAtMs: runStartedAt,
         };
         return executeCommand().finally(() => {
+          const finishedAt = performance.now();
+          globalCommandQueueLastCompletedRef.current = {
+            commandType: command.type,
+            draftId: commandDraftId,
+            durationMs: Math.max(0, finishedAt - runStartedAt),
+          };
           if (globalCommandQueueActiveRef.current?.token === token) {
             globalCommandQueueActiveRef.current = null;
           }
@@ -10045,6 +10071,13 @@ const App: React.FC = () => {
                     queueDepthAtEnqueue: confirmGlobalQueueMeta?.queueDepthAtEnqueue ?? null,
                     blockedByCommandType: confirmGlobalQueueMeta?.activeCommandType ?? null,
                     blockedByDraftId: confirmGlobalQueueMeta?.activeDraftId ?? null,
+                    blockedByElapsedMs: confirmGlobalQueueMeta?.activeCommandElapsedMs ?? null,
+                    previousCommandType:
+                      confirmGlobalQueueMeta?.lastCompletedCommandType ?? null,
+                    previousCommandDraftId:
+                      confirmGlobalQueueMeta?.lastCompletedDraftId ?? null,
+                    previousCommandDurationMs:
+                      confirmGlobalQueueMeta?.lastCompletedDurationMs ?? null,
                   });
                 }
               },
@@ -12327,7 +12360,7 @@ const App: React.FC = () => {
                   <p key={entry.jobId} className="truncate font-mono text-[9px] text-slate-200">
                     {(() => {
                       const breakdown = getPaymentFlowProcessingBreakdown(entry);
-                      return `${entry.draftId.slice(-8).toUpperCase()} local:${entry.clickToLocalPersistMs ?? '-'}ms w:${entry.waitInQueueMs ?? '-'}ms p:${entry.processingMs ?? '-'}ms conf:${entry.totalConfMs ?? entry.clickToBackendConfirmMs ?? '-'}ms p_flush:${entry.pFlushMs ?? '-'} p_prepare:${entry.pPrepareMs ?? '-'} p_request:${entry.pRequestMs ?? '-'} p_backend:${entry.pBackendMs ?? '-'} p_apply_snapshot:${entry.pApplySnapshotMs ?? '-'} p_reconcile:${entry.pReconcileMs ?? '-'} p_persist:${entry.pPersistMs ?? '-'} p_ops:${entry.pOpsMs ?? '-'} p_finalize:${entry.pFinalizeMs ?? '-'} f:${breakdown?.flushPendingDraftAddsMs ?? '-'} fi:${breakdown?.finalizeMs ?? '-'} cf:${breakdown?.confirmMs ?? '-'} sn:${breakdown?.snapshotApplyMs ?? '-'} sr:${breakdown?.stateRefreshMs ?? '-'} rv:${breakdown?.recoveryMs ?? '-'} rb:${breakdown?.retryBackoffMs ?? '-'} fr:${breakdown?.frontendReconcileMs ?? '-'} oth:${breakdown?.residualMs ?? '-'} c_cmd:${entry.confirmCommandInvokeMs ?? '-'} c_lock:${entry.confirmDraftLockWaitMs ?? '-'} c_gq:${entry.confirmGlobalQueueWaitMs ?? '-'} c_gqd:${entry.confirmGlobalQueueDepthAtEnqueue ?? '-'} c_sched:${entry.confirmSchedulerWaitMs ?? '-'} c_apply:${entry.confirmPostCommandApplyMs ?? '-'} c_ops:${entry.confirmOpsMs ?? '-'} c_fail:${entry.confirmFailureHandlingMs ?? '-'} c_oth:${entry.confirmOtherMs ?? '-'} sr_empty:${entry.stateRefreshEmptyDraftCheckMs ?? '-'} sr_flush:${entry.stateRefreshAfterFlushMs ?? '-'} sr_final:${entry.stateRefreshBeforeFinalizeMs ?? '-'} sr_oth:${entry.stateRefreshOtherMs ?? '-'} ops_send:${entry.pOpsBackendSentMs ?? '-'} ops_ack:${entry.pOpsBackendAckMs ?? '-'} ops_ui:${entry.pOpsEventStateMs ?? '-'} ops_ps:${entry.pOpsEventPersistMs ?? '-'} ops_rp:${entry.pOpsEventReportMs ?? '-'} ops_oth:${entry.pOpsOtherMs ?? '-'} r:${entry.retries} rec:${entry.hadRecovery ? '1' : '0'} rc:${entry.hadReconciliation ? '1' : '0'}`;
+                      return `${entry.draftId.slice(-8).toUpperCase()} local:${entry.clickToLocalPersistMs ?? '-'}ms w:${entry.waitInQueueMs ?? '-'}ms p:${entry.processingMs ?? '-'}ms conf:${entry.totalConfMs ?? entry.clickToBackendConfirmMs ?? '-'}ms p_flush:${entry.pFlushMs ?? '-'} p_prepare:${entry.pPrepareMs ?? '-'} p_request:${entry.pRequestMs ?? '-'} p_backend:${entry.pBackendMs ?? '-'} p_apply_snapshot:${entry.pApplySnapshotMs ?? '-'} p_reconcile:${entry.pReconcileMs ?? '-'} p_persist:${entry.pPersistMs ?? '-'} p_ops:${entry.pOpsMs ?? '-'} p_finalize:${entry.pFinalizeMs ?? '-'} f:${breakdown?.flushPendingDraftAddsMs ?? '-'} fi:${breakdown?.finalizeMs ?? '-'} cf:${breakdown?.confirmMs ?? '-'} sn:${breakdown?.snapshotApplyMs ?? '-'} sr:${breakdown?.stateRefreshMs ?? '-'} rv:${breakdown?.recoveryMs ?? '-'} rb:${breakdown?.retryBackoffMs ?? '-'} fr:${breakdown?.frontendReconcileMs ?? '-'} oth:${breakdown?.residualMs ?? '-'} c_cmd:${entry.confirmCommandInvokeMs ?? '-'} c_lock:${entry.confirmDraftLockWaitMs ?? '-'} c_gq:${entry.confirmGlobalQueueWaitMs ?? '-'} c_gqd:${entry.confirmGlobalQueueDepthAtEnqueue ?? '-'} c_sched:${entry.confirmSchedulerWaitMs ?? '-'} c_apply:${entry.confirmPostCommandApplyMs ?? '-'} c_ops:${entry.confirmOpsMs ?? '-'} c_fail:${entry.confirmFailureHandlingMs ?? '-'} c_oth:${entry.confirmOtherMs ?? '-'} sr_empty:${entry.stateRefreshEmptyDraftCheckMs ?? '-'} sr_flush:${entry.stateRefreshAfterFlushMs ?? '-'} sr_final:${entry.stateRefreshBeforeFinalizeMs ?? '-'} sr_oth:${entry.stateRefreshOtherMs ?? '-'} f_lock:${entry.flushLockWaitMs ?? '-'} f_read:${entry.flushPendingReadMs ?? '-'} f_snap:${entry.flushSnapshotPrepareMs ?? '-'} f_vis:${entry.flushVisibleRunMs ?? '-'} f_rec:${entry.flushRecoveryRunMs ?? '-'} f_sr:${entry.flushStateRefreshMs ?? '-'} f_sn:${entry.flushApplySnapshotMs ?? '-'} f_ps:${entry.flushOperationalPersistMs ?? '-'} f_cl:${entry.flushTerminalCleanupMs ?? '-'} f_ui:${entry.flushUiReleaseMs ?? '-'} f_post:${entry.flushPostReturnMs ?? '-'} f_oth:${entry.flushOtherMs ?? '-'} ops_send:${entry.pOpsBackendSentMs ?? '-'} ops_ack:${entry.pOpsBackendAckMs ?? '-'} ops_ui:${entry.pOpsEventStateMs ?? '-'} ops_ps:${entry.pOpsEventPersistMs ?? '-'} ops_rp:${entry.pOpsEventReportMs ?? '-'} ops_oth:${entry.pOpsOtherMs ?? '-'} r:${entry.retries} rec:${entry.hadRecovery ? '1' : '0'} rc:${entry.hadReconciliation ? '1' : '0'}`;
                     })()}
                   </p>
                 ))}
