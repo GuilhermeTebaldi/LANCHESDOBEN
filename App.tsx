@@ -8293,6 +8293,14 @@ const App: React.FC = () => {
       runningSet.add(normalizedDraftId);
 
       try {
+        if (syncingPaidDraftIdsRef.current.has(normalizedDraftId)) {
+          pendingDraftBackgroundRetryAttemptsRef.current.delete(normalizedDraftId);
+          return;
+        }
+        if (isDraftLifecycleLocked(normalizedDraftId)) {
+          pendingDraftBackgroundRetryAttemptsRef.current.delete(normalizedDraftId);
+          return;
+        }
         const errorSink: RunCommandErrorSink = {};
         const ok = await flushPendingDraftAdds(
           normalizedDraftId,
@@ -8301,6 +8309,8 @@ const App: React.FC = () => {
             silentErrorNotification: true,
             errorSink,
             failFastOnVersionConflict: true,
+            suppressOperationalEvents: true,
+            skipVisibleQueueHealthLog: true,
           }
         );
         if (ok) {
@@ -8336,6 +8346,14 @@ const App: React.FC = () => {
 
         const retryDelayMs = getPendingDraftBackgroundSyncRetryDelayMs(nextAttempts);
         const timers = pendingDraftBackgroundSyncTimerRef.current;
+        if (syncingPaidDraftIdsRef.current.has(normalizedDraftId)) {
+          attemptsMap.delete(normalizedDraftId);
+          return;
+        }
+        if (isDraftLifecycleLocked(normalizedDraftId)) {
+          attemptsMap.delete(normalizedDraftId);
+          return;
+        }
         const existingTimer = timers.get(normalizedDraftId);
         if (existingTimer !== undefined) {
           window.clearTimeout(existingTimer);
