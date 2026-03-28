@@ -84,8 +84,11 @@ import {
 } from './utils/paidSyncAssistant';
 import {
   createDefaultReceiptPrintModeSettings,
+  detectLocalPrintAgent,
+  listLocalAgentPrinters,
   normalizeReceiptPrintModeSettings,
   printReceiptViaLocalAgent,
+  setLocalAgentDefaultPrinter,
   printTestViaLocalAgent,
   testLocalPrintAgentConnection,
   type ReceiptPrintModeSettings,
@@ -489,6 +492,7 @@ interface ReceiptPrintConnectionUiState {
   agentOnline: boolean | null;
   printerFound: boolean | null;
   printers: string[];
+  selectedPrinterName: string | null;
   agentVersion: string | null;
   message: string | null;
 }
@@ -3048,6 +3052,7 @@ const App: React.FC = () => {
     agentOnline: null,
     printerFound: null,
     printers: [],
+    selectedPrinterName: null,
     agentVersion: null,
     message: null,
   });
@@ -11221,6 +11226,7 @@ const App: React.FC = () => {
       agentOnline: null,
       printerFound: null,
       printers: [],
+      selectedPrinterName: null,
       agentVersion: null,
       message: null,
     });
@@ -11247,6 +11253,7 @@ const App: React.FC = () => {
       agentOnline: status.agentOnline,
       printerFound: status.printerFound,
       printers: status.printers,
+      selectedPrinterName: status.selectedPrinterName,
       agentVersion: status.agentVersion,
       message: status.message,
     });
@@ -11291,6 +11298,82 @@ const App: React.FC = () => {
       setIsLocalPrintTestRunning(false);
     }
   }, [isLocalPrintTestRunning, pushOperationalEvent, receiptPrintModeDraft]);
+
+  const handleDetectLocalPrintAgent = useCallback(async () => {
+    const normalized = normalizeReceiptPrintModeSettings(receiptPrintModeDraft);
+    if (normalized.mode !== 'WINDOWS_AGENT') {
+      showNotification('Selecione Agente local Windows para detectar o agente.');
+      return;
+    }
+    setLocalPrintConnectionState((current) => ({
+      ...current,
+      checking: true,
+      testedAt: Date.now(),
+      message: null,
+    }));
+    const detected = await detectLocalPrintAgent(normalized);
+    setLocalPrintConnectionState((current) => ({
+      ...current,
+      checking: false,
+      testedAt: Date.now(),
+      agentOnline: detected.agentOnline,
+      agentVersion: detected.agentVersion,
+      selectedPrinterName: detected.selectedPrinterName,
+      message: detected.message,
+    }));
+    if (detected.ok) {
+      showNotification('Agente local detectado.');
+      return;
+    }
+    showNotification(detected.message || 'Agente local offline.');
+  }, [receiptPrintModeDraft]);
+
+  const handleListLocalPrinters = useCallback(async () => {
+    const normalized = normalizeReceiptPrintModeSettings(receiptPrintModeDraft);
+    if (normalized.mode !== 'WINDOWS_AGENT') {
+      showNotification('Selecione Agente local Windows para listar impressoras.');
+      return;
+    }
+    setLocalPrintConnectionState((current) => ({
+      ...current,
+      checking: true,
+      testedAt: Date.now(),
+      message: null,
+    }));
+    const listed = await listLocalAgentPrinters(normalized);
+    setLocalPrintConnectionState((current) => ({
+      ...current,
+      checking: false,
+      testedAt: Date.now(),
+      printers: listed.printers,
+      selectedPrinterName: listed.selectedPrinterName,
+      message: listed.message,
+    }));
+    if (listed.ok) {
+      showNotification(`Impressoras encontradas: ${listed.printers.length}`);
+      return;
+    }
+    showNotification(listed.message || 'Falha ao listar impressoras.');
+  }, [receiptPrintModeDraft]);
+
+  const handleSetAgentDefaultPrinter = useCallback(async () => {
+    const normalized = normalizeReceiptPrintModeSettings(receiptPrintModeDraft);
+    if (normalized.mode !== 'WINDOWS_AGENT') {
+      showNotification('Selecione Agente local Windows para definir impressora padrão.');
+      return;
+    }
+    const result = await setLocalAgentDefaultPrinter(normalized, normalized.printerName);
+    if (!result.ok) {
+      showNotification(result.message || 'Falha ao definir impressora padrão no agente.');
+      return;
+    }
+    setLocalPrintConnectionState((current) => ({
+      ...current,
+      selectedPrinterName: normalized.printerName,
+      message: result.message,
+    }));
+    showNotification('Impressora padrão salva no agente.');
+  }, [receiptPrintModeDraft]);
 
   const handleConfirmPaid = () => {
     if (!activeDraft) return;
@@ -13705,6 +13788,35 @@ const App: React.FC = () => {
                     <button
                       type="button"
                       onClick={() => {
+                        void handleDetectLocalPrintAgent();
+                      }}
+                      disabled={localPrintConnectionState.checking}
+                      className="qb-btn-touch border rounded-xl px-3 py-2 text-[10px] font-black uppercase tracking-widest bg-slate-900 text-slate-100 border-slate-600 hover:border-slate-300 disabled:opacity-50"
+                    >
+                      Detectar agente
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void handleListLocalPrinters();
+                      }}
+                      disabled={localPrintConnectionState.checking}
+                      className="qb-btn-touch border rounded-xl px-3 py-2 text-[10px] font-black uppercase tracking-widest bg-slate-900 text-slate-100 border-slate-600 hover:border-slate-300 disabled:opacity-50"
+                    >
+                      Listar impressoras
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void handleSetAgentDefaultPrinter();
+                      }}
+                      className="qb-btn-touch border rounded-xl px-3 py-2 text-[10px] font-black uppercase tracking-widest bg-indigo-700 text-white border-indigo-600 hover:bg-indigo-800"
+                    >
+                      Definir padrão no agente
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
                         void handleTestLocalPrintConnection();
                       }}
                       disabled={localPrintConnectionState.checking}
@@ -13744,6 +13856,11 @@ const App: React.FC = () => {
                     {localPrintConnectionState.agentVersion && (
                       <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
                         Versão do agente: {localPrintConnectionState.agentVersion}
+                      </p>
+                    )}
+                    {localPrintConnectionState.selectedPrinterName && (
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-emerald-300">
+                        Impressora padrão no agente: {localPrintConnectionState.selectedPrinterName}
                       </p>
                     )}
                     {localPrintConnectionState.printers.length > 0 && (

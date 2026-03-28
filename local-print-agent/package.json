@@ -6,6 +6,9 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
+    "start:windows": "node src/server.js",
+    "install:startup": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-startup.ps1",
+    "remove:startup": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/remove-startup.ps1",
     "build:exe": "pkg src/server.js --targets node20-win-x64 --output dist/xburger-print-agent.exe"
   },
   "dependencies": {

@@ -17,6 +17,11 @@ const AGENT_TOKEN =
   typeof process.env.LOCAL_PRINT_AGENT_TOKEN === 'string'
     ? process.env.LOCAL_PRINT_AGENT_TOKEN.trim()
     : '';
+const CONFIG_DIR = path.join(
+  process.env.APPDATA || os.homedir(),
+  'XBurgerPrintAgent'
+);
+const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
 
 const LOOPBACK_SET = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1']);
 
@@ -94,6 +99,43 @@ const normalizeText = (value, fallback = '') => {
   const trimmed = value.trim();
   return trimmed || fallback;
 };
+
+const createDefaultConfig = () => ({
+  printerName: DEFAULT_PRINTER_NAME,
+  updatedAt: new Date().toISOString(),
+});
+
+const normalizeConfig = (value) => {
+  const fallback = createDefaultConfig();
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return fallback;
+  const printerName = normalizeText(value.printerName, fallback.printerName);
+  const updatedAt =
+    typeof value.updatedAt === 'string' && value.updatedAt.trim()
+      ? value.updatedAt.trim()
+      : fallback.updatedAt;
+  return {
+    printerName,
+    updatedAt,
+  };
+};
+
+const loadConfig = async () => {
+  try {
+    const raw = await fs.readFile(CONFIG_FILE, 'utf8');
+    return normalizeConfig(JSON.parse(raw));
+  } catch {
+    return createDefaultConfig();
+  }
+};
+
+const saveConfig = async (config) => {
+  const normalized = normalizeConfig(config);
+  await fs.mkdir(CONFIG_DIR, { recursive: true });
+  await fs.writeFile(CONFIG_FILE, JSON.stringify(normalized, null, 2), 'utf8');
+  return normalized;
+};
+
+let agentConfig = createDefaultConfig();
 
 const normalizeMoney = (value) => {
   const parsed = Number(value);
@@ -238,6 +280,7 @@ app.get('/health', (req, res) => {
     port: PORT,
     tokenRequired: Boolean(AGENT_TOKEN),
     defaultPrinterName: DEFAULT_PRINTER_NAME,
+    selectedPrinterName: agentConfig.printerName,
     now: new Date().toISOString(),
   });
 });
@@ -250,6 +293,7 @@ app.get('/printers', requireToken, async (req, res) => {
       printers: printers.map((printer) => printer.name),
       detailed: printers,
       defaultPrinterName: DEFAULT_PRINTER_NAME,
+      selectedPrinterName: agentConfig.printerName,
     });
   } catch (error) {
     res.status(500).json({
@@ -261,7 +305,10 @@ app.get('/printers', requireToken, async (req, res) => {
 });
 
 app.post('/print/test', requireToken, async (req, res) => {
-  const printerName = normalizeText(req.body?.printerName, DEFAULT_PRINTER_NAME);
+  const printerName = normalizeText(
+    req.body?.printerName,
+    normalizeText(agentConfig.printerName, DEFAULT_PRINTER_NAME)
+  );
   try {
     const printers = await listPrinters();
     const printerExists = printers.some(
@@ -307,7 +354,10 @@ app.post('/print/test', requireToken, async (req, res) => {
 });
 
 app.post('/print/receipt', requireToken, async (req, res) => {
-  const printerName = normalizeText(req.body?.printerName, DEFAULT_PRINTER_NAME);
+  const printerName = normalizeText(
+    req.body?.printerName,
+    normalizeText(agentConfig.printerName, DEFAULT_PRINTER_NAME)
+  );
   const receipt = req.body?.receipt;
 
   const validation = validateReceiptPayload(receipt);
@@ -358,6 +408,62 @@ app.post('/print/receipt', requireToken, async (req, res) => {
   }
 });
 
+app.get('/config', requireToken, async (req, res) => {
+  res.json({
+    ok: true,
+    config: {
+      printerName: agentConfig.printerName,
+      updatedAt: agentConfig.updatedAt,
+    },
+  });
+});
+
+app.post('/config/printer', requireToken, async (req, res) => {
+  const printerName = normalizeText(req.body?.printerName, '');
+  if (!printerName) {
+    res.status(400).json({
+      ok: false,
+      code: 'invalid_printer_name',
+      message: 'Nome da impressora é obrigatório.',
+    });
+    return;
+  }
+
+  try {
+    const printers = await listPrinters();
+    const printerExists = printers.some(
+      (printer) => printer.name.toLowerCase() === printerName.toLowerCase()
+    );
+    if (!printerExists) {
+      res.status(404).json({
+        ok: false,
+        code: 'printer_not_found',
+        message: `Impressora '${printerName}' não encontrada no Windows.`,
+      });
+      return;
+    }
+
+    agentConfig = await saveConfig({
+      ...agentConfig,
+      printerName,
+      updatedAt: new Date().toISOString(),
+    });
+    res.json({
+      ok: true,
+      code: 'printer_saved',
+      message: 'Impressora padrão salva no agente local.',
+      selectedPrinterName: agentConfig.printerName,
+    });
+  } catch (error) {
+    res.status(500).json({
+      ok: false,
+      code: 'printer_save_failed',
+      message:
+        error instanceof Error ? error.message : 'Falha ao salvar impressora padrão no agente.',
+    });
+  }
+});
+
 app.use((error, req, res, next) => {
   res.status(500).json({
     ok: false,
@@ -366,8 +472,16 @@ app.use((error, req, res, next) => {
   });
 });
 
-app.listen(PORT, HOST, () => {
-  console.log(
-    `[LOCAL_PRINT_AGENT] online em http://${HOST}:${PORT} (default printer: ${DEFAULT_PRINTER_NAME})`
-  );
-});
+const bootstrap = async () => {
+  agentConfig = await loadConfig();
+  if (!agentConfig.printerName) {
+    agentConfig = await saveConfig(createDefaultConfig());
+  }
+  app.listen(PORT, HOST, () => {
+    console.log(
+      `[LOCAL_PRINT_AGENT] online em http://${HOST}:${PORT} (default printer: ${DEFAULT_PRINTER_NAME}, selected: ${agentConfig.printerName})`
+    );
+  });
+};
+
+void bootstrap();

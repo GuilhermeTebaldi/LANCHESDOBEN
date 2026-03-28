@@ -15,6 +15,7 @@ export interface LocalPrintConnectionStatus {
   agentOnline: boolean;
   printerFound: boolean;
   printers: string[];
+  selectedPrinterName: string | null;
   agentVersion: string | null;
   message: string | null;
 }
@@ -24,6 +25,21 @@ export interface LocalPrintDispatchResult {
   printed: boolean;
   code: string;
   message: string;
+}
+
+export interface LocalPrintAgentDetectResult {
+  ok: boolean;
+  agentOnline: boolean;
+  agentVersion: string | null;
+  selectedPrinterName: string | null;
+  message: string | null;
+}
+
+export interface LocalPrintAgentPrintersResult {
+  ok: boolean;
+  printers: string[];
+  selectedPrinterName: string | null;
+  message: string | null;
 }
 
 const DEFAULT_AGENT_URL = 'http://127.0.0.1:18181';
@@ -70,6 +86,12 @@ const normalizePrinterName = (value: unknown): string => {
 const normalizeToken = (value: unknown): string => {
   if (typeof value !== 'string') return '';
   return value.trim();
+};
+
+const normalizeMaybeText = (value: unknown): string | null => {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed || null;
 };
 
 const ensureArrayOfStrings = (value: unknown): string[] => {
@@ -169,38 +191,34 @@ export const testLocalPrintAgentConnection = async (
   settingsInput: ReceiptPrintModeSettings
 ): Promise<LocalPrintConnectionStatus> => {
   const settings = normalizeReceiptPrintModeSettings(settingsInput);
-  const health = await fetchAgentJson(settings, '/health', {
-    method: 'GET',
-  });
+  const health = await detectLocalPrintAgent(settings);
 
-  if (!health.ok) {
+  if (!health.ok || !health.agentOnline) {
     return {
       ok: false,
       agentOnline: false,
       printerFound: false,
       printers: [],
-      agentVersion: null,
+      selectedPrinterName: null,
+      agentVersion: health.agentVersion,
       message: health.message || 'Agente local offline.',
     };
   }
 
-  const printersResponse = await fetchAgentJson(settings, '/printers', {
-    method: 'GET',
-  });
-
+  const printersResponse = await listLocalAgentPrinters(settings);
   if (!printersResponse.ok) {
     return {
       ok: false,
       agentOnline: true,
       printerFound: false,
       printers: [],
-      agentVersion:
-        typeof health.data?.version === 'string' ? (health.data.version as string) : null,
+      selectedPrinterName: health.selectedPrinterName,
+      agentVersion: health.agentVersion,
       message: printersResponse.message || 'Falha ao consultar impressoras no agente local.',
     };
   }
 
-  const printersData = ensureArrayOfStrings(printersResponse.data?.printers);
+  const printersData = printersResponse.printers;
   const printerFound = printersData.some(
     (name) => name.toLocaleLowerCase() === settings.printerName.toLocaleLowerCase()
   );
@@ -210,9 +228,92 @@ export const testLocalPrintAgentConnection = async (
     agentOnline: true,
     printerFound,
     printers: printersData,
+    selectedPrinterName: printersResponse.selectedPrinterName || health.selectedPrinterName,
+    agentVersion: health.agentVersion,
+    message: printerFound ? null : 'Impressora configurada não foi encontrada no agente.',
+  };
+};
+
+export const detectLocalPrintAgent = async (
+  settingsInput: ReceiptPrintModeSettings
+): Promise<LocalPrintAgentDetectResult> => {
+  const settings = normalizeReceiptPrintModeSettings(settingsInput);
+  const health = await fetchAgentJson(settings, '/health', {
+    method: 'GET',
+  });
+  if (!health.ok) {
+    return {
+      ok: false,
+      agentOnline: false,
+      agentVersion: null,
+      selectedPrinterName: null,
+      message: health.message || 'Agente local offline.',
+    };
+  }
+
+  return {
+    ok: true,
+    agentOnline: true,
     agentVersion:
       typeof health.data?.version === 'string' ? (health.data.version as string) : null,
-    message: printerFound ? null : 'Impressora configurada não foi encontrada no agente.',
+    selectedPrinterName: normalizeMaybeText(health.data?.selectedPrinterName),
+    message: null,
+  };
+};
+
+export const listLocalAgentPrinters = async (
+  settingsInput: ReceiptPrintModeSettings
+): Promise<LocalPrintAgentPrintersResult> => {
+  const settings = normalizeReceiptPrintModeSettings(settingsInput);
+  const printersResponse = await fetchAgentJson(settings, '/printers', {
+    method: 'GET',
+  });
+  if (!printersResponse.ok) {
+    return {
+      ok: false,
+      printers: [],
+      selectedPrinterName: null,
+      message: printersResponse.message || 'Falha ao listar impressoras no agente local.',
+    };
+  }
+
+  return {
+    ok: true,
+    printers: ensureArrayOfStrings(printersResponse.data?.printers),
+    selectedPrinterName: normalizeMaybeText(printersResponse.data?.selectedPrinterName),
+    message: null,
+  };
+};
+
+export const setLocalAgentDefaultPrinter = async (
+  settingsInput: ReceiptPrintModeSettings,
+  printerName: string
+): Promise<LocalPrintDispatchResult> => {
+  const settings = normalizeReceiptPrintModeSettings(settingsInput);
+  const normalizedPrinterName = normalizePrinterName(printerName);
+  const response = await fetchAgentJson(settings, '/config/printer', {
+    method: 'POST',
+    body: JSON.stringify({
+      printerName: normalizedPrinterName,
+    }),
+  });
+  if (!response.ok) {
+    return {
+      ok: false,
+      printed: false,
+      code: 'agent_set_printer_failed',
+      message: response.message || 'Falha ao definir impressora padrão no agente local.',
+    };
+  }
+
+  return {
+    ok: true,
+    printed: false,
+    code: 'printer_saved',
+    message:
+      typeof response.data?.message === 'string' && response.data.message.trim()
+        ? (response.data.message as string)
+        : 'Impressora padrão salva no agente local.',
   };
 };
 

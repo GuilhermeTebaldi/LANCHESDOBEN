@@ -21,6 +21,25 @@ npm install
 npm start
 ```
 
+## Uso simples no Windows (operador)
+
+1. Gere o executável:
+
+```bash
+cd local-print-agent
+npm install
+npm run build:exe
+```
+
+2. Execute `dist\\xburger-print-agent.exe` uma vez para validar `health`.
+3. Configure auto-início com o Windows:
+
+```bash
+npm run install:startup
+```
+
+4. Pronto: o agente sobe automaticamente no login do Windows.
+
 ## Variáveis de ambiente opcionais
 
 - `LOCAL_PRINT_AGENT_HOST` (default: `127.0.0.1`)
@@ -39,6 +58,24 @@ npm run build:exe
 Saída esperada:
 
 - `local-print-agent/dist/xburger-print-agent.exe`
+
+## Configuração local da impressora no agente
+
+O agente salva a impressora padrão localmente (arquivo em `%APPDATA%\\XBurgerPrintAgent\\config.json`).
+
+Endpoints úteis:
+
+- `GET /health` (mostra `selectedPrinterName`)
+- `GET /printers` (lista impressoras e a selecionada)
+- `POST /config/printer` (define a padrão)
+
+Exemplo:
+
+```bash
+curl -s -X POST http://127.0.0.1:18181/config/printer \
+  -H "Content-Type: application/json" \
+  -d '{"printerName":"EPSON TM-T20"}'
+```
 
 ## Teste rápido com curl
 
