@@ -392,6 +392,8 @@ const buildUiHtml = () => `<!doctype html>
       <input id="token" type="password" placeholder="x-local-print-token" />
       <label>Impressora padrão</label>
       <select id="printerSelect"></select>
+      <label>Ou digite o nome da impressora</label>
+      <input id="printerManual" type="text" placeholder="EPSON TM-T20" />
       <div class="row" style="margin-top:10px">
         <button id="refreshBtn" class="secondary">Listar impressoras</button>
         <button id="savePrinterBtn">Salvar impressora padrão</button>
@@ -420,6 +422,25 @@ const buildUiHtml = () => `<!doctype html>
       const value = document.getElementById('token').value || '';
       localStorage.setItem('xburger_print_agent_token', value);
     };
+    const getPrinterNameInput = () => {
+      const manualValue = (document.getElementById('printerManual').value || '').trim();
+      if (manualValue) return manualValue;
+      return (document.getElementById('printerSelect').value || '').trim();
+    };
+    const setPrinterInputs = (printerName) => {
+      const normalized = (printerName || '').trim();
+      if (!normalized) return;
+      const select = document.getElementById('printerSelect');
+      const manual = document.getElementById('printerManual');
+      if (manual && !manual.value.trim()) {
+        manual.value = normalized;
+      }
+      if (!select) return;
+      const hasOption = Array.from(select.options || []).some((option) => option.value === normalized);
+      if (hasOption) {
+        select.value = normalized;
+      }
+    };
     const loadToken = () => {
       const token = localStorage.getItem('xburger_print_agent_token') || '';
       document.getElementById('token').value = token;
@@ -438,6 +459,7 @@ const buildUiHtml = () => `<!doctype html>
       const printer = health.selectedPrinterName || '--';
       document.getElementById('printerStatus').textContent = 'Padrão: ' + printer;
       document.getElementById('autostartState').textContent = 'Auto-início: ' + (health.autoStartEnabled ? 'ligado' : 'desligado');
+      setPrinterInputs(health.selectedPrinterName || '');
     };
     const refreshPrinters = async () => {
       const result = await request('/printers');
@@ -451,16 +473,29 @@ const buildUiHtml = () => `<!doctype html>
       });
       if (result.selectedPrinterName) select.value = result.selectedPrinterName;
       if (!select.value && select.options.length > 0) select.value = select.options[0].value;
+      setPrinterInputs(result.selectedPrinterName || select.value || '');
       setMessage('Impressoras atualizadas.', true);
     };
     document.getElementById('token').addEventListener('change', setTokenFromInput);
+    document.getElementById('printerSelect').addEventListener('change', () => {
+      const selectValue = (document.getElementById('printerSelect').value || '').trim();
+      if (!selectValue) return;
+      const manual = document.getElementById('printerManual');
+      if (manual && !manual.value.trim()) {
+        manual.value = selectValue;
+      }
+    });
     document.getElementById('refreshBtn').addEventListener('click', async () => {
       try { setTokenFromInput(); await refreshHealth(); await refreshPrinters(); } catch (error) { setMessage(error.message || 'Falha ao listar impressoras.'); }
     });
     document.getElementById('savePrinterBtn').addEventListener('click', async () => {
       try {
         setTokenFromInput();
-        const printerName = document.getElementById('printerSelect').value;
+        const printerName = getPrinterNameInput();
+        if (!printerName) {
+          setMessage('Digite ou selecione uma impressora.');
+          return;
+        }
         await request('/config/printer', { method: 'POST', body: JSON.stringify({ printerName }) });
         await refreshHealth();
         setMessage('Impressora padrão salva.', true);
@@ -469,7 +504,11 @@ const buildUiHtml = () => `<!doctype html>
     document.getElementById('testBtn').addEventListener('click', async () => {
       try {
         setTokenFromInput();
-        const printerName = document.getElementById('printerSelect').value;
+        const printerName = getPrinterNameInput();
+        if (!printerName) {
+          setMessage('Digite ou selecione uma impressora.');
+          return;
+        }
         await request('/print/test', { method: 'POST', body: JSON.stringify({ printerName }) });
         setMessage('Teste enviado para impressora.', true);
       } catch (error) { setMessage(error.message || 'Falha no teste de impressão.'); }
