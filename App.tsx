@@ -222,6 +222,12 @@ interface OperationalEventTiming {
   totalMs: number;
 }
 
+interface GlobalQueueWaitMeta {
+  queueDepthAtEnqueue: number;
+  activeCommandType: StateCommand['type'] | null;
+  activeDraftId: string | null;
+}
+
 interface RunCommandOptions {
   skipOfflineQueue?: boolean;
   silentSuccessNotification?: boolean;
@@ -236,6 +242,7 @@ interface RunCommandOptions {
   onStateCommandRoundtripTiming?: (timing: { requestMs: number; backendMs: number }) => void;
   onDraftLockWaitMs?: (durationMs: number) => void;
   onGlobalQueueWaitMs?: (durationMs: number) => void;
+  onGlobalQueueMeta?: (meta: GlobalQueueWaitMeta) => void;
   onBackendSchedulerWaitMs?: (durationMs: number) => void;
 }
 
@@ -310,6 +317,7 @@ interface PaymentFlowTelemetryEntry {
   confirmCommandInvokeMs: number;
   confirmDraftLockWaitMs: number;
   confirmGlobalQueueWaitMs: number;
+  confirmGlobalQueueDepthAtEnqueue: number;
   confirmSchedulerWaitMs: number;
   confirmPostCommandApplyMs: number;
   confirmOpsMs: number;
@@ -366,6 +374,7 @@ interface PaymentFlowTelemetryRecord {
   confirmCommandInvokeMs: number | null;
   confirmDraftLockWaitMs: number | null;
   confirmGlobalQueueWaitMs: number | null;
+  confirmGlobalQueueDepthAtEnqueue: number | null;
   confirmSchedulerWaitMs: number | null;
   confirmPostCommandApplyMs: number | null;
   confirmOpsMs: number | null;
@@ -2032,6 +2041,7 @@ const normalizePaymentFlowTelemetryRecord = (
   const confirmCommandInvokeRaw = Number(source.confirmCommandInvokeMs);
   const confirmDraftLockWaitRaw = Number(source.confirmDraftLockWaitMs);
   const confirmGlobalQueueWaitRaw = Number(source.confirmGlobalQueueWaitMs);
+  const confirmGlobalQueueDepthAtEnqueueRaw = Number(source.confirmGlobalQueueDepthAtEnqueue);
   const confirmSchedulerWaitRaw = Number(source.confirmSchedulerWaitMs);
   const confirmPostCommandApplyRaw = Number(source.confirmPostCommandApplyMs);
   const confirmOpsRaw = Number(source.confirmOpsMs);
@@ -2176,6 +2186,11 @@ const normalizePaymentFlowTelemetryRecord = (
     confirmGlobalQueueWaitMs:
       Number.isFinite(confirmGlobalQueueWaitRaw) && confirmGlobalQueueWaitRaw >= 0
         ? Math.floor(confirmGlobalQueueWaitRaw)
+        : null,
+    confirmGlobalQueueDepthAtEnqueue:
+      Number.isFinite(confirmGlobalQueueDepthAtEnqueueRaw) &&
+      confirmGlobalQueueDepthAtEnqueueRaw >= 0
+        ? Math.floor(confirmGlobalQueueDepthAtEnqueueRaw)
         : null,
     confirmSchedulerWaitMs:
       Number.isFinite(confirmSchedulerWaitRaw) && confirmSchedulerWaitRaw >= 0
@@ -2776,6 +2791,12 @@ const App: React.FC = () => {
   );
   const [hasPendingVersionUpdate, setHasPendingVersionUpdate] = useState(false);
   const commandQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const globalCommandQueueDepthRef = useRef(0);
+  const globalCommandQueueActiveRef = useRef<{
+    token: string;
+    commandType: StateCommand['type'];
+    draftId: string | null;
+  } | null>(null);
   const offlineSalesQueueRef = useRef<OfflineQueuedSale[]>([]);
   const pendingPaidSyncQueueRef = useRef<PendingPaidSyncJob[]>(
     loadPendingPaidSyncQueueLocalFallback()
@@ -3792,6 +3813,7 @@ const App: React.FC = () => {
         confirmCommandInvokeMs: 0,
         confirmDraftLockWaitMs: 0,
         confirmGlobalQueueWaitMs: 0,
+        confirmGlobalQueueDepthAtEnqueue: 0,
         confirmSchedulerWaitMs: 0,
         confirmPostCommandApplyMs: 0,
         confirmOpsMs: 0,
@@ -3885,6 +3907,7 @@ const App: React.FC = () => {
         | 'confirmCommandInvokeMs'
         | 'confirmDraftLockWaitMs'
         | 'confirmGlobalQueueWaitMs'
+        | 'confirmGlobalQueueDepthAtEnqueue'
         | 'confirmSchedulerWaitMs'
         | 'confirmPostCommandApplyMs'
         | 'confirmOpsMs'
@@ -4006,6 +4029,10 @@ const App: React.FC = () => {
       const confirmCommandInvokeMs = Math.max(0, Math.round(current.confirmCommandInvokeMs));
       const confirmDraftLockWaitMs = Math.max(0, Math.round(current.confirmDraftLockWaitMs));
       const confirmGlobalQueueWaitMs = Math.max(0, Math.round(current.confirmGlobalQueueWaitMs));
+      const confirmGlobalQueueDepthAtEnqueue = Math.max(
+        0,
+        Math.round(current.confirmGlobalQueueDepthAtEnqueue)
+      );
       const confirmSchedulerWaitMs = Math.max(0, Math.round(current.confirmSchedulerWaitMs));
       const confirmPostCommandApplyMs = Math.max(0, Math.round(current.confirmPostCommandApplyMs));
       const confirmOpsMs = Math.max(0, Math.round(current.confirmOpsMs));
@@ -4084,6 +4111,7 @@ const App: React.FC = () => {
         confirmCommandInvokeMs,
         confirmDraftLockWaitMs,
         confirmGlobalQueueWaitMs,
+        confirmGlobalQueueDepthAtEnqueue,
         confirmSchedulerWaitMs,
         confirmPostCommandApplyMs,
         confirmOpsMs,
@@ -4149,6 +4177,7 @@ const App: React.FC = () => {
         confirm_command_invoke_ms: record.confirmCommandInvokeMs,
         confirm_draft_lock_wait_ms: record.confirmDraftLockWaitMs,
         confirm_global_queue_wait_ms: record.confirmGlobalQueueWaitMs,
+        confirm_global_queue_depth_at_enqueue: record.confirmGlobalQueueDepthAtEnqueue,
         confirm_scheduler_wait_ms: record.confirmSchedulerWaitMs,
         confirm_post_command_apply_ms: record.confirmPostCommandApplyMs,
         confirm_ops_ms: record.confirmOpsMs,
@@ -4213,6 +4242,7 @@ const App: React.FC = () => {
           confirm_command_invoke_ms: record.confirmCommandInvokeMs,
           confirm_draft_lock_wait_ms: record.confirmDraftLockWaitMs,
           confirm_global_queue_wait_ms: record.confirmGlobalQueueWaitMs,
+          confirm_global_queue_depth_at_enqueue: record.confirmGlobalQueueDepthAtEnqueue,
           confirm_scheduler_wait_ms: record.confirmSchedulerWaitMs,
           confirm_post_command_apply_ms: record.confirmPostCommandApplyMs,
           confirm_ops_ms: record.confirmOpsMs,
@@ -5364,6 +5394,7 @@ const App: React.FC = () => {
         onSnapshotAppliedMs?: (durationMs: number) => void;
         onStateCommandRoundtripTiming?: (timing: { requestMs: number; backendMs: number }) => void;
         onGlobalQueueWaitMs?: (durationMs: number) => void;
+        onGlobalQueueMeta?: (meta: GlobalQueueWaitMeta) => void;
         onBackendSchedulerWaitMs?: (durationMs: number) => void;
       } = {}
     ): Promise<{ ok: true } | { ok: false; error: unknown }> => {
@@ -5495,16 +5526,33 @@ const App: React.FC = () => {
         return executeCommand();
       }
 
+      const queueDepthAtEnqueue = Math.max(0, Math.floor(globalCommandQueueDepthRef.current));
+      const activeCommandAtEnqueue = globalCommandQueueActiveRef.current;
+      globalCommandQueueDepthRef.current += 1;
       const queuedAt = performance.now();
+      const runQueuedExecution = () => {
+        globalCommandQueueDepthRef.current = Math.max(0, globalCommandQueueDepthRef.current - 1);
+        options.onGlobalQueueWaitMs?.(Math.max(0, performance.now() - queuedAt));
+        options.onGlobalQueueMeta?.({
+          queueDepthAtEnqueue,
+          activeCommandType: activeCommandAtEnqueue?.commandType ?? null,
+          activeDraftId: activeCommandAtEnqueue?.draftId ?? null,
+        });
+        const token = createClientId('gq');
+        globalCommandQueueActiveRef.current = {
+          token,
+          commandType: command.type,
+          draftId: getCommandDraftId(command),
+        };
+        return executeCommand().finally(() => {
+          if (globalCommandQueueActiveRef.current?.token === token) {
+            globalCommandQueueActiveRef.current = null;
+          }
+        });
+      };
       const scheduledExecution = commandQueueRef.current.then(
-        () => {
-          options.onGlobalQueueWaitMs?.(Math.max(0, performance.now() - queuedAt));
-          return executeCommand();
-        },
-        () => {
-          options.onGlobalQueueWaitMs?.(Math.max(0, performance.now() - queuedAt));
-          return executeCommand();
-        }
+        () => runQueuedExecution(),
+        () => runQueuedExecution()
       );
 
       commandQueueRef.current = scheduledExecution.then(
@@ -5622,6 +5670,7 @@ const App: React.FC = () => {
           onSnapshotAppliedMs: options.onSnapshotAppliedMs,
           onStateCommandRoundtripTiming: options.onStateCommandRoundtripTiming,
           onGlobalQueueWaitMs: options.onGlobalQueueWaitMs,
+          onGlobalQueueMeta: options.onGlobalQueueMeta,
           onBackendSchedulerWaitMs: options.onBackendSchedulerWaitMs,
         });
       }, {
@@ -7934,6 +7983,7 @@ const App: React.FC = () => {
             trackPendingState: false,
             failFastOnVersionConflict: options.failFastOnVersionConflict,
             skipSnapshotApply: options.skipSnapshotApply,
+            bypassGlobalCommandQueue: options.skipSnapshotApply === true,
           });
         } finally {
           options.onPhaseTiming?.('run_command', performance.now() - runCommandStartedAt);
@@ -9968,6 +10018,7 @@ const App: React.FC = () => {
         const atomicStartedAt = performance.now();
         try {
           const atomicErrorSink: RunCommandErrorSink = {};
+          let confirmGlobalQueueMeta: GlobalQueueWaitMeta | null = null;
           const confirmCommandStartedAt = performance.now();
           const atomicallyConfirmed = await runCommandWithSync(
             atomicFinalizeAndConfirmCommand,
@@ -9984,6 +10035,27 @@ const App: React.FC = () => {
               },
               onGlobalQueueWaitMs: (durationMs) => {
                 recordConfirmPhaseDuration('confirmGlobalQueueWaitMs', durationMs);
+                if (durationMs >= 1200) {
+                  pushOperationalEvent('BACKPRESSURE', 'Comando terminal aguardou fila global de comandos.', {
+                    draftId: currentJob.draftId,
+                    jobId: currentJob.id,
+                    commandType: atomicFinalizeAndConfirmCommand.type,
+                    commandId: atomicFinalizeAndConfirmCommand.commandId || null,
+                    waitMs: Math.round(durationMs),
+                    queueDepthAtEnqueue: confirmGlobalQueueMeta?.queueDepthAtEnqueue ?? null,
+                    blockedByCommandType: confirmGlobalQueueMeta?.activeCommandType ?? null,
+                    blockedByDraftId: confirmGlobalQueueMeta?.activeDraftId ?? null,
+                  });
+                }
+              },
+              onGlobalQueueMeta: (meta) => {
+                confirmGlobalQueueMeta = meta;
+                markPaymentFlowTelemetryStageDuration(
+                  currentJob.draftId,
+                  currentJob.id,
+                  'confirmGlobalQueueDepthAtEnqueue',
+                  meta.queueDepthAtEnqueue
+                );
               },
               onBackendSchedulerWaitMs: (durationMs) => {
                 recordConfirmPhaseDuration('confirmSchedulerWaitMs', durationMs);
@@ -12137,7 +12209,7 @@ const App: React.FC = () => {
               )}
               {latestPaymentFlowTelemetry && (
                 <p className="truncate">
-                  c_cmd:{latestPaymentFlowTelemetry.confirmCommandInvokeMs ?? '-'} c_lock:{latestPaymentFlowTelemetry.confirmDraftLockWaitMs ?? '-'} c_gq:{latestPaymentFlowTelemetry.confirmGlobalQueueWaitMs ?? '-'} c_sched:{latestPaymentFlowTelemetry.confirmSchedulerWaitMs ?? '-'} c_apply:{latestPaymentFlowTelemetry.confirmPostCommandApplyMs ?? '-'} c_ops:{latestPaymentFlowTelemetry.confirmOpsMs ?? '-'} c_fail:{latestPaymentFlowTelemetry.confirmFailureHandlingMs ?? '-'} c_oth:{latestPaymentFlowTelemetry.confirmOtherMs ?? '-'}
+                  c_cmd:{latestPaymentFlowTelemetry.confirmCommandInvokeMs ?? '-'} c_lock:{latestPaymentFlowTelemetry.confirmDraftLockWaitMs ?? '-'} c_gq:{latestPaymentFlowTelemetry.confirmGlobalQueueWaitMs ?? '-'} c_gqd:{latestPaymentFlowTelemetry.confirmGlobalQueueDepthAtEnqueue ?? '-'} c_sched:{latestPaymentFlowTelemetry.confirmSchedulerWaitMs ?? '-'} c_apply:{latestPaymentFlowTelemetry.confirmPostCommandApplyMs ?? '-'} c_ops:{latestPaymentFlowTelemetry.confirmOpsMs ?? '-'} c_fail:{latestPaymentFlowTelemetry.confirmFailureHandlingMs ?? '-'} c_oth:{latestPaymentFlowTelemetry.confirmOtherMs ?? '-'}
                 </p>
               )}
               {latestPaymentFlowTelemetry && (
@@ -12255,7 +12327,7 @@ const App: React.FC = () => {
                   <p key={entry.jobId} className="truncate font-mono text-[9px] text-slate-200">
                     {(() => {
                       const breakdown = getPaymentFlowProcessingBreakdown(entry);
-                      return `${entry.draftId.slice(-8).toUpperCase()} local:${entry.clickToLocalPersistMs ?? '-'}ms w:${entry.waitInQueueMs ?? '-'}ms p:${entry.processingMs ?? '-'}ms conf:${entry.totalConfMs ?? entry.clickToBackendConfirmMs ?? '-'}ms p_flush:${entry.pFlushMs ?? '-'} p_prepare:${entry.pPrepareMs ?? '-'} p_request:${entry.pRequestMs ?? '-'} p_backend:${entry.pBackendMs ?? '-'} p_apply_snapshot:${entry.pApplySnapshotMs ?? '-'} p_reconcile:${entry.pReconcileMs ?? '-'} p_persist:${entry.pPersistMs ?? '-'} p_ops:${entry.pOpsMs ?? '-'} p_finalize:${entry.pFinalizeMs ?? '-'} f:${breakdown?.flushPendingDraftAddsMs ?? '-'} fi:${breakdown?.finalizeMs ?? '-'} cf:${breakdown?.confirmMs ?? '-'} sn:${breakdown?.snapshotApplyMs ?? '-'} sr:${breakdown?.stateRefreshMs ?? '-'} rv:${breakdown?.recoveryMs ?? '-'} rb:${breakdown?.retryBackoffMs ?? '-'} fr:${breakdown?.frontendReconcileMs ?? '-'} oth:${breakdown?.residualMs ?? '-'} c_cmd:${entry.confirmCommandInvokeMs ?? '-'} c_lock:${entry.confirmDraftLockWaitMs ?? '-'} c_gq:${entry.confirmGlobalQueueWaitMs ?? '-'} c_sched:${entry.confirmSchedulerWaitMs ?? '-'} c_apply:${entry.confirmPostCommandApplyMs ?? '-'} c_ops:${entry.confirmOpsMs ?? '-'} c_fail:${entry.confirmFailureHandlingMs ?? '-'} c_oth:${entry.confirmOtherMs ?? '-'} sr_empty:${entry.stateRefreshEmptyDraftCheckMs ?? '-'} sr_flush:${entry.stateRefreshAfterFlushMs ?? '-'} sr_final:${entry.stateRefreshBeforeFinalizeMs ?? '-'} sr_oth:${entry.stateRefreshOtherMs ?? '-'} ops_send:${entry.pOpsBackendSentMs ?? '-'} ops_ack:${entry.pOpsBackendAckMs ?? '-'} ops_ui:${entry.pOpsEventStateMs ?? '-'} ops_ps:${entry.pOpsEventPersistMs ?? '-'} ops_rp:${entry.pOpsEventReportMs ?? '-'} ops_oth:${entry.pOpsOtherMs ?? '-'} r:${entry.retries} rec:${entry.hadRecovery ? '1' : '0'} rc:${entry.hadReconciliation ? '1' : '0'}`;
+                      return `${entry.draftId.slice(-8).toUpperCase()} local:${entry.clickToLocalPersistMs ?? '-'}ms w:${entry.waitInQueueMs ?? '-'}ms p:${entry.processingMs ?? '-'}ms conf:${entry.totalConfMs ?? entry.clickToBackendConfirmMs ?? '-'}ms p_flush:${entry.pFlushMs ?? '-'} p_prepare:${entry.pPrepareMs ?? '-'} p_request:${entry.pRequestMs ?? '-'} p_backend:${entry.pBackendMs ?? '-'} p_apply_snapshot:${entry.pApplySnapshotMs ?? '-'} p_reconcile:${entry.pReconcileMs ?? '-'} p_persist:${entry.pPersistMs ?? '-'} p_ops:${entry.pOpsMs ?? '-'} p_finalize:${entry.pFinalizeMs ?? '-'} f:${breakdown?.flushPendingDraftAddsMs ?? '-'} fi:${breakdown?.finalizeMs ?? '-'} cf:${breakdown?.confirmMs ?? '-'} sn:${breakdown?.snapshotApplyMs ?? '-'} sr:${breakdown?.stateRefreshMs ?? '-'} rv:${breakdown?.recoveryMs ?? '-'} rb:${breakdown?.retryBackoffMs ?? '-'} fr:${breakdown?.frontendReconcileMs ?? '-'} oth:${breakdown?.residualMs ?? '-'} c_cmd:${entry.confirmCommandInvokeMs ?? '-'} c_lock:${entry.confirmDraftLockWaitMs ?? '-'} c_gq:${entry.confirmGlobalQueueWaitMs ?? '-'} c_gqd:${entry.confirmGlobalQueueDepthAtEnqueue ?? '-'} c_sched:${entry.confirmSchedulerWaitMs ?? '-'} c_apply:${entry.confirmPostCommandApplyMs ?? '-'} c_ops:${entry.confirmOpsMs ?? '-'} c_fail:${entry.confirmFailureHandlingMs ?? '-'} c_oth:${entry.confirmOtherMs ?? '-'} sr_empty:${entry.stateRefreshEmptyDraftCheckMs ?? '-'} sr_flush:${entry.stateRefreshAfterFlushMs ?? '-'} sr_final:${entry.stateRefreshBeforeFinalizeMs ?? '-'} sr_oth:${entry.stateRefreshOtherMs ?? '-'} ops_send:${entry.pOpsBackendSentMs ?? '-'} ops_ack:${entry.pOpsBackendAckMs ?? '-'} ops_ui:${entry.pOpsEventStateMs ?? '-'} ops_ps:${entry.pOpsEventPersistMs ?? '-'} ops_rp:${entry.pOpsEventReportMs ?? '-'} ops_oth:${entry.pOpsOtherMs ?? '-'} r:${entry.retries} rec:${entry.hadRecovery ? '1' : '0'} rc:${entry.hadReconciliation ? '1' : '0'}`;
                     })()}
                   </p>
                 ))}
