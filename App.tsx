@@ -2625,7 +2625,7 @@ const DRAFT_PAYMENT_TRANSITION_GRACE_MS = 12_000;
 const DRAFT_REOPEN_CONFIRMATION_MS = 2_500;
 const DRAFT_TERMINAL_VISUAL_LOCK_MS = 45_000;
 const PAID_SYNC_QUEUE_PREVIEW_LIMIT = 6;
-const PENDING_DRAFT_BACKGROUND_SYNC_DEBOUNCE_MS = 650;
+const PENDING_DRAFT_BACKGROUND_SYNC_DEBOUNCE_MS = 1200;
 const PENDING_DRAFT_BACKGROUND_SYNC_SWEEP_MS = 10000;
 const PENDING_DRAFT_BACKGROUND_SYNC_RETRY_BASE_MS = 1800;
 const PENDING_DRAFT_BACKGROUND_SYNC_RETRY_MAX_MS = 45000;
@@ -3559,7 +3559,12 @@ const App: React.FC = () => {
   );
 
   const setDraftSyncInProgress = useCallback((draftId: string, isSyncing: boolean) => {
-    const nextSet = new Set(syncingPaidDraftIdsRef.current);
+    const currentSet = syncingPaidDraftIdsRef.current;
+    const alreadySyncing = currentSet.has(draftId);
+    if (isSyncing === alreadySyncing) {
+      return;
+    }
+    const nextSet = new Set(currentSet);
     if (isSyncing) {
       nextSet.add(draftId);
     } else {
@@ -5116,7 +5121,12 @@ const App: React.FC = () => {
   }, [hydratePendingDraftAdds, isAccessVerified]);
 
   const replacePendingPaidSyncQueue = useCallback(
-    (nextQueue: PendingPaidSyncJob[]) => {
+    (
+      nextQueue: PendingPaidSyncJob[],
+      options: {
+        skipQueueHealthLog?: boolean;
+      } = {}
+    ) => {
       const normalizedQueue = nextQueue
         .map((entry) => normalizePendingPaidSyncJob(entry))
         .filter((entry): entry is PendingPaidSyncJob => entry !== null);
@@ -5125,7 +5135,9 @@ const App: React.FC = () => {
       setPendingPaidSyncQueueSnapshot(normalizedQueue);
       savePendingPaidSyncQueue(normalizedQueue);
       pendingPaidSyncQueueRevisionRef.current += 1;
-      logQueueHealth('pending-paid-sync');
+      if (!options.skipQueueHealthLog) {
+        logQueueHealth('pending-paid-sync');
+      }
       isPendingPaidSyncQueueHydratedRef.current = true;
     },
     [logQueueHealth]
@@ -7815,6 +7827,7 @@ const App: React.FC = () => {
         failFastOnVersionConflict?: boolean;
         source?: PendingDraftAddsSource;
         skipSnapshotApply?: boolean;
+        abortIfDraftLocked?: boolean;
         onLockWaitMs?: (durationMs: number) => void;
         onPhaseTiming?: (phase: PendingDraftFlushPhase, durationMs: number) => void;
         suppressOperationalEvents?: boolean;
@@ -7884,6 +7897,18 @@ const App: React.FC = () => {
         }
 
         while (true) {
+        if (source === 'visible' && options.abortIfDraftLocked && isDraftLifecycleLocked(draftId)) {
+          emitFlushOperationalEvent(
+            'COMMAND_SKIPPED_OBSOLETE',
+            'Background flush interrompido porque o draft entrou em lock terminal.',
+            {
+              draftId,
+              source,
+              stage: resolveDraftLifecycleStage(draftId),
+            }
+          );
+          return true;
+        }
         const loopReadStartedAt = performance.now();
         const currentPendingAdds =
           source === 'recovery'
@@ -8194,6 +8219,7 @@ const App: React.FC = () => {
       isDraftLifecycleLocked,
       products,
       reconcileCancelledPendingDraftAddIntent,
+      resolveDraftLifecycleStage,
       updatePendingDraftAddInSource,
       runCommandWithSync,
       showNotification,
@@ -8211,6 +8237,7 @@ const App: React.FC = () => {
         failFastOnVersionConflict?: boolean;
         source?: PendingDraftAddsSource;
         skipSnapshotApply?: boolean;
+        abortIfDraftLocked?: boolean;
         onLockWaitMs?: (durationMs: number) => void;
         onPhaseTiming?: (phase: PendingDraftFlushPhase, durationMs: number) => void;
         suppressOperationalEvents?: boolean;
@@ -8289,6 +8316,7 @@ const App: React.FC = () => {
             silentErrorNotification: true,
             errorSink,
             failFastOnVersionConflict: true,
+            abortIfDraftLocked: true,
           }
         );
         if (ok) {
@@ -9361,7 +9389,9 @@ const App: React.FC = () => {
       replacePendingPaidSyncQueue([
         ...queueSnapshot.slice(0, selectedIndex),
         ...queueSnapshot.slice(selectedIndex + 1),
-      ]);
+      ], {
+        skipQueueHealthLog: true,
+      });
       const dequeuePersistMs = performance.now() - dequeuePersistStartedAt;
       if (
         pendingPaidSyncActiveWorkersRef.current < PENDING_PAID_SYNC_MAX_WORKERS &&
