@@ -222,6 +222,11 @@ interface OperationalEventTiming {
   totalMs: number;
 }
 
+interface PendingPaidSyncKickoffWaiter {
+  timerId: number;
+  resolve: (started: boolean) => void;
+}
+
 interface GlobalQueueWaitMeta {
   queueDepthAtEnqueue: number;
   activeCommandType: StateCommand['type'] | null;
@@ -2846,6 +2851,10 @@ const App: React.FC = () => {
   const pendingDraftAddsIngressBlockedUntilRef = useRef(0);
   const pendingPaidSyncActiveWorkersRef = useRef(0);
   const pendingPaidSyncRunningDraftIdsRef = useRef<Set<string>>(new Set());
+  const pendingPaidSyncKickoffAtRef = useRef<Map<string, number>>(new Map());
+  const pendingPaidSyncKickoffWaitersRef = useRef<Map<string, PendingPaidSyncKickoffWaiter>>(
+    new Map()
+  );
   const paidSyncUiLockStartedAtRef = useRef<number | null>(null);
   const isFlushingOfflineSalesRef = useRef(false);
   const isOfflineQueueHydratedRef = useRef(false);
@@ -4920,6 +4929,11 @@ const App: React.FC = () => {
       retryDispatchTimersRef.current.clear();
       retryDispatchQueueRef.current = [];
       retryDispatchQueuedKeysRef.current.clear();
+      pendingPaidSyncKickoffWaitersRef.current.forEach((waiter) => {
+        window.clearTimeout(waiter.timerId);
+      });
+      pendingPaidSyncKickoffWaitersRef.current.clear();
+      pendingPaidSyncKickoffAtRef.current.clear();
       backendCommandSchedulerRef.current?.clear();
       commandDraftLocksRef.current.clear();
       draftLifecycleStageRef.current.clear();
@@ -9294,6 +9308,7 @@ const App: React.FC = () => {
       }
 
       markPaymentFlowTelemetryProcessingStarted(currentJob.draftId, currentJob.id);
+      markPendingPaidSyncKickoff(currentJob.id);
       markPaymentFlowTelemetryStageDuration(
         currentJob.draftId,
         currentJob.id,
@@ -10225,6 +10240,13 @@ const App: React.FC = () => {
         });
     } finally {
       if (currentJob) {
+        pendingPaidSyncKickoffAtRef.current.delete(currentJob.id);
+        const pendingKickoffWaiter = pendingPaidSyncKickoffWaitersRef.current.get(currentJob.id);
+        if (pendingKickoffWaiter) {
+          pendingPaidSyncKickoffWaitersRef.current.delete(currentJob.id);
+          window.clearTimeout(pendingKickoffWaiter.timerId);
+          pendingKickoffWaiter.resolve(false);
+        }
         pendingPaidSyncRunningDraftIdsRef.current.delete(currentJob.draftId);
       }
       pendingPaidSyncActiveWorkersRef.current = Math.max(
@@ -10308,6 +10330,46 @@ const App: React.FC = () => {
       );
     },
     [enqueueRetryDispatchTask, processPendingPaidSyncQueue, scheduleRetryDispatchTask]
+  );
+
+  const markPendingPaidSyncKickoff = useCallback((jobId: string): void => {
+    const normalizedJobId = jobId.trim();
+    if (!normalizedJobId) return;
+    pendingPaidSyncKickoffAtRef.current.set(normalizedJobId, performance.now());
+    const waiter = pendingPaidSyncKickoffWaitersRef.current.get(normalizedJobId);
+    if (!waiter) return;
+    pendingPaidSyncKickoffWaitersRef.current.delete(normalizedJobId);
+    window.clearTimeout(waiter.timerId);
+    waiter.resolve(true);
+  }, []);
+
+  const waitForPendingPaidSyncKickoff = useCallback(
+    async (jobId: string, timeoutMs = 180): Promise<{ started: boolean; waitMs: number }> => {
+      const normalizedJobId = jobId.trim();
+      if (!normalizedJobId || typeof window === 'undefined') {
+        return { started: false, waitMs: 0 };
+      }
+      const startedAt = performance.now();
+      if (pendingPaidSyncKickoffAtRef.current.has(normalizedJobId)) {
+        return { started: true, waitMs: Math.max(0, performance.now() - startedAt) };
+      }
+      const safeTimeoutMs = Math.max(0, Math.round(timeoutMs));
+      return new Promise((resolve) => {
+        const timerId = window.setTimeout(() => {
+          const waiter = pendingPaidSyncKickoffWaitersRef.current.get(normalizedJobId);
+          if (!waiter || waiter.timerId !== timerId) return;
+          pendingPaidSyncKickoffWaitersRef.current.delete(normalizedJobId);
+          resolve({ started: false, waitMs: Math.max(0, performance.now() - startedAt) });
+        }, safeTimeoutMs);
+        pendingPaidSyncKickoffWaitersRef.current.set(normalizedJobId, {
+          timerId,
+          resolve: (started) => {
+            resolve({ started, waitMs: Math.max(0, performance.now() - startedAt) });
+          },
+        });
+      });
+    },
+    []
   );
 
   useEffect(() => {
@@ -11288,30 +11350,39 @@ const App: React.FC = () => {
       });
 
       const receiptPrintId = receiptPayload?.id || draftId;
-      armPrintReturnFocusGuard();
-      window.setTimeout(() => {
-        const openedPrintWindow = navigatePreparedReceiptWindow(preparedPrintWindow, receiptPrintId);
-        if (!openedPrintWindow) {
-          if (receiptPayload) {
-            removeReceiptPrintPayload(receiptPayload.id);
+      void waitForPendingPaidSyncKickoff(queuedJob.id).then((kickoffState) => {
+        pushOperationalEvent('PAYMENT_FLOW', 'PAID_SYNC_PRINT_RELEASED', {
+          draftId,
+          jobId: queuedJob.id,
+          receiptPrintId,
+          kickoffStarted: kickoffState.started,
+          kickoffWaitMs: Math.max(0, Math.round(kickoffState.waitMs)),
+        });
+        armPrintReturnFocusGuard();
+        window.setTimeout(() => {
+          const openedPrintWindow = navigatePreparedReceiptWindow(preparedPrintWindow, receiptPrintId);
+          if (!openedPrintWindow) {
+            if (receiptPayload) {
+              removeReceiptPrintPayload(receiptPayload.id);
+            }
+            closePreparedReceiptWindow(preparedPrintWindow);
+            showNotification(
+              'Não foi possível abrir o cupom agora. Use o Histórico para segunda via.'
+            );
+            pushOperationalEvent('PAYMENT_FLOW', 'PAID_SYNC_PRINT_OPEN_FAILED', {
+              draftId,
+              receiptPrintId,
+              jobId: queuedJob.id,
+            });
+            return;
           }
-          closePreparedReceiptWindow(preparedPrintWindow);
-          showNotification(
-            'Não foi possível abrir o cupom agora. Use o Histórico para segunda via.'
-          );
-          pushOperationalEvent('PAYMENT_FLOW', 'PAID_SYNC_PRINT_OPEN_FAILED', {
+          pushOperationalEvent('PAYMENT_FLOW', 'PAID_SYNC_PRINT_OPENED', {
             draftId,
             receiptPrintId,
             jobId: queuedJob.id,
           });
-          return;
-        }
-        pushOperationalEvent('PAYMENT_FLOW', 'PAID_SYNC_PRINT_OPENED', {
-          draftId,
-          receiptPrintId,
-          jobId: queuedJob.id,
-        });
-      }, 0);
+        }, 0);
+      });
     } catch (error) {
       reportErrorMonitorEvent({
         source: 'sistema:paid-sync:confirm-paid-unexpected-error',
