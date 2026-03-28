@@ -9762,8 +9762,7 @@ const App: React.FC = () => {
         if (shouldFlushDraftAdds) {
           const flushPendingDraftAddsStartedAt = performance.now();
           try {
-            const shouldFlushVisibleDraftAdds =
-              !currentServerDraft || currentServerDraft.status === 'DRAFT' || visiblePendingCount > 0;
+            const shouldFlushVisibleDraftAdds = visiblePendingCount > 0;
             if (shouldFlushVisibleDraftAdds) {
               const draftAddsErrorSink: RunCommandErrorSink = {};
               const flushVisibleStartedAt = performance.now();
@@ -11004,13 +11003,6 @@ const App: React.FC = () => {
         buildReceiptPrintRoutePath(normalizedId),
         '_blank'
       );
-      if (printWindow && !printWindow.closed) {
-        try {
-          printWindow.focus();
-        } catch {
-          // ignore focus failures
-        }
-      }
       return Boolean(printWindow);
     },
     []
@@ -11126,11 +11118,6 @@ const App: React.FC = () => {
       if (printWindow && !printWindow.closed) {
         try {
           printWindow.location.href = targetPath;
-          try {
-            printWindow.focus();
-          } catch {
-            // ignore focus failures
-          }
           return true;
         } catch {
           // fallback below
@@ -11217,10 +11204,7 @@ const App: React.FC = () => {
     const receiptPayload: ReceiptPrintPayload | null = receiptPayloadInput
       ? saveReceiptPrintPayload(receiptPayloadInput)
       : null;
-    const preparedPrintWindow = prepareReceiptPrintWindow();
-    if (receiptPayload && preparedPrintWindow) {
-      setReceiptPrintPayloadOnWindow(preparedPrintWindow, receiptPayload);
-    }
+    let preparedPrintWindow: Window | null = null;
 
     const pendingItemsCount = countVisiblePendingDraftAdds(pendingDraftAddsRef.current[draftId] || []);
     const paymentClickAtMs = Date.now();
@@ -11236,6 +11220,14 @@ const App: React.FC = () => {
     });
     let syncQueued = false;
     try {
+      setDraftSyncInProgress(draftId, true);
+      const pendingBackgroundSyncTimer = pendingDraftBackgroundSyncTimerRef.current.get(draftId);
+      if (pendingBackgroundSyncTimer !== undefined) {
+        window.clearTimeout(pendingBackgroundSyncTimer);
+        pendingDraftBackgroundSyncTimerRef.current.delete(draftId);
+      }
+      pendingDraftBackgroundRetryAttemptsRef.current.delete(draftId);
+
       void moveVisiblePendingDraftAddsToRecovery(draftId, { skipCriticalPersist: true }).catch((error) => {
         reportErrorMonitorEvent({
           source: 'sistema:paid-sync:move-visible-to-recovery',
@@ -11264,7 +11256,6 @@ const App: React.FC = () => {
         confirmCommandId: queuedJob.confirmCommandId,
       });
 
-      setDraftSyncInProgress(draftId, true);
       setIsSaleOriginSetupOpen(false);
       setIsSplitSetupOpen(false);
       setIsPaymentOpen(false);
@@ -11306,6 +11297,10 @@ const App: React.FC = () => {
       });
 
       const receiptPrintId = receiptPayload?.id || draftId;
+      preparedPrintWindow = prepareReceiptPrintWindow();
+      if (receiptPayload && preparedPrintWindow) {
+        setReceiptPrintPayloadOnWindow(preparedPrintWindow, receiptPayload);
+      }
       armPrintReturnFocusGuard();
       window.setTimeout(() => {
         const openedPrintWindow = navigatePreparedReceiptWindow(preparedPrintWindow, receiptPrintId);
