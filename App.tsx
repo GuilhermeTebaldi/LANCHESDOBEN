@@ -7748,7 +7748,6 @@ const App: React.FC = () => {
         deferVisiblePersistence?: boolean;
         skipVisibleStateSync?: boolean;
         skipVisibleQueueHealthLog?: boolean;
-        abortIfDraftSyncInProgress?: boolean;
       } = {}
     ): Promise<boolean> => {
       const emitFlushOperationalEvent = (
@@ -7812,21 +7811,6 @@ const App: React.FC = () => {
         }
 
         while (true) {
-        if (
-          source === 'visible' &&
-          options.abortIfDraftSyncInProgress === true &&
-          syncingPaidDraftIdsRef.current.has(draftId)
-        ) {
-          emitFlushOperationalEvent(
-            'QUEUE_HEALTH',
-            'Flush visível de background interrompido por lock terminal do draft.',
-            {
-              draftId,
-              source,
-            }
-          );
-          return true;
-        }
         const loopReadStartedAt = performance.now();
         const currentPendingAdds =
           source === 'recovery'
@@ -8160,7 +8144,6 @@ const App: React.FC = () => {
         deferVisiblePersistence?: boolean;
         skipVisibleStateSync?: boolean;
         skipVisibleQueueHealthLog?: boolean;
-        abortIfDraftSyncInProgress?: boolean;
       } = {}
     ): Promise<boolean> => {
       const normalizedDraftId = draftId.trim();
@@ -8233,7 +8216,6 @@ const App: React.FC = () => {
             silentErrorNotification: true,
             errorSink,
             failFastOnVersionConflict: true,
-            abortIfDraftSyncInProgress: true,
           }
         );
         if (ok) {
@@ -9780,7 +9762,8 @@ const App: React.FC = () => {
         if (shouldFlushDraftAdds) {
           const flushPendingDraftAddsStartedAt = performance.now();
           try {
-            const shouldFlushVisibleDraftAdds = visiblePendingCount > 0;
+            const shouldFlushVisibleDraftAdds =
+              !currentServerDraft || currentServerDraft.status === 'DRAFT' || visiblePendingCount > 0;
             if (shouldFlushVisibleDraftAdds) {
               const draftAddsErrorSink: RunCommandErrorSink = {};
               const flushVisibleStartedAt = performance.now();
@@ -11064,11 +11047,6 @@ const App: React.FC = () => {
     ): Promise<number> => {
       const normalizedDraftId = draftId.trim();
       if (!normalizedDraftId) return 0;
-      hydratePendingDraftAdds();
-      const initialEntries = pendingDraftAddsRef.current[normalizedDraftId] || [];
-      if (!initialEntries.some((entry) => isPendingDraftAddVisible(entry))) {
-        return 0;
-      }
 
       const queue = pendingDraftFlushQueueRef.current;
       const previous = queue.get(normalizedDraftId) ?? Promise.resolve(true);
@@ -11077,6 +11055,8 @@ const App: React.FC = () => {
       // Serialize transfer with the same per-draft queue used by flush.
       // This avoids reintroducing visible pending items from stale in-flight flush snapshots.
       const execute = async (): Promise<boolean> => {
+        hydratePendingDraftAdds();
+
         const allEntries = pendingDraftAddsRef.current[normalizedDraftId] || [];
         const visibleEntries = allEntries.filter((entry) => isPendingDraftAddVisible(entry));
         movedEntriesCount = visibleEntries.length;
@@ -11249,19 +11229,17 @@ const App: React.FC = () => {
       }
       pendingDraftBackgroundRetryAttemptsRef.current.delete(draftId);
 
-      if (pendingItemsCount > 0) {
-        void moveVisiblePendingDraftAddsToRecovery(draftId, { skipCriticalPersist: true }).catch((error) => {
-          reportErrorMonitorEvent({
-            source: 'sistema:paid-sync:move-visible-to-recovery',
-            level: 'warn',
-            message: 'Falha ao transferir pendencias visiveis para buffer de recovery.',
-            stack: error instanceof Error ? error.stack : undefined,
-            context: {
-              draftId,
-            },
-          });
+      void moveVisiblePendingDraftAddsToRecovery(draftId, { skipCriticalPersist: true }).catch((error) => {
+        reportErrorMonitorEvent({
+          source: 'sistema:paid-sync:move-visible-to-recovery',
+          level: 'warn',
+          message: 'Falha ao transferir pendencias visiveis para buffer de recovery.',
+          stack: error instanceof Error ? error.stack : undefined,
+          context: {
+            draftId,
+          },
         });
-      }
+      });
       const queuedJob: PendingPaidSyncJob = {
         id: createClientId('paid-sync-job'),
         draftId,
@@ -11347,6 +11325,29 @@ const App: React.FC = () => {
           receiptPrintId,
           jobId: queuedJob.id,
         });
+        requestPendingPaidSyncProcessing('print-opened');
+        void processPendingPaidSyncQueue();
+        if (document.visibilityState === 'hidden') {
+          pushOperationalEvent('PAYMENT_FLOW', 'PAID_SYNC_PRINT_MAIN_HIDDEN_AFTER_OPEN', {
+            draftId,
+            jobId: queuedJob.id,
+            receiptPrintId,
+          });
+          window.setTimeout(() => {
+            try {
+              window.focus();
+            } catch {
+              // ignore focus restore failures
+            }
+            pushOperationalEvent('PAYMENT_FLOW', 'PAID_SYNC_PRINT_MAIN_FOCUS_RESTORE_ATTEMPTED', {
+              draftId,
+              jobId: queuedJob.id,
+              receiptPrintId,
+            });
+            requestPendingPaidSyncProcessing('print-main-focus-restore');
+            void processPendingPaidSyncQueue();
+          }, 120);
+        }
       }, 0);
     } catch (error) {
       reportErrorMonitorEvent({
