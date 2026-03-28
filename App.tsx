@@ -11280,21 +11280,6 @@ const App: React.FC = () => {
       requestPendingPaidSyncProcessing('confirm-paid-enqueued');
       // Kick off immediately in the current tab before any print navigation can block timers/event-loop.
       void processPendingPaidSyncQueue();
-      if (pendingItemsCount > 0) {
-        window.setTimeout(() => {
-          void moveVisiblePendingDraftAddsToRecovery(draftId, { skipCriticalPersist: true }).catch((error) => {
-            reportErrorMonitorEvent({
-              source: 'sistema:paid-sync:move-visible-to-recovery',
-              level: 'warn',
-              message: 'Falha ao transferir pendencias visiveis para buffer de recovery.',
-              stack: error instanceof Error ? error.stack : undefined,
-              context: {
-                draftId,
-              },
-            });
-          });
-        }, 0);
-      }
       pushOperationalEvent('PAYMENT_FLOW', 'PAID_SYNC_SYNC_TRIGGERED', {
         draftId,
         jobId: queuedJob.id,
