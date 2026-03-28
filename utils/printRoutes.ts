@@ -12,8 +12,20 @@ export const resolveSystemBasePath = (): string => {
   return firstSegment === 'sistema' ? '/sistema' : '';
 };
 
-export const buildReceiptPrintRoutePath = (receiptId: string): string =>
-  `${resolveSystemBasePath()}/print/${encodeURIComponent(receiptId)}`;
+interface ReceiptPrintRouteOptions {
+  autoPrint?: boolean;
+}
+
+export const buildReceiptPrintRoutePath = (
+  receiptId: string,
+  options: ReceiptPrintRouteOptions = {}
+): string => {
+  const basePath = `${resolveSystemBasePath()}/print/${encodeURIComponent(receiptId)}`;
+  if (options.autoPrint === false) {
+    return `${basePath}?autoprint=0`;
+  }
+  return basePath;
+};
 
 export const buildSalesReportPrintRoutePath = (payloadId: string): string =>
   `${resolveSystemBasePath()}/print/report/${encodeURIComponent(payloadId)}`;

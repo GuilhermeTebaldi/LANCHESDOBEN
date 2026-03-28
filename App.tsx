@@ -10996,12 +10996,19 @@ const App: React.FC = () => {
   ]);
 
   const openReceiptPrintWindow = useCallback(
-    (receiptId: string): boolean => {
+    (
+      receiptId: string,
+      options: {
+        autoPrint?: boolean;
+      } = {}
+    ): boolean => {
       if (typeof window === 'undefined') return false;
       const normalizedId = receiptId.trim();
       if (!normalizedId) return false;
       const printWindow = window.open(
-        buildReceiptPrintRoutePath(normalizedId),
+        buildReceiptPrintRoutePath(normalizedId, {
+          autoPrint: options.autoPrint,
+        }),
         '_blank'
       );
       return Boolean(printWindow);
@@ -11112,10 +11119,18 @@ const App: React.FC = () => {
   );
 
   const navigatePreparedReceiptWindow = useCallback(
-    (printWindow: Window | null, receiptId: string): boolean => {
+    (
+      printWindow: Window | null,
+      receiptId: string,
+      options: {
+        autoPrint?: boolean;
+      } = {}
+    ): boolean => {
       const normalizedId = receiptId.trim();
       if (!normalizedId) return false;
-      const targetPath = buildReceiptPrintRoutePath(normalizedId);
+      const targetPath = buildReceiptPrintRoutePath(normalizedId, {
+        autoPrint: options.autoPrint,
+      });
       if (printWindow && !printWindow.closed) {
         try {
           printWindow.location.href = targetPath;
@@ -11124,7 +11139,7 @@ const App: React.FC = () => {
           // fallback below
         }
       }
-      return openReceiptPrintWindow(normalizedId);
+      return openReceiptPrintWindow(normalizedId, options);
     },
     [openReceiptPrintWindow]
   );
@@ -11293,7 +11308,9 @@ const App: React.FC = () => {
       }
       armPrintReturnFocusGuard();
       window.setTimeout(() => {
-        const openedPrintWindow = navigatePreparedReceiptWindow(preparedPrintWindow, receiptPrintId);
+        const openedPrintWindow = navigatePreparedReceiptWindow(preparedPrintWindow, receiptPrintId, {
+          autoPrint: false,
+        });
         if (!openedPrintWindow) {
           if (receiptPayload) {
             removeReceiptPrintPayload(receiptPayload.id);

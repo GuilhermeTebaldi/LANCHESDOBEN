@@ -88,6 +88,22 @@ const getRestaurantName = (): string => {
   return local || DEFAULT_RESTAURANT_NAME;
 };
 
+const shouldAutoPrintReceipt = (): boolean => {
+  if (typeof window === 'undefined') return true;
+  const raw = new URLSearchParams(window.location.search).get('autoprint');
+  if (!raw) return true;
+  const normalized = raw.trim().toLowerCase();
+  if (
+    normalized === '0' ||
+    normalized === 'false' ||
+    normalized === 'off' ||
+    normalized === 'no'
+  ) {
+    return false;
+  }
+  return true;
+};
+
 const toDate = (value: unknown): Date | null => {
   if (value instanceof Date) {
     return Number.isFinite(value.getTime()) ? value : null;
@@ -420,6 +436,7 @@ const PrintReceipt: React.FC<PrintReceiptProps> = ({ receiptId }) => {
   const hasTriggeredPrintRef = useRef(false);
   const printTimerRef = useRef<number | null>(null);
   const paperWidthMm = useMemo(() => getReceiptPaperWidthMm(), []);
+  const autoPrintEnabled = useMemo(() => shouldAutoPrintReceipt(), []);
 
   useEffect(() => {
     let cancelled = false;
@@ -495,6 +512,7 @@ const PrintReceipt: React.FC<PrintReceiptProps> = ({ receiptId }) => {
 
   const triggerAutoPrint = useCallback((): boolean => {
     if (!receipt) return false;
+    if (!autoPrintEnabled) return false;
     if (hasTriggeredPrintRef.current) return false;
     if (document.visibilityState === 'hidden') return false;
 
@@ -507,11 +525,6 @@ const PrintReceipt: React.FC<PrintReceiptProps> = ({ receiptId }) => {
     printTimerRef.current = window.setTimeout(() => {
       printTimerRef.current = null;
       try {
-        window.focus();
-      } catch {
-        // ignore focus failures
-      }
-      try {
         window.print();
       } catch {
         hasTriggeredPrintRef.current = false;
@@ -519,10 +532,11 @@ const PrintReceipt: React.FC<PrintReceiptProps> = ({ receiptId }) => {
     }, 180);
 
     return true;
-  }, [receipt]);
+  }, [autoPrintEnabled, receipt]);
 
   useEffect(() => {
     if (!receipt) return;
+    if (!autoPrintEnabled) return;
     const tryPrint = () => {
       void triggerAutoPrint();
     };
@@ -541,7 +555,7 @@ const PrintReceipt: React.FC<PrintReceiptProps> = ({ receiptId }) => {
         printTimerRef.current = null;
       }
     };
-  }, [receipt, triggerAutoPrint]);
+  }, [autoPrintEnabled, receipt, triggerAutoPrint]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
