@@ -54,6 +54,7 @@ import {
   synchronizeComboProductRecipes,
 } from './utils/recipe';
 import {
+  consumeReceiptPrintPayload,
   removeReceiptPrintPayload,
   saveReceiptPrintPayload,
   setReceiptPrintPayloadOnWindow,
@@ -81,6 +82,14 @@ import {
   getPaidSyncAssistantRetryDelayMs,
   shouldPaidSyncAssistantRunRecovery,
 } from './utils/paidSyncAssistant';
+import {
+  createDefaultReceiptPrintModeSettings,
+  normalizeReceiptPrintModeSettings,
+  printReceiptViaLocalAgent,
+  printTestViaLocalAgent,
+  testLocalPrintAgentConnection,
+  type ReceiptPrintModeSettings,
+} from './utils/localPrintAgent';
 
 const ADMIN_GATE_KEY = 'lanchesdoben_admin_gate';
 const ADMIN_SESSION_KEY = 'lanchesdoben_admin_session';
@@ -97,6 +106,7 @@ const LOCAL_CASH_REGISTER_KEY = 'qb_cash_register_local_v1';
 const LOCAL_DAILY_HISTORY_KEY = 'qb_daily_sales_history_local_v1';
 const RECEIPT_PAPER_WIDTH_KEY = 'qb_receipt_paper_width_mm';
 const RECEIPT_PRINT_PRESET_STORAGE_KEY = 'qb_receipt_print_preset_v1';
+const RECEIPT_PRINT_MODE_SETTINGS_STORAGE_KEY = 'qb_receipt_mode_settings_v1';
 const RESTAURANT_NAME_STORAGE_KEY = 'qb_restaurant_name';
 const DEFAULT_RECEIPT_RESTAURANT_NAME = 'LANCHESDOBEN';
 const AUTO_UPDATE_SCROLL_STATE_KEY = 'qb_auto_update_scroll_state_v1';
@@ -473,6 +483,16 @@ interface AdminSessionBarrier {
   lastHeartbeatAt: number;
 }
 
+interface ReceiptPrintConnectionUiState {
+  checking: boolean;
+  testedAt: number | null;
+  agentOnline: boolean | null;
+  printerFound: boolean | null;
+  printers: string[];
+  agentVersion: string | null;
+  message: string | null;
+}
+
 interface StockUpdateOptions {
   useCashRegister?: boolean;
   purchaseDescription?: string;
@@ -531,6 +551,31 @@ const applyReceiptPrintPreset = (presetId: string): void => {
     window.localStorage.setItem(
       RECEIPT_PAPER_WIDTH_KEY,
       String(clampReceiptPaperWidthMm(preset.paperWidthMm))
+    );
+  } catch {
+    // ignore storage write failures
+  }
+};
+
+const readReceiptPrintModeSettings = (): ReceiptPrintModeSettings => {
+  const defaults = createDefaultReceiptPrintModeSettings();
+  if (typeof window === 'undefined') return defaults;
+  try {
+    const raw = window.localStorage.getItem(RECEIPT_PRINT_MODE_SETTINGS_STORAGE_KEY);
+    if (!raw) return defaults;
+    const parsed = JSON.parse(raw) as Partial<ReceiptPrintModeSettings>;
+    return normalizeReceiptPrintModeSettings(parsed);
+  } catch {
+    return defaults;
+  }
+};
+
+const writeReceiptPrintModeSettings = (settings: ReceiptPrintModeSettings): void => {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(
+      RECEIPT_PRINT_MODE_SETTINGS_STORAGE_KEY,
+      JSON.stringify(normalizeReceiptPrintModeSettings(settings))
     );
   } catch {
     // ignore storage write failures
@@ -2990,6 +3035,22 @@ const App: React.FC = () => {
   const [isUndoHistoryOpen, setIsUndoHistoryOpen] = useState(false);
   const [receiptPrintSettingsOpen, setReceiptPrintSettingsOpen] = useState(false);
   const [receiptPrintPresetId, setReceiptPrintPresetId] = useState<string>(() => readReceiptPrintPresetId());
+  const [receiptPrintModeSettings, setReceiptPrintModeSettings] = useState<ReceiptPrintModeSettings>(
+    () => readReceiptPrintModeSettings()
+  );
+  const [receiptPrintModeDraft, setReceiptPrintModeDraft] = useState<ReceiptPrintModeSettings>(
+    () => readReceiptPrintModeSettings()
+  );
+  const [isLocalPrintTestRunning, setIsLocalPrintTestRunning] = useState(false);
+  const [localPrintConnectionState, setLocalPrintConnectionState] = useState<ReceiptPrintConnectionUiState>({
+    checking: false,
+    testedAt: null,
+    agentOnline: null,
+    printerFound: null,
+    printers: [],
+    agentVersion: null,
+    message: null,
+  });
   const [expandedUndoGroupId, setExpandedUndoGroupId] = useState<string | null>(null);
   const [isUndoProcessing, setIsUndoProcessing] = useState(false);
   const [isCartOpen, setIsCartOpen] = useState(false);
@@ -3277,6 +3338,11 @@ const App: React.FC = () => {
     if (isUndoHistoryOpen) return;
     setReceiptPrintSettingsOpen(false);
   }, [isUndoHistoryOpen]);
+
+  useEffect(() => {
+    if (!receiptPrintSettingsOpen) return;
+    setReceiptPrintModeDraft(receiptPrintModeSettings);
+  }, [receiptPrintModeSettings, receiptPrintSettingsOpen]);
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -11144,6 +11210,88 @@ const App: React.FC = () => {
     [openReceiptPrintWindow]
   );
 
+  const saveReceiptPrintModeSettingsFromDraft = useCallback(() => {
+    const normalized = normalizeReceiptPrintModeSettings(receiptPrintModeDraft);
+    setReceiptPrintModeSettings(normalized);
+    setReceiptPrintModeDraft(normalized);
+    writeReceiptPrintModeSettings(normalized);
+    setLocalPrintConnectionState({
+      checking: false,
+      testedAt: null,
+      agentOnline: null,
+      printerFound: null,
+      printers: [],
+      agentVersion: null,
+      message: null,
+    });
+    showNotification('Configurações de impressão salvas.');
+  }, [receiptPrintModeDraft]);
+
+  const handleTestLocalPrintConnection = useCallback(async () => {
+    const normalized = normalizeReceiptPrintModeSettings(receiptPrintModeDraft);
+    if (normalized.mode !== 'WINDOWS_AGENT') {
+      showNotification('Selecione Agente local Windows para testar conexão.');
+      return;
+    }
+
+    setLocalPrintConnectionState((current) => ({
+      ...current,
+      checking: true,
+      testedAt: Date.now(),
+      message: null,
+    }));
+    const status = await testLocalPrintAgentConnection(normalized);
+    setLocalPrintConnectionState({
+      checking: false,
+      testedAt: Date.now(),
+      agentOnline: status.agentOnline,
+      printerFound: status.printerFound,
+      printers: status.printers,
+      agentVersion: status.agentVersion,
+      message: status.message,
+    });
+    if (status.ok) {
+      showNotification(
+        status.printerFound
+          ? 'Agente local conectado e impressora encontrada.'
+          : 'Agente local conectado, mas a impressora configurada não foi encontrada.'
+      );
+      return;
+    }
+    showNotification(status.message || 'Falha ao conectar com o agente local.');
+  }, [receiptPrintModeDraft]);
+
+  const handlePrintLocalTest = useCallback(async () => {
+    const normalized = normalizeReceiptPrintModeSettings(receiptPrintModeDraft);
+    if (normalized.mode !== 'WINDOWS_AGENT') {
+      showNotification('Selecione Agente local Windows para imprimir teste.');
+      return;
+    }
+    if (isLocalPrintTestRunning) return;
+
+    setIsLocalPrintTestRunning(true);
+    try {
+      const response = await printTestViaLocalAgent(normalized);
+      if (response.ok) {
+        pushOperationalEvent('PAYMENT_FLOW', 'LOCAL_PRINT_AGENT_TEST_SUCCESS', {
+          agentUrl: normalized.agentUrl,
+          printerName: normalized.printerName,
+        });
+        showNotification('Teste enviado para impressora local.');
+        return;
+      }
+      pushOperationalEvent('PAYMENT_FLOW', 'LOCAL_PRINT_AGENT_TEST_FAILED', {
+        agentUrl: normalized.agentUrl,
+        printerName: normalized.printerName,
+        code: response.code,
+        message: response.message,
+      });
+      showNotification(response.message || 'Falha ao imprimir teste local.');
+    } finally {
+      setIsLocalPrintTestRunning(false);
+    }
+  }, [isLocalPrintTestRunning, pushOperationalEvent, receiptPrintModeDraft]);
+
   const handleConfirmPaid = () => {
     if (!activeDraft) return;
     if (isConfirmingPaid) return;
@@ -11302,35 +11450,91 @@ const App: React.FC = () => {
       });
 
       const receiptPrintId = receiptPayload?.id || draftId;
-      preparedPrintWindow = prepareReceiptPrintWindow();
-      if (receiptPayload && preparedPrintWindow) {
-        setReceiptPrintPayloadOnWindow(preparedPrintWindow, receiptPayload);
+      const normalizedPrintModeSettings = normalizeReceiptPrintModeSettings(receiptPrintModeSettings);
+      const shouldUseLocalPrintAgent =
+        normalizedPrintModeSettings.mode === 'WINDOWS_AGENT' && Boolean(receiptPayload);
+      if (!shouldUseLocalPrintAgent) {
+        preparedPrintWindow = prepareReceiptPrintWindow();
+        if (receiptPayload && preparedPrintWindow) {
+          setReceiptPrintPayloadOnWindow(preparedPrintWindow, receiptPayload);
+        }
       }
       armPrintReturnFocusGuard();
       window.setTimeout(() => {
-        const openedPrintWindow = navigatePreparedReceiptWindow(preparedPrintWindow, receiptPrintId, {
-          autoPrint: false,
-        });
-        if (!openedPrintWindow) {
-          if (receiptPayload) {
-            removeReceiptPrintPayload(receiptPayload.id);
+        const openBrowserReceiptPrint = () => {
+          const openedPrintWindow = navigatePreparedReceiptWindow(preparedPrintWindow, receiptPrintId, {
+            autoPrint: false,
+          });
+          if (!openedPrintWindow) {
+            if (receiptPayload) {
+              removeReceiptPrintPayload(receiptPayload.id);
+            }
+            closePreparedReceiptWindow(preparedPrintWindow);
+            showNotification(
+              'Não foi possível abrir o cupom agora. Use o Histórico para segunda via.'
+            );
+            pushOperationalEvent('PAYMENT_FLOW', 'PAID_SYNC_PRINT_OPEN_FAILED', {
+              draftId,
+              receiptPrintId,
+              jobId: queuedJob.id,
+            });
+            return false;
           }
-          closePreparedReceiptWindow(preparedPrintWindow);
-          showNotification(
-            'Não foi possível abrir o cupom agora. Use o Histórico para segunda via.'
-          );
-          pushOperationalEvent('PAYMENT_FLOW', 'PAID_SYNC_PRINT_OPEN_FAILED', {
+          pushOperationalEvent('PAYMENT_FLOW', 'PAID_SYNC_PRINT_OPENED', {
             draftId,
             receiptPrintId,
             jobId: queuedJob.id,
           });
+          return true;
+        };
+
+        if (shouldUseLocalPrintAgent && receiptPayload) {
+          void (async () => {
+            const localPrintResult = await printReceiptViaLocalAgent(
+              normalizedPrintModeSettings,
+              receiptPayload.receipt
+            );
+            if (localPrintResult.ok) {
+              closePreparedReceiptWindow(preparedPrintWindow);
+              pushOperationalEvent('PAYMENT_FLOW', 'LOCAL_PRINT_AGENT_RECEIPT_SUCCESS', {
+                draftId,
+                receiptPrintId,
+                jobId: queuedJob.id,
+                agentUrl: normalizedPrintModeSettings.agentUrl,
+                printerName: normalizedPrintModeSettings.printerName,
+              });
+              return;
+            }
+
+            pushOperationalEvent('PAYMENT_FLOW', 'LOCAL_PRINT_AGENT_RECEIPT_FAILED', {
+              draftId,
+              receiptPrintId,
+              jobId: queuedJob.id,
+              agentUrl: normalizedPrintModeSettings.agentUrl,
+              printerName: normalizedPrintModeSettings.printerName,
+              code: localPrintResult.code,
+              message: localPrintResult.message,
+              fallbackToBrowser: normalizedPrintModeSettings.fallbackToBrowser,
+            });
+
+            if (!normalizedPrintModeSettings.fallbackToBrowser) {
+              closePreparedReceiptWindow(preparedPrintWindow);
+              showNotification(
+                localPrintResult.message ||
+                  'Falha na impressão local. Use Histórico para segunda via.'
+              );
+              return;
+            }
+
+            if (!openBrowserReceiptPrint()) {
+              return;
+            }
+            showNotification('Impressão local indisponível. Usando impressão do navegador.');
+          })();
           return;
         }
-        pushOperationalEvent('PAYMENT_FLOW', 'PAID_SYNC_PRINT_OPENED', {
-          draftId,
-          receiptPrintId,
-          jobId: queuedJob.id,
-        });
+
+        openBrowserReceiptPrint();
       }, 0);
     } catch (error) {
       reportErrorMonitorEvent({
@@ -11455,7 +11659,7 @@ const App: React.FC = () => {
     }
   };
 
-  const handlePrintReceiptByGroup = (groupId: string) => {
+  const handlePrintReceiptByGroup = async (groupId: string) => {
     const targetGroup = recentUndoGroups.find((group) => group.id === groupId);
     if (!targetGroup) {
       showNotification('Pedido não encontrado para impressão.');
@@ -11467,6 +11671,44 @@ const App: React.FC = () => {
     if (!receiptId) {
       showNotification('Pedido sem referência de impressão.');
       return;
+    }
+
+    const normalizedPrintModeSettings = normalizeReceiptPrintModeSettings(receiptPrintModeSettings);
+    if (normalizedPrintModeSettings.mode === 'WINDOWS_AGENT') {
+      const payload = consumeReceiptPrintPayload(receiptId);
+      if (payload) {
+        const localPrintResult = await printReceiptViaLocalAgent(
+          normalizedPrintModeSettings,
+          payload.receipt
+        );
+        if (localPrintResult.ok) {
+          pushOperationalEvent('PAYMENT_FLOW', 'LOCAL_PRINT_AGENT_SECOND_COPY_SUCCESS', {
+            receiptId,
+            groupId,
+            agentUrl: normalizedPrintModeSettings.agentUrl,
+            printerName: normalizedPrintModeSettings.printerName,
+          });
+          showNotification('Cupom enviado para impressão local.');
+          return;
+        }
+
+        pushOperationalEvent('PAYMENT_FLOW', 'LOCAL_PRINT_AGENT_SECOND_COPY_FAILED', {
+          receiptId,
+          groupId,
+          code: localPrintResult.code,
+          message: localPrintResult.message,
+          fallbackToBrowser: normalizedPrintModeSettings.fallbackToBrowser,
+        });
+
+        if (!normalizedPrintModeSettings.fallbackToBrowser) {
+          showNotification(localPrintResult.message || 'Falha ao imprimir segunda via local.');
+          return;
+        }
+        showNotification('Impressão local indisponível. Abrindo segunda via no navegador.');
+      } else if (!normalizedPrintModeSettings.fallbackToBrowser) {
+        showNotification('Payload da segunda via não encontrado para impressão local.');
+        return;
+      }
     }
 
     armPrintReturnFocusGuard();
@@ -13369,6 +13611,157 @@ const App: React.FC = () => {
                     </button>
                   ))}
                 </div>
+                <div className="mt-3 border-t border-slate-700 pt-3 space-y-3">
+                  <p className="text-[10px] font-black uppercase tracking-widest text-slate-300">
+                    Impressão local (Windows)
+                  </p>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                    <label className="text-[10px] font-black uppercase tracking-widest text-slate-300 flex flex-col gap-1">
+                      Modo de impressão
+                      <select
+                        value={receiptPrintModeDraft.mode}
+                        onChange={(event) => {
+                          setReceiptPrintModeDraft((current) =>
+                            normalizeReceiptPrintModeSettings({
+                              ...current,
+                              mode:
+                                event.target.value === 'WINDOWS_AGENT'
+                                  ? 'WINDOWS_AGENT'
+                                  : 'BROWSER',
+                            })
+                          );
+                        }}
+                        className="bg-slate-900 border border-slate-600 rounded-xl px-3 py-2 text-[11px] font-bold text-slate-100"
+                      >
+                        <option value="BROWSER">Navegador (padrão)</option>
+                        <option value="WINDOWS_AGENT">Agente local Windows</option>
+                      </select>
+                    </label>
+                    <label className="text-[10px] font-black uppercase tracking-widest text-slate-300 flex flex-col gap-1">
+                      Nome da impressora
+                      <input
+                        value={receiptPrintModeDraft.printerName}
+                        onChange={(event) =>
+                          setReceiptPrintModeDraft((current) => ({
+                            ...current,
+                            printerName: event.target.value,
+                          }))
+                        }
+                        placeholder="EPSON TM-T20"
+                        className="bg-slate-900 border border-slate-600 rounded-xl px-3 py-2 text-[11px] font-bold text-slate-100 placeholder:text-slate-500"
+                      />
+                    </label>
+                  </div>
+                  <label className="text-[10px] font-black uppercase tracking-widest text-slate-300 flex flex-col gap-1">
+                    URL do agente local
+                    <input
+                      value={receiptPrintModeDraft.agentUrl}
+                      onChange={(event) =>
+                        setReceiptPrintModeDraft((current) => ({
+                          ...current,
+                          agentUrl: event.target.value,
+                        }))
+                      }
+                      placeholder="http://127.0.0.1:18181"
+                      className="bg-slate-900 border border-slate-600 rounded-xl px-3 py-2 text-[11px] font-bold text-slate-100 placeholder:text-slate-500"
+                    />
+                  </label>
+                  <label className="text-[10px] font-black uppercase tracking-widest text-slate-300 flex flex-col gap-1">
+                    Token do agente (opcional)
+                    <input
+                      value={receiptPrintModeDraft.agentToken}
+                      onChange={(event) =>
+                        setReceiptPrintModeDraft((current) => ({
+                          ...current,
+                          agentToken: event.target.value,
+                        }))
+                      }
+                      placeholder="x-local-print-token"
+                      className="bg-slate-900 border border-slate-600 rounded-xl px-3 py-2 text-[11px] font-bold text-slate-100 placeholder:text-slate-500"
+                    />
+                  </label>
+                  <label className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-300">
+                    <input
+                      type="checkbox"
+                      checked={receiptPrintModeDraft.fallbackToBrowser}
+                      onChange={(event) =>
+                        setReceiptPrintModeDraft((current) => ({
+                          ...current,
+                          fallbackToBrowser: event.target.checked,
+                        }))
+                      }
+                      className="h-4 w-4"
+                    />
+                    Usar navegador como fallback
+                  </label>
+                  <div className="flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={saveReceiptPrintModeSettingsFromDraft}
+                      className="qb-btn-touch border rounded-xl px-3 py-2 text-[10px] font-black uppercase tracking-widest bg-emerald-600 text-white border-emerald-500 hover:bg-emerald-700"
+                    >
+                      Salvar
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void handleTestLocalPrintConnection();
+                      }}
+                      disabled={localPrintConnectionState.checking}
+                      className="qb-btn-touch border rounded-xl px-3 py-2 text-[10px] font-black uppercase tracking-widest bg-slate-900 text-slate-100 border-slate-600 hover:border-slate-300 disabled:opacity-50"
+                    >
+                      {localPrintConnectionState.checking ? 'Testando...' : 'Testar conexão'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void handlePrintLocalTest();
+                      }}
+                      disabled={isLocalPrintTestRunning}
+                      className="qb-btn-touch border rounded-xl px-3 py-2 text-[10px] font-black uppercase tracking-widest bg-blue-700 text-white border-blue-600 hover:bg-blue-800 disabled:opacity-50"
+                    >
+                      {isLocalPrintTestRunning ? 'Enviando...' : 'Imprimir teste'}
+                    </button>
+                  </div>
+                  <div className="rounded-xl border border-slate-700 bg-slate-900/70 px-3 py-2 space-y-1">
+                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-300">
+                      Status
+                    </p>
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+                      Agente:{' '}
+                      {localPrintConnectionState.agentOnline === null
+                        ? '--'
+                        : localPrintConnectionState.agentOnline
+                          ? 'online'
+                          : 'offline'}
+                      {' • '}Impressora:{' '}
+                      {localPrintConnectionState.printerFound === null
+                        ? '--'
+                        : localPrintConnectionState.printerFound
+                          ? 'ok'
+                          : 'não encontrada'}
+                    </p>
+                    {localPrintConnectionState.agentVersion && (
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+                        Versão do agente: {localPrintConnectionState.agentVersion}
+                      </p>
+                    )}
+                    {localPrintConnectionState.printers.length > 0 && (
+                      <p className="text-[10px] font-bold text-slate-400">
+                        Impressoras detectadas: {localPrintConnectionState.printers.join(', ')}
+                      </p>
+                    )}
+                    {localPrintConnectionState.message && (
+                      <p className="text-[10px] font-bold text-amber-300">
+                        Último status: {localPrintConnectionState.message}
+                      </p>
+                    )}
+                    <p className="text-[10px] font-bold text-slate-500">
+                      Modo Agente local envia o cupom para o serviço Windows em 127.0.0.1 sem abrir
+                      diálogo nativo de impressão.
+                    </p>
+                  </div>
+                </div>
               </div>
             )}
             <div className="p-4 max-h-[65vh] overflow-y-auto space-y-2 bg-slate-50">
@@ -13452,7 +13845,7 @@ const App: React.FC = () => {
                         <div className="pt-1 flex justify-end gap-2">
                           <button
                             onClick={() => {
-                              handlePrintReceiptByGroup(group.id);
+                              void handlePrintReceiptByGroup(group.id);
                             }}
                             className="qb-btn-touch bg-blue-600 text-white px-4 py-2 rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-blue-700 transition-all active:scale-95 whitespace-nowrap"
                             title="Imprimir cupom do pedido completo"
