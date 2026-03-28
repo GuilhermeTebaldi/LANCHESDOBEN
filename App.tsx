@@ -2625,13 +2625,13 @@ const DRAFT_PAYMENT_TRANSITION_GRACE_MS = 12_000;
 const DRAFT_REOPEN_CONFIRMATION_MS = 2_500;
 const DRAFT_TERMINAL_VISUAL_LOCK_MS = 45_000;
 const PAID_SYNC_QUEUE_PREVIEW_LIMIT = 6;
-const PENDING_DRAFT_BACKGROUND_SYNC_DEBOUNCE_MS = 1800;
+const PENDING_DRAFT_BACKGROUND_SYNC_DEBOUNCE_MS = 1200;
 const PENDING_DRAFT_BACKGROUND_SYNC_SWEEP_MS = 10000;
 const PENDING_DRAFT_BACKGROUND_SYNC_RETRY_BASE_MS = 1800;
 const PENDING_DRAFT_BACKGROUND_SYNC_RETRY_MAX_MS = 45000;
 const PENDING_DRAFT_BACKGROUND_SYNC_RETRY_JITTER = 0.2;
 const MAX_CONCURRENT_COMMANDS = 2;
-const PENDING_PAID_SYNC_MAX_WORKERS = 1;
+const PENDING_PAID_SYNC_MAX_WORKERS = 2;
 const BACKEND_OPERATION_TIMEOUT_MS = 25_000;
 const PENDING_PAID_SYNC_QUEUE_MAX_SIZE = 50;
 const PENDING_DRAFT_ADDS_MAX_SIZE = 100;
@@ -8309,10 +8309,7 @@ const App: React.FC = () => {
             silentErrorNotification: true,
             errorSink,
             failFastOnVersionConflict: true,
-            skipSnapshotApply: true,
             suppressOperationalEvents: true,
-            deferVisiblePersistence: true,
-            skipVisibleStateSync: true,
             skipVisibleQueueHealthLog: true,
           }
         );
@@ -9862,11 +9859,16 @@ const App: React.FC = () => {
         const visiblePendingCount = countVisiblePendingDraftAdds(visiblePendingEntries);
         const recoveryPendingCount = countVisiblePendingDraftAdds(recoveryPendingEntries);
         recordFlushPhaseDuration('flushPendingReadMs', performance.now() - flushPendingReadStartedAt);
-        const shouldFlushDraftAdds = visiblePendingCount > 0 || recoveryPendingCount > 0;
+        const shouldFlushDraftAdds =
+          !currentServerDraft ||
+          currentServerDraft.status === 'DRAFT' ||
+          visiblePendingCount > 0 ||
+          recoveryPendingCount > 0;
         if (shouldFlushDraftAdds) {
           const flushPendingDraftAddsStartedAt = performance.now();
           try {
-            const shouldFlushVisibleDraftAdds = visiblePendingCount > 0;
+            const shouldFlushVisibleDraftAdds =
+              !currentServerDraft || currentServerDraft.status === 'DRAFT' || visiblePendingCount > 0;
             if (shouldFlushVisibleDraftAdds) {
               const draftAddsErrorSink: RunCommandErrorSink = {};
               const flushVisibleStartedAt = performance.now();
