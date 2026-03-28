@@ -493,6 +493,7 @@ interface ReceiptPrintConnectionUiState {
   printerFound: boolean | null;
   printers: string[];
   selectedPrinterName: string | null;
+  autoStartEnabled: boolean | null;
   agentVersion: string | null;
   message: string | null;
 }
@@ -3053,6 +3054,7 @@ const App: React.FC = () => {
     printerFound: null,
     printers: [],
     selectedPrinterName: null,
+    autoStartEnabled: null,
     agentVersion: null,
     message: null,
   });
@@ -11227,6 +11229,7 @@ const App: React.FC = () => {
       printerFound: null,
       printers: [],
       selectedPrinterName: null,
+      autoStartEnabled: null,
       agentVersion: null,
       message: null,
     });
@@ -11254,6 +11257,7 @@ const App: React.FC = () => {
       printerFound: status.printerFound,
       printers: status.printers,
       selectedPrinterName: status.selectedPrinterName,
+      autoStartEnabled: status.autoStartEnabled,
       agentVersion: status.agentVersion,
       message: status.message,
     });
@@ -11319,6 +11323,7 @@ const App: React.FC = () => {
       agentOnline: detected.agentOnline,
       agentVersion: detected.agentVersion,
       selectedPrinterName: detected.selectedPrinterName,
+      autoStartEnabled: detected.autoStartEnabled,
       message: detected.message,
     }));
     if (detected.ok) {
@@ -11347,6 +11352,7 @@ const App: React.FC = () => {
       testedAt: Date.now(),
       printers: listed.printers,
       selectedPrinterName: listed.selectedPrinterName,
+      autoStartEnabled: listed.autoStartEnabled,
       message: listed.message,
     }));
     if (listed.ok) {
@@ -13735,34 +13741,47 @@ const App: React.FC = () => {
                       />
                     </label>
                   </div>
-                  <label className="text-[10px] font-black uppercase tracking-widest text-slate-300 flex flex-col gap-1">
-                    URL do agente local
-                    <input
-                      value={receiptPrintModeDraft.agentUrl}
-                      onChange={(event) =>
-                        setReceiptPrintModeDraft((current) => ({
-                          ...current,
-                          agentUrl: event.target.value,
-                        }))
-                      }
-                      placeholder="http://127.0.0.1:18181"
-                      className="bg-slate-900 border border-slate-600 rounded-xl px-3 py-2 text-[11px] font-bold text-slate-100 placeholder:text-slate-500"
-                    />
-                  </label>
-                  <label className="text-[10px] font-black uppercase tracking-widest text-slate-300 flex flex-col gap-1">
-                    Token do agente (opcional)
-                    <input
-                      value={receiptPrintModeDraft.agentToken}
-                      onChange={(event) =>
-                        setReceiptPrintModeDraft((current) => ({
-                          ...current,
-                          agentToken: event.target.value,
-                        }))
-                      }
-                      placeholder="x-local-print-token"
-                      className="bg-slate-900 border border-slate-600 rounded-xl px-3 py-2 text-[11px] font-bold text-slate-100 placeholder:text-slate-500"
-                    />
-                  </label>
+                  {receiptPrintModeDraft.mode === 'BROWSER' && (
+                    <p className="text-[10px] font-bold text-slate-400">
+                      Modo Navegador ativo: impressão segue comportamento atual. Ative Agente local
+                      Windows apenas quando o agente estiver instalado na máquina.
+                    </p>
+                  )}
+                  <details className="rounded-xl border border-slate-700 bg-slate-900/50 px-3 py-2">
+                    <summary className="cursor-pointer text-[10px] font-black uppercase tracking-widest text-slate-300">
+                      Configuração avançada (normalmente não precisa mexer)
+                    </summary>
+                    <div className="mt-2 space-y-2">
+                      <label className="text-[10px] font-black uppercase tracking-widest text-slate-300 flex flex-col gap-1">
+                        URL do agente local
+                        <input
+                          value={receiptPrintModeDraft.agentUrl}
+                          onChange={(event) =>
+                            setReceiptPrintModeDraft((current) => ({
+                              ...current,
+                              agentUrl: event.target.value,
+                            }))
+                          }
+                          placeholder="http://127.0.0.1:18181"
+                          className="bg-slate-900 border border-slate-600 rounded-xl px-3 py-2 text-[11px] font-bold text-slate-100 placeholder:text-slate-500"
+                        />
+                      </label>
+                      <label className="text-[10px] font-black uppercase tracking-widest text-slate-300 flex flex-col gap-1">
+                        Token do agente (opcional)
+                        <input
+                          value={receiptPrintModeDraft.agentToken}
+                          onChange={(event) =>
+                            setReceiptPrintModeDraft((current) => ({
+                              ...current,
+                              agentToken: event.target.value,
+                            }))
+                          }
+                          placeholder="x-local-print-token"
+                          className="bg-slate-900 border border-slate-600 rounded-xl px-3 py-2 text-[11px] font-bold text-slate-100 placeholder:text-slate-500"
+                        />
+                      </label>
+                    </div>
+                  </details>
                   <label className="flex items-center gap-2 text-[10px] font-black uppercase tracking-widest text-slate-300">
                     <input
                       type="checkbox"
@@ -13863,6 +13882,12 @@ const App: React.FC = () => {
                         Impressora padrão no agente: {localPrintConnectionState.selectedPrinterName}
                       </p>
                     )}
+                    {localPrintConnectionState.autoStartEnabled !== null && (
+                      <p className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
+                        Auto-início no Windows:{' '}
+                        {localPrintConnectionState.autoStartEnabled ? 'ligado' : 'desligado'}
+                      </p>
+                    )}
                     {localPrintConnectionState.printers.length > 0 && (
                       <p className="text-[10px] font-bold text-slate-400">
                         Impressoras detectadas: {localPrintConnectionState.printers.join(', ')}
@@ -13873,6 +13898,10 @@ const App: React.FC = () => {
                         Último status: {localPrintConnectionState.message}
                       </p>
                     )}
+                    <p className="text-[10px] font-bold text-slate-400">
+                      Fallback navegador:{' '}
+                      {receiptPrintModeDraft.fallbackToBrowser ? 'ativado' : 'desativado'}
+                    </p>
                     <p className="text-[10px] font-bold text-slate-500">
                       Modo Agente local envia o cupom para o serviço Windows em 127.0.0.1 sem abrir
                       diálogo nativo de impressão.

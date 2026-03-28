@@ -16,6 +16,7 @@ export interface LocalPrintConnectionStatus {
   printerFound: boolean;
   printers: string[];
   selectedPrinterName: string | null;
+  autoStartEnabled: boolean | null;
   agentVersion: string | null;
   message: string | null;
 }
@@ -32,6 +33,7 @@ export interface LocalPrintAgentDetectResult {
   agentOnline: boolean;
   agentVersion: string | null;
   selectedPrinterName: string | null;
+  autoStartEnabled: boolean | null;
   message: string | null;
 }
 
@@ -39,6 +41,7 @@ export interface LocalPrintAgentPrintersResult {
   ok: boolean;
   printers: string[];
   selectedPrinterName: string | null;
+  autoStartEnabled: boolean | null;
   message: string | null;
 }
 
@@ -200,6 +203,7 @@ export const testLocalPrintAgentConnection = async (
       printerFound: false,
       printers: [],
       selectedPrinterName: null,
+      autoStartEnabled: null,
       agentVersion: health.agentVersion,
       message: health.message || 'Agente local offline.',
     };
@@ -213,6 +217,7 @@ export const testLocalPrintAgentConnection = async (
       printerFound: false,
       printers: [],
       selectedPrinterName: health.selectedPrinterName,
+      autoStartEnabled: health.autoStartEnabled,
       agentVersion: health.agentVersion,
       message: printersResponse.message || 'Falha ao consultar impressoras no agente local.',
     };
@@ -229,6 +234,7 @@ export const testLocalPrintAgentConnection = async (
     printerFound,
     printers: printersData,
     selectedPrinterName: printersResponse.selectedPrinterName || health.selectedPrinterName,
+    autoStartEnabled: printersResponse.autoStartEnabled ?? health.autoStartEnabled,
     agentVersion: health.agentVersion,
     message: printerFound ? null : 'Impressora configurada não foi encontrada no agente.',
   };
@@ -247,6 +253,7 @@ export const detectLocalPrintAgent = async (
       agentOnline: false,
       agentVersion: null,
       selectedPrinterName: null,
+      autoStartEnabled: null,
       message: health.message || 'Agente local offline.',
     };
   }
@@ -257,6 +264,10 @@ export const detectLocalPrintAgent = async (
     agentVersion:
       typeof health.data?.version === 'string' ? (health.data.version as string) : null,
     selectedPrinterName: normalizeMaybeText(health.data?.selectedPrinterName),
+    autoStartEnabled:
+      typeof health.data?.autoStartEnabled === 'boolean'
+        ? (health.data.autoStartEnabled as boolean)
+        : null,
     message: null,
   };
 };
@@ -273,6 +284,7 @@ export const listLocalAgentPrinters = async (
       ok: false,
       printers: [],
       selectedPrinterName: null,
+      autoStartEnabled: null,
       message: printersResponse.message || 'Falha ao listar impressoras no agente local.',
     };
   }
@@ -281,6 +293,10 @@ export const listLocalAgentPrinters = async (
     ok: true,
     printers: ensureArrayOfStrings(printersResponse.data?.printers),
     selectedPrinterName: normalizeMaybeText(printersResponse.data?.selectedPrinterName),
+    autoStartEnabled:
+      typeof printersResponse.data?.autoStartEnabled === 'boolean'
+        ? (printersResponse.data.autoStartEnabled as boolean)
+        : null,
     message: null,
   };
 };
