@@ -16,7 +16,12 @@ interface CleaningMaterialsManagerProps {
   onUpdateStock: (materialId: string, amount: number) => void;
 }
 
-type CleaningTab = 'materiais' | 'estoque';
+type CleaningTab = 'materiais' | 'estoque' | 'impressao';
+
+const WINDOWS_PRINT_AGENT_SETUP_URL =
+  'https://github.com/GuilhermeTebaldi/LANCHESDOBEN/releases/download/print-agent-v1.0.0/XBurgerPrintAgent-Setup.exe';
+const WINDOWS_PRINT_AGENT_RELEASE_URL =
+  'https://github.com/GuilhermeTebaldi/LANCHESDOBEN/releases/tag/print-agent-v1.0.0';
 
 interface MaterialFormState {
   name: string;
@@ -232,6 +237,14 @@ const CleaningMaterialsManager: React.FC<CleaningMaterialsManagerProps> = ({
             }`}
           >
             ESTOQUE
+          </button>
+          <button
+            onClick={() => setActiveTab('impressao')}
+            className={`qb-btn-touch px-4 py-2 rounded-xl text-[10px] font-black uppercase transition-all ${
+              activeTab === 'impressao' ? 'bg-white text-slate-900 shadow-sm' : 'text-slate-500 hover:bg-slate-300'
+            }`}
+          >
+            IMPRESSAO
           </button>
         </div>
       </div>
@@ -469,6 +482,57 @@ const CleaningMaterialsManager: React.FC<CleaningMaterialsManagerProps> = ({
                 </table>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {activeTab === 'impressao' && (
+        <div className="space-y-6">
+          <div className="bg-white rounded-[32px] p-6 border-2 border-slate-100 shadow-sm">
+            <h3 className="text-xl font-black text-slate-900 uppercase tracking-tight">
+              AGENTE LOCAL DE IMPRESSAO (WINDOWS)
+            </h3>
+            <p className="text-[11px] font-bold text-slate-500 mt-1">
+              Baixe e instale uma vez no notebook Windows. Depois disso, configure no PDV em
+              ADMIN {'>'} Impressao.
+            </p>
+
+            <div className="mt-5 flex flex-wrap gap-2">
+              <a
+                href={WINDOWS_PRINT_AGENT_SETUP_URL}
+                target="_blank"
+                rel="noreferrer"
+                className="qb-btn-touch inline-flex items-center gap-2 bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded-xl font-black text-[10px] uppercase tracking-widest shadow-lg"
+              >
+                Baixar instalador (.exe)
+              </a>
+              <a
+                href={WINDOWS_PRINT_AGENT_RELEASE_URL}
+                target="_blank"
+                rel="noreferrer"
+                className="qb-btn-touch inline-flex items-center gap-2 bg-slate-900 hover:bg-slate-800 text-white px-4 py-2 rounded-xl font-black text-[10px] uppercase tracking-widest"
+              >
+                Ver pagina de downloads
+              </a>
+            </div>
+          </div>
+
+          <div className="bg-white rounded-[32px] p-6 border-2 border-slate-100 shadow-sm">
+            <h4 className="text-lg font-black text-slate-900 uppercase tracking-tight">
+              Como o cliente instala
+            </h4>
+            <ol className="mt-4 space-y-2 text-sm font-bold text-slate-700 list-decimal pl-5">
+              <li>Baixe e execute o arquivo XBurgerPrintAgent-Setup.exe.</li>
+              <li>Clique em Avancar, Avancar e Concluir.</li>
+              <li>Abra o painel local em http://127.0.0.1:18181/ui.</li>
+              <li>Selecione a impressora EPSON TM-T20 e salve.</li>
+              <li>No PDV, entre em ADMIN {'>'} Impressao.</li>
+              <li>Ative Agente local Windows e salve.</li>
+            </ol>
+            <p className="mt-4 text-[11px] font-bold text-slate-500">
+              Se o agente estiver offline, o sistema continua com fallback para impressao do
+              navegador.
+            </p>
           </div>
         </div>
       )}
