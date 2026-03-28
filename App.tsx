@@ -7827,7 +7827,6 @@ const App: React.FC = () => {
         failFastOnVersionConflict?: boolean;
         source?: PendingDraftAddsSource;
         skipSnapshotApply?: boolean;
-        abortIfDraftLocked?: boolean;
         onLockWaitMs?: (durationMs: number) => void;
         onPhaseTiming?: (phase: PendingDraftFlushPhase, durationMs: number) => void;
         suppressOperationalEvents?: boolean;
@@ -7897,18 +7896,6 @@ const App: React.FC = () => {
         }
 
         while (true) {
-        if (source === 'visible' && options.abortIfDraftLocked && isDraftLifecycleLocked(draftId)) {
-          emitFlushOperationalEvent(
-            'COMMAND_SKIPPED_OBSOLETE',
-            'Background flush interrompido porque o draft entrou em lock terminal.',
-            {
-              draftId,
-              source,
-              stage: resolveDraftLifecycleStage(draftId),
-            }
-          );
-          return true;
-        }
         const loopReadStartedAt = performance.now();
         const currentPendingAdds =
           source === 'recovery'
@@ -8219,7 +8206,6 @@ const App: React.FC = () => {
       isDraftLifecycleLocked,
       products,
       reconcileCancelledPendingDraftAddIntent,
-      resolveDraftLifecycleStage,
       updatePendingDraftAddInSource,
       runCommandWithSync,
       showNotification,
@@ -8237,7 +8223,6 @@ const App: React.FC = () => {
         failFastOnVersionConflict?: boolean;
         source?: PendingDraftAddsSource;
         skipSnapshotApply?: boolean;
-        abortIfDraftLocked?: boolean;
         onLockWaitMs?: (durationMs: number) => void;
         onPhaseTiming?: (phase: PendingDraftFlushPhase, durationMs: number) => void;
         suppressOperationalEvents?: boolean;
@@ -8316,7 +8301,6 @@ const App: React.FC = () => {
             silentErrorNotification: true,
             errorSink,
             failFastOnVersionConflict: true,
-            abortIfDraftLocked: true,
           }
         );
         if (ok) {
