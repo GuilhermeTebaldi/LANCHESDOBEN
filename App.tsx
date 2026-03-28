@@ -105,6 +105,7 @@ const AUTO_UPDATE_CHECK_INTERVAL_MS = 45_000;
 const AUTO_UPDATE_FORCE_RELOAD_AFTER_MS = 10 * 60 * 1000;
 const OPS_CLIENT_INSTANCE_KEY = 'qb_ops_client_instance_v1';
 const OPS_REMOTE_EVENTS_POLL_INTERVAL_MS = 12_000;
+const OPS_EVENT_LOG_UI_FLUSH_DEBOUNCE_MS = 350;
 const PRINT_RETURN_FOCUS_GUARD_MS = 1800;
 
 type SaleRegisterCommand = Extract<StateCommand, { type: 'SALE_REGISTER' }>;
@@ -214,6 +215,13 @@ interface RunCommandErrorSink {
   statusCode?: number;
 }
 
+interface OperationalEventTiming {
+  applyStateMs: number;
+  persistDispatchMs: number;
+  reportDispatchMs: number;
+  totalMs: number;
+}
+
 interface RunCommandOptions {
   skipOfflineQueue?: boolean;
   silentSuccessNotification?: boolean;
@@ -306,6 +314,14 @@ interface PaymentFlowTelemetryEntry {
   confirmPostCommandApplyMs: number;
   confirmOpsMs: number;
   confirmFailureHandlingMs: number;
+  stateRefreshEmptyDraftCheckMs: number;
+  stateRefreshAfterFlushMs: number;
+  stateRefreshBeforeFinalizeMs: number;
+  pOpsBackendSentMs: number;
+  pOpsBackendAckMs: number;
+  pOpsEventStateMs: number;
+  pOpsEventPersistMs: number;
+  pOpsEventReportMs: number;
   retries: number;
   hadRecovery: boolean;
   hadReconciliation: boolean;
@@ -355,6 +371,16 @@ interface PaymentFlowTelemetryRecord {
   confirmOpsMs: number | null;
   confirmFailureHandlingMs: number | null;
   confirmOtherMs: number | null;
+  stateRefreshEmptyDraftCheckMs: number | null;
+  stateRefreshAfterFlushMs: number | null;
+  stateRefreshBeforeFinalizeMs: number | null;
+  stateRefreshOtherMs: number | null;
+  pOpsBackendSentMs: number | null;
+  pOpsBackendAckMs: number | null;
+  pOpsEventStateMs: number | null;
+  pOpsEventPersistMs: number | null;
+  pOpsEventReportMs: number | null;
+  pOpsOtherMs: number | null;
   clickToBackendConfirmMs: number | null;
   retries: number;
   hadRecovery: boolean;
@@ -2011,6 +2037,16 @@ const normalizePaymentFlowTelemetryRecord = (
   const confirmOpsRaw = Number(source.confirmOpsMs);
   const confirmFailureHandlingRaw = Number(source.confirmFailureHandlingMs);
   const confirmOtherRaw = Number(source.confirmOtherMs);
+  const stateRefreshEmptyDraftCheckRaw = Number(source.stateRefreshEmptyDraftCheckMs);
+  const stateRefreshAfterFlushRaw = Number(source.stateRefreshAfterFlushMs);
+  const stateRefreshBeforeFinalizeRaw = Number(source.stateRefreshBeforeFinalizeMs);
+  const stateRefreshOtherRaw = Number(source.stateRefreshOtherMs);
+  const pOpsBackendSentRaw = Number(source.pOpsBackendSentMs);
+  const pOpsBackendAckRaw = Number(source.pOpsBackendAckMs);
+  const pOpsEventStateRaw = Number(source.pOpsEventStateMs);
+  const pOpsEventPersistRaw = Number(source.pOpsEventPersistMs);
+  const pOpsEventReportRaw = Number(source.pOpsEventReportMs);
+  const pOpsOtherRaw = Number(source.pOpsOtherMs);
   const clickToBackendConfirmRaw = Number(source.clickToBackendConfirmMs);
   const retriesRaw = Number(source.retries);
   const timestamp =
@@ -2157,6 +2193,44 @@ const normalizePaymentFlowTelemetryRecord = (
         : null,
     confirmOtherMs:
       Number.isFinite(confirmOtherRaw) && confirmOtherRaw >= 0 ? Math.floor(confirmOtherRaw) : null,
+    stateRefreshEmptyDraftCheckMs:
+      Number.isFinite(stateRefreshEmptyDraftCheckRaw) && stateRefreshEmptyDraftCheckRaw >= 0
+        ? Math.floor(stateRefreshEmptyDraftCheckRaw)
+        : null,
+    stateRefreshAfterFlushMs:
+      Number.isFinite(stateRefreshAfterFlushRaw) && stateRefreshAfterFlushRaw >= 0
+        ? Math.floor(stateRefreshAfterFlushRaw)
+        : null,
+    stateRefreshBeforeFinalizeMs:
+      Number.isFinite(stateRefreshBeforeFinalizeRaw) && stateRefreshBeforeFinalizeRaw >= 0
+        ? Math.floor(stateRefreshBeforeFinalizeRaw)
+        : null,
+    stateRefreshOtherMs:
+      Number.isFinite(stateRefreshOtherRaw) && stateRefreshOtherRaw >= 0
+        ? Math.floor(stateRefreshOtherRaw)
+        : null,
+    pOpsBackendSentMs:
+      Number.isFinite(pOpsBackendSentRaw) && pOpsBackendSentRaw >= 0
+        ? Math.floor(pOpsBackendSentRaw)
+        : null,
+    pOpsBackendAckMs:
+      Number.isFinite(pOpsBackendAckRaw) && pOpsBackendAckRaw >= 0
+        ? Math.floor(pOpsBackendAckRaw)
+        : null,
+    pOpsEventStateMs:
+      Number.isFinite(pOpsEventStateRaw) && pOpsEventStateRaw >= 0
+        ? Math.floor(pOpsEventStateRaw)
+        : null,
+    pOpsEventPersistMs:
+      Number.isFinite(pOpsEventPersistRaw) && pOpsEventPersistRaw >= 0
+        ? Math.floor(pOpsEventPersistRaw)
+        : null,
+    pOpsEventReportMs:
+      Number.isFinite(pOpsEventReportRaw) && pOpsEventReportRaw >= 0
+        ? Math.floor(pOpsEventReportRaw)
+        : null,
+    pOpsOtherMs:
+      Number.isFinite(pOpsOtherRaw) && pOpsOtherRaw >= 0 ? Math.floor(pOpsOtherRaw) : null,
     clickToBackendConfirmMs:
       Number.isFinite(clickToBackendConfirmRaw) && clickToBackendConfirmRaw >= 0
         ? Math.floor(clickToBackendConfirmRaw)
@@ -2761,6 +2835,8 @@ const App: React.FC = () => {
   const paymentFlowTelemetryByDraftRef = useRef<Map<string, PaymentFlowTelemetryEntry>>(new Map());
   const paymentFlowTelemetryRecentRef = useRef<PaymentFlowTelemetryRecord[]>([]);
   const operationalEventLogRef = useRef<OperationalEventLogEntry[]>([]);
+  const operationalEventUiFlushTimerRef = useRef<number | null>(null);
+  const isTechnicalPanelOpenRef = useRef(false);
   const operationalRemoteEventLogRef = useRef<OperationalEventLogEntry[]>([]);
   const opsClientInstanceIdRef = useRef<string>(readOrCreateOpsClientInstanceId());
   const optimisticRemovedDraftItemsRef = useRef<Map<string, Set<string>>>(new Map());
@@ -2863,6 +2939,10 @@ const App: React.FC = () => {
   const [optimisticRemovedDraftItemsRevision, setOptimisticRemovedDraftItemsRevision] = useState(0);
   const [draftLifecycleRevision, setDraftLifecycleRevision] = useState(0);
   const [isTechnicalPanelOpen, setIsTechnicalPanelOpen] = useState(false);
+
+  useEffect(() => {
+    isTechnicalPanelOpenRef.current = isTechnicalPanelOpen;
+  }, [isTechnicalPanelOpen]);
   
   const [isAddProductModalOpen, setIsAddProductModalOpen] = useState(false);
   const [isAddIngredientModalOpen, setIsAddIngredientModalOpen] = useState(false);
@@ -3386,12 +3466,24 @@ const App: React.FC = () => {
     setOperationalEventLog(merged);
   }, []);
 
+  const scheduleOperationalEventLogUiFlush = useCallback(
+    (delayMs = OPS_EVENT_LOG_UI_FLUSH_DEBOUNCE_MS): void => {
+      if (operationalEventUiFlushTimerRef.current !== null) return;
+      operationalEventUiFlushTimerRef.current = window.setTimeout(() => {
+        operationalEventUiFlushTimerRef.current = null;
+        applyOperationalEventLogState(operationalEventLogRef.current);
+      }, Math.max(0, delayMs));
+    },
+    [applyOperationalEventLogState]
+  );
+
   const pushOperationalEvent = useCallback(
     (
       type: OperationalEventLogEntry['type'],
       message: string,
       context?: Record<string, unknown>
-    ): void => {
+    ): OperationalEventTiming => {
+      const startedAt = performance.now();
       const next: OperationalEventLogEntry = {
         id: createClientId('ops'),
         type,
@@ -3401,14 +3493,30 @@ const App: React.FC = () => {
       };
       const nextList = [next, ...operationalEventLogRef.current].slice(0, 20);
       operationalEventLogRef.current = nextList;
-      applyOperationalEventLogState(nextList);
+      const applyStateStartedAt = performance.now();
+      if (isTechnicalPanelOpenRef.current) {
+        applyOperationalEventLogState(nextList);
+      } else {
+        scheduleOperationalEventLogUiFlush();
+      }
+      const applyStateMs = performance.now() - applyStateStartedAt;
+      const persistStartedAt = performance.now();
       saveOperationalEventLog(nextList);
+      const persistDispatchMs = performance.now() - persistStartedAt;
+      const reportStartedAt = performance.now();
       reportOperationalPanelEvent({
         clientId: opsClientInstanceIdRef.current,
         event: next,
       });
+      const reportDispatchMs = performance.now() - reportStartedAt;
+      return {
+        applyStateMs,
+        persistDispatchMs,
+        reportDispatchMs,
+        totalMs: performance.now() - startedAt,
+      };
     },
-    [applyOperationalEventLogState]
+    [applyOperationalEventLogState, scheduleOperationalEventLogUiFlush]
   );
 
   useEffect(() => {
@@ -3688,6 +3796,14 @@ const App: React.FC = () => {
         confirmPostCommandApplyMs: 0,
         confirmOpsMs: 0,
         confirmFailureHandlingMs: 0,
+        stateRefreshEmptyDraftCheckMs: 0,
+        stateRefreshAfterFlushMs: 0,
+        stateRefreshBeforeFinalizeMs: 0,
+        pOpsBackendSentMs: 0,
+        pOpsBackendAckMs: 0,
+        pOpsEventStateMs: 0,
+        pOpsEventPersistMs: 0,
+        pOpsEventReportMs: 0,
         retries: 0,
         hadRecovery: false,
         hadReconciliation: false,
@@ -3772,7 +3888,15 @@ const App: React.FC = () => {
         | 'confirmSchedulerWaitMs'
         | 'confirmPostCommandApplyMs'
         | 'confirmOpsMs'
-        | 'confirmFailureHandlingMs',
+        | 'confirmFailureHandlingMs'
+        | 'stateRefreshEmptyDraftCheckMs'
+        | 'stateRefreshAfterFlushMs'
+        | 'stateRefreshBeforeFinalizeMs'
+        | 'pOpsBackendSentMs'
+        | 'pOpsBackendAckMs'
+        | 'pOpsEventStateMs'
+        | 'pOpsEventPersistMs'
+        | 'pOpsEventReportMs',
       durationMs: number
     ): void => {
       const normalizedDraftId = draftId.trim();
@@ -3886,8 +4010,36 @@ const App: React.FC = () => {
       const confirmPostCommandApplyMs = Math.max(0, Math.round(current.confirmPostCommandApplyMs));
       const confirmOpsMs = Math.max(0, Math.round(current.confirmOpsMs));
       const confirmFailureHandlingMs = Math.max(0, Math.round(current.confirmFailureHandlingMs));
+      const stateRefreshEmptyDraftCheckMs = Math.max(
+        0,
+        Math.round(current.stateRefreshEmptyDraftCheckMs)
+      );
+      const stateRefreshAfterFlushMs = Math.max(0, Math.round(current.stateRefreshAfterFlushMs));
+      const stateRefreshBeforeFinalizeMs = Math.max(
+        0,
+        Math.round(current.stateRefreshBeforeFinalizeMs)
+      );
+      const stateRefreshMeasuredMs =
+        stateRefreshEmptyDraftCheckMs + stateRefreshAfterFlushMs + stateRefreshBeforeFinalizeMs;
+      const stateRefreshOtherMs = Math.max(
+        0,
+        Math.round(Math.max(0, current.stateRefreshMs) - stateRefreshMeasuredMs)
+      );
+      const pOpsBackendSentMs = Math.max(0, Math.round(current.pOpsBackendSentMs));
+      const pOpsBackendAckMs = Math.max(0, Math.round(current.pOpsBackendAckMs));
+      const pOpsEventStateMs = Math.max(0, Math.round(current.pOpsEventStateMs));
+      const pOpsEventPersistMs = Math.max(0, Math.round(current.pOpsEventPersistMs));
+      const pOpsEventReportMs = Math.max(0, Math.round(current.pOpsEventReportMs));
+      const pOpsMeasuredMs = pOpsBackendSentMs + pOpsBackendAckMs;
+      const pOpsOtherMs = Math.max(0, Math.round(Math.max(0, current.pOpsMs) - pOpsMeasuredMs));
       const confirmMeasuredExclusiveMs =
-        confirmCommandInvokeMs + confirmOpsMs + confirmFailureHandlingMs;
+        confirmCommandInvokeMs +
+        confirmDraftLockWaitMs +
+        confirmGlobalQueueWaitMs +
+        confirmSchedulerWaitMs +
+        confirmPostCommandApplyMs +
+        confirmOpsMs +
+        confirmFailureHandlingMs;
       const confirmOtherMs = Math.max(
         0,
         Math.round(Math.max(0, current.confirmMs) - confirmMeasuredExclusiveMs)
@@ -3937,6 +4089,16 @@ const App: React.FC = () => {
         confirmOpsMs,
         confirmFailureHandlingMs,
         confirmOtherMs,
+        stateRefreshEmptyDraftCheckMs,
+        stateRefreshAfterFlushMs,
+        stateRefreshBeforeFinalizeMs,
+        stateRefreshOtherMs,
+        pOpsBackendSentMs,
+        pOpsBackendAckMs,
+        pOpsEventStateMs,
+        pOpsEventPersistMs,
+        pOpsEventReportMs,
+        pOpsOtherMs,
         clickToBackendConfirmMs: totalConfMs,
         retries: normalizedRetries,
         hadRecovery,
@@ -3992,6 +4154,16 @@ const App: React.FC = () => {
         confirm_ops_ms: record.confirmOpsMs,
         confirm_failure_handling_ms: record.confirmFailureHandlingMs,
         confirm_other_ms: record.confirmOtherMs,
+        state_refresh_empty_draft_check_ms: record.stateRefreshEmptyDraftCheckMs,
+        state_refresh_after_flush_ms: record.stateRefreshAfterFlushMs,
+        state_refresh_before_finalize_ms: record.stateRefreshBeforeFinalizeMs,
+        state_refresh_other_ms: record.stateRefreshOtherMs,
+        p_ops_backend_sent_ms: record.pOpsBackendSentMs,
+        p_ops_backend_ack_ms: record.pOpsBackendAckMs,
+        p_ops_event_state_ms: record.pOpsEventStateMs,
+        p_ops_event_persist_ms: record.pOpsEventPersistMs,
+        p_ops_event_report_ms: record.pOpsEventReportMs,
+        p_ops_other_ms: record.pOpsOtherMs,
         clickToBackendConfirmMs: record.clickToBackendConfirmMs,
         retries: record.retries,
         hadRecovery: record.hadRecovery,
@@ -4046,6 +4218,16 @@ const App: React.FC = () => {
           confirm_ops_ms: record.confirmOpsMs,
           confirm_failure_handling_ms: record.confirmFailureHandlingMs,
           confirm_other_ms: record.confirmOtherMs,
+          state_refresh_empty_draft_check_ms: record.stateRefreshEmptyDraftCheckMs,
+          state_refresh_after_flush_ms: record.stateRefreshAfterFlushMs,
+          state_refresh_before_finalize_ms: record.stateRefreshBeforeFinalizeMs,
+          state_refresh_other_ms: record.stateRefreshOtherMs,
+          p_ops_backend_sent_ms: record.pOpsBackendSentMs,
+          p_ops_backend_ack_ms: record.pOpsBackendAckMs,
+          p_ops_event_state_ms: record.pOpsEventStateMs,
+          p_ops_event_persist_ms: record.pOpsEventPersistMs,
+          p_ops_event_report_ms: record.pOpsEventReportMs,
+          p_ops_other_ms: record.pOpsOtherMs,
           clickToBackendConfirmMs: record.clickToBackendConfirmMs,
           retries: record.retries,
           hadRecovery: record.hadRecovery,
@@ -4202,7 +4384,11 @@ const App: React.FC = () => {
         if (cancelled) return;
         const normalizedRemote = normalizeOperationalEventLog(remoteEvents);
         operationalRemoteEventLogRef.current = normalizedRemote;
-        applyOperationalEventLogState(operationalEventLogRef.current);
+        if (isTechnicalPanelOpen) {
+          applyOperationalEventLogState(operationalEventLogRef.current);
+        } else {
+          scheduleOperationalEventLogUiFlush();
+        }
       } catch {
         // keep local-only view when remote feed is unavailable
       } finally {
@@ -4219,7 +4405,30 @@ const App: React.FC = () => {
       cancelled = true;
       window.clearInterval(intervalId);
     };
-  }, [applyOperationalEventLogState, isAccessVerified]);
+  }, [
+    applyOperationalEventLogState,
+    isAccessVerified,
+    isTechnicalPanelOpen,
+    scheduleOperationalEventLogUiFlush,
+  ]);
+
+  useEffect(() => {
+    if (!isTechnicalPanelOpen) return;
+    if (operationalEventUiFlushTimerRef.current !== null) {
+      window.clearTimeout(operationalEventUiFlushTimerRef.current);
+      operationalEventUiFlushTimerRef.current = null;
+    }
+    applyOperationalEventLogState(operationalEventLogRef.current);
+  }, [applyOperationalEventLogState, isTechnicalPanelOpen]);
+
+  useEffect(() => {
+    return () => {
+      if (operationalEventUiFlushTimerRef.current !== null) {
+        window.clearTimeout(operationalEventUiFlushTimerRef.current);
+        operationalEventUiFlushTimerRef.current = null;
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const handleTogglePanel = (event: KeyboardEvent): void => {
@@ -9037,6 +9246,15 @@ const App: React.FC = () => {
           durationMs
         );
       };
+      const recordStateRefreshPhaseDuration = (
+        stage:
+          | 'stateRefreshEmptyDraftCheckMs'
+          | 'stateRefreshAfterFlushMs'
+          | 'stateRefreshBeforeFinalizeMs',
+        durationMs: number
+      ): void => {
+        markPaymentFlowTelemetryStageDuration(currentJob.draftId, currentJob.id, stage, durationMs);
+      };
       const recordRecoveryMs = (durationMs: number): void => {
         markPaymentFlowTelemetryStageDuration(
           currentJob.draftId,
@@ -9068,6 +9286,7 @@ const App: React.FC = () => {
         let currentServerDraft = saleDraftsRef.current.find(
           (draft) => draft.id === currentJob.draftId
         );
+        let hasSuccessfulStateRefreshAfterFlush = false;
         if (
           currentServerDraft &&
           (currentServerDraft.status === 'PAID' || currentServerDraft.status === 'CANCELLED')
@@ -9126,7 +9345,12 @@ const App: React.FC = () => {
                 refreshedState,
                 'pending_paid_refresh_empty_draft_terminal_check'
               );
-              recordStateRefreshMs(performance.now() - stateRefreshStartedAt);
+              const stateRefreshDurationMs = performance.now() - stateRefreshStartedAt;
+              recordStateRefreshMs(stateRefreshDurationMs);
+              recordStateRefreshPhaseDuration(
+                'stateRefreshEmptyDraftCheckMs',
+                stateRefreshDurationMs
+              );
             } catch {
               // best-effort refresh before deciding terminal outcome
             }
@@ -9424,6 +9648,26 @@ const App: React.FC = () => {
         ): void => {
           markPaymentFlowTelemetryStageDuration(currentJob.draftId, currentJob.id, stage, durationMs);
         };
+        const recordOpsEventTiming = (timing: OperationalEventTiming): void => {
+          markPaymentFlowTelemetryStageDuration(
+            currentJob.draftId,
+            currentJob.id,
+            'pOpsEventStateMs',
+            timing.applyStateMs
+          );
+          markPaymentFlowTelemetryStageDuration(
+            currentJob.draftId,
+            currentJob.id,
+            'pOpsEventPersistMs',
+            timing.persistDispatchMs
+          );
+          markPaymentFlowTelemetryStageDuration(
+            currentJob.draftId,
+            currentJob.id,
+            'pOpsEventReportMs',
+            timing.reportDispatchMs
+          );
+        };
         const flushPendingReadStartedAt = performance.now();
         const visiblePendingEntries = pendingDraftAddsRef.current[currentJob.draftId] || [];
         const recoveryPendingEntries = recoveryPendingDraftAddsRef.current[currentJob.draftId] || [];
@@ -9505,6 +9749,8 @@ const App: React.FC = () => {
               const flushApplySnapshotDurationMs = performance.now() - flushApplySnapshotStartedAt;
               const flushStateRefreshDurationMs = performance.now() - stateRefreshStartedAt;
               recordStateRefreshMs(flushStateRefreshDurationMs);
+              recordStateRefreshPhaseDuration('stateRefreshAfterFlushMs', flushStateRefreshDurationMs);
+              hasSuccessfulStateRefreshAfterFlush = true;
               recordFlushPhaseDuration(
                 'flushStateRefreshMs',
                 Math.max(0, flushStateRefreshDurationMs - flushApplySnapshotDurationMs)
@@ -9572,16 +9818,25 @@ const App: React.FC = () => {
         // If server is lagging/stale, force recovery path instead of producing hard 422 finalize noise.
         if (!currentServerDraft || currentServerDraft.status === 'DRAFT') {
           if (!currentServerDraft || (currentServerDraft.items || []).length === 0) {
-            try {
-              const stateRefreshStartedAt = performance.now();
-              const refreshedState = await fetchStateSnapshotControlled(currentJob.draftId);
-              applySnapshotForCurrentJob(
-                refreshedState,
-                'pending_paid_refresh_before_finalize'
-              );
-              recordStateRefreshMs(performance.now() - stateRefreshStartedAt);
-            } catch {
-              // best-effort refresh; fallback to local view below
+            const shouldRunPreFinalizeStateRefresh =
+              !hasSuccessfulStateRefreshAfterFlush || !currentServerDraft;
+            if (shouldRunPreFinalizeStateRefresh) {
+              try {
+                const stateRefreshStartedAt = performance.now();
+                const refreshedState = await fetchStateSnapshotControlled(currentJob.draftId);
+                applySnapshotForCurrentJob(
+                  refreshedState,
+                  'pending_paid_refresh_before_finalize'
+                );
+                const stateRefreshDurationMs = performance.now() - stateRefreshStartedAt;
+                recordStateRefreshMs(stateRefreshDurationMs);
+                recordStateRefreshPhaseDuration(
+                  'stateRefreshBeforeFinalizeMs',
+                  stateRefreshDurationMs
+                );
+              } catch {
+                // best-effort refresh; fallback to local view below
+              }
             }
             currentServerDraft = saleDraftsRef.current.find((entry) => entry.id === currentJob.draftId);
           }
@@ -9690,17 +9945,25 @@ const App: React.FC = () => {
           performance.now() - prepareAtomicCommandStartedAt
         );
         const backendSentOpsStartedAt = performance.now();
-        pushOperationalEvent('PAYMENT_FLOW', 'PAID_SYNC_BACKEND_SENT', {
+        const backendSentEventTiming = pushOperationalEvent('PAYMENT_FLOW', 'PAID_SYNC_BACKEND_SENT', {
           draftId: currentJob.draftId,
           jobId: currentJob.id,
           commandType: atomicFinalizeAndConfirmCommand.type,
           commandId: atomicFinalizeAndConfirmCommand.commandId || null,
         });
+        recordOpsEventTiming(backendSentEventTiming);
+        const backendSentOpsDurationMs = performance.now() - backendSentOpsStartedAt;
         markPaymentFlowTelemetryStageDuration(
           currentJob.draftId,
           currentJob.id,
           'pOpsMs',
-          performance.now() - backendSentOpsStartedAt
+          backendSentOpsDurationMs
+        );
+        markPaymentFlowTelemetryStageDuration(
+          currentJob.draftId,
+          currentJob.id,
+          'pOpsBackendSentMs',
+          backendSentOpsDurationMs
         );
         const atomicStartedAt = performance.now();
         try {
@@ -9762,7 +10025,7 @@ const App: React.FC = () => {
             return;
           }
           const backendAckOpsStartedAt = performance.now();
-          pushOperationalEvent(
+          const backendAckQueueHealthTiming = pushOperationalEvent(
             'QUEUE_HEALTH',
             'Fluxo principal de paid-sync executou comando atômico FINALIZE+CONFIRM.',
             {
@@ -9770,18 +10033,26 @@ const App: React.FC = () => {
               commandId: atomicFinalizeAndConfirmCommand.commandId || null,
             }
           );
-          pushOperationalEvent('PAYMENT_FLOW', 'PAID_SYNC_BACKEND_ACK', {
+          const backendAckFlowTiming = pushOperationalEvent('PAYMENT_FLOW', 'PAID_SYNC_BACKEND_ACK', {
             draftId: currentJob.draftId,
             jobId: currentJob.id,
             commandType: atomicFinalizeAndConfirmCommand.type,
             commandId: atomicFinalizeAndConfirmCommand.commandId || null,
           });
+          recordOpsEventTiming(backendAckQueueHealthTiming);
+          recordOpsEventTiming(backendAckFlowTiming);
           const backendAckOpsDurationMs = performance.now() - backendAckOpsStartedAt;
           recordConfirmPhaseDuration('confirmOpsMs', backendAckOpsDurationMs);
           markPaymentFlowTelemetryStageDuration(
             currentJob.draftId,
             currentJob.id,
             'pOpsMs',
+            backendAckOpsDurationMs
+          );
+          markPaymentFlowTelemetryStageDuration(
+            currentJob.draftId,
+            currentJob.id,
+            'pOpsBackendAckMs',
             backendAckOpsDurationMs
           );
         } finally {
@@ -11869,6 +12140,16 @@ const App: React.FC = () => {
                   c_cmd:{latestPaymentFlowTelemetry.confirmCommandInvokeMs ?? '-'} c_lock:{latestPaymentFlowTelemetry.confirmDraftLockWaitMs ?? '-'} c_gq:{latestPaymentFlowTelemetry.confirmGlobalQueueWaitMs ?? '-'} c_sched:{latestPaymentFlowTelemetry.confirmSchedulerWaitMs ?? '-'} c_apply:{latestPaymentFlowTelemetry.confirmPostCommandApplyMs ?? '-'} c_ops:{latestPaymentFlowTelemetry.confirmOpsMs ?? '-'} c_fail:{latestPaymentFlowTelemetry.confirmFailureHandlingMs ?? '-'} c_oth:{latestPaymentFlowTelemetry.confirmOtherMs ?? '-'}
                 </p>
               )}
+              {latestPaymentFlowTelemetry && (
+                <p className="truncate">
+                  sr_empty:{latestPaymentFlowTelemetry.stateRefreshEmptyDraftCheckMs ?? '-'} sr_flush:{latestPaymentFlowTelemetry.stateRefreshAfterFlushMs ?? '-'} sr_final:{latestPaymentFlowTelemetry.stateRefreshBeforeFinalizeMs ?? '-'} sr_oth:{latestPaymentFlowTelemetry.stateRefreshOtherMs ?? '-'}
+                </p>
+              )}
+              {latestPaymentFlowTelemetry && (
+                <p className="truncate">
+                  ops_send:{latestPaymentFlowTelemetry.pOpsBackendSentMs ?? '-'} ops_ack:{latestPaymentFlowTelemetry.pOpsBackendAckMs ?? '-'} ops_ui:{latestPaymentFlowTelemetry.pOpsEventStateMs ?? '-'} ops_persist:{latestPaymentFlowTelemetry.pOpsEventPersistMs ?? '-'} ops_report:{latestPaymentFlowTelemetry.pOpsEventReportMs ?? '-'} ops_oth:{latestPaymentFlowTelemetry.pOpsOtherMs ?? '-'}
+                </p>
+              )}
             </div>
             {paidSyncAssistantState.active && (
               <div className="mt-1 flex items-center gap-1 rounded-full border border-sky-200 bg-sky-50 px-1.5 py-0.5 text-[8px] font-black uppercase tracking-wide text-sky-700">
@@ -11974,7 +12255,7 @@ const App: React.FC = () => {
                   <p key={entry.jobId} className="truncate font-mono text-[9px] text-slate-200">
                     {(() => {
                       const breakdown = getPaymentFlowProcessingBreakdown(entry);
-                      return `${entry.draftId.slice(-8).toUpperCase()} local:${entry.clickToLocalPersistMs ?? '-'}ms w:${entry.waitInQueueMs ?? '-'}ms p:${entry.processingMs ?? '-'}ms conf:${entry.totalConfMs ?? entry.clickToBackendConfirmMs ?? '-'}ms p_flush:${entry.pFlushMs ?? '-'} p_prepare:${entry.pPrepareMs ?? '-'} p_request:${entry.pRequestMs ?? '-'} p_backend:${entry.pBackendMs ?? '-'} p_apply_snapshot:${entry.pApplySnapshotMs ?? '-'} p_reconcile:${entry.pReconcileMs ?? '-'} p_persist:${entry.pPersistMs ?? '-'} p_ops:${entry.pOpsMs ?? '-'} p_finalize:${entry.pFinalizeMs ?? '-'} f:${breakdown?.flushPendingDraftAddsMs ?? '-'} fi:${breakdown?.finalizeMs ?? '-'} cf:${breakdown?.confirmMs ?? '-'} sn:${breakdown?.snapshotApplyMs ?? '-'} sr:${breakdown?.stateRefreshMs ?? '-'} rv:${breakdown?.recoveryMs ?? '-'} rb:${breakdown?.retryBackoffMs ?? '-'} fr:${breakdown?.frontendReconcileMs ?? '-'} oth:${breakdown?.residualMs ?? '-'} r:${entry.retries} rec:${entry.hadRecovery ? '1' : '0'} rc:${entry.hadReconciliation ? '1' : '0'}`;
+                      return `${entry.draftId.slice(-8).toUpperCase()} local:${entry.clickToLocalPersistMs ?? '-'}ms w:${entry.waitInQueueMs ?? '-'}ms p:${entry.processingMs ?? '-'}ms conf:${entry.totalConfMs ?? entry.clickToBackendConfirmMs ?? '-'}ms p_flush:${entry.pFlushMs ?? '-'} p_prepare:${entry.pPrepareMs ?? '-'} p_request:${entry.pRequestMs ?? '-'} p_backend:${entry.pBackendMs ?? '-'} p_apply_snapshot:${entry.pApplySnapshotMs ?? '-'} p_reconcile:${entry.pReconcileMs ?? '-'} p_persist:${entry.pPersistMs ?? '-'} p_ops:${entry.pOpsMs ?? '-'} p_finalize:${entry.pFinalizeMs ?? '-'} f:${breakdown?.flushPendingDraftAddsMs ?? '-'} fi:${breakdown?.finalizeMs ?? '-'} cf:${breakdown?.confirmMs ?? '-'} sn:${breakdown?.snapshotApplyMs ?? '-'} sr:${breakdown?.stateRefreshMs ?? '-'} rv:${breakdown?.recoveryMs ?? '-'} rb:${breakdown?.retryBackoffMs ?? '-'} fr:${breakdown?.frontendReconcileMs ?? '-'} oth:${breakdown?.residualMs ?? '-'} c_cmd:${entry.confirmCommandInvokeMs ?? '-'} c_lock:${entry.confirmDraftLockWaitMs ?? '-'} c_gq:${entry.confirmGlobalQueueWaitMs ?? '-'} c_sched:${entry.confirmSchedulerWaitMs ?? '-'} c_apply:${entry.confirmPostCommandApplyMs ?? '-'} c_ops:${entry.confirmOpsMs ?? '-'} c_fail:${entry.confirmFailureHandlingMs ?? '-'} c_oth:${entry.confirmOtherMs ?? '-'} sr_empty:${entry.stateRefreshEmptyDraftCheckMs ?? '-'} sr_flush:${entry.stateRefreshAfterFlushMs ?? '-'} sr_final:${entry.stateRefreshBeforeFinalizeMs ?? '-'} sr_oth:${entry.stateRefreshOtherMs ?? '-'} ops_send:${entry.pOpsBackendSentMs ?? '-'} ops_ack:${entry.pOpsBackendAckMs ?? '-'} ops_ui:${entry.pOpsEventStateMs ?? '-'} ops_ps:${entry.pOpsEventPersistMs ?? '-'} ops_rp:${entry.pOpsEventReportMs ?? '-'} ops_oth:${entry.pOpsOtherMs ?? '-'} r:${entry.retries} rec:${entry.hadRecovery ? '1' : '0'} rc:${entry.hadReconciliation ? '1' : '0'}`;
                     })()}
                   </p>
                 ))}
