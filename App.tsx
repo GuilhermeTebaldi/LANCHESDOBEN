@@ -11229,17 +11229,6 @@ const App: React.FC = () => {
       }
       pendingDraftBackgroundRetryAttemptsRef.current.delete(draftId);
 
-      void moveVisiblePendingDraftAddsToRecovery(draftId, { skipCriticalPersist: true }).catch((error) => {
-        reportErrorMonitorEvent({
-          source: 'sistema:paid-sync:move-visible-to-recovery',
-          level: 'warn',
-          message: 'Falha ao transferir pendencias visiveis para buffer de recovery.',
-          stack: error instanceof Error ? error.stack : undefined,
-          context: {
-            draftId,
-          },
-        });
-      });
       const queuedJob: PendingPaidSyncJob = {
         id: createClientId('paid-sync-job'),
         draftId,
@@ -11291,6 +11280,21 @@ const App: React.FC = () => {
       requestPendingPaidSyncProcessing('confirm-paid-enqueued');
       // Kick off immediately in the current tab before any print navigation can block timers/event-loop.
       void processPendingPaidSyncQueue();
+      if (pendingItemsCount > 0) {
+        window.setTimeout(() => {
+          void moveVisiblePendingDraftAddsToRecovery(draftId, { skipCriticalPersist: true }).catch((error) => {
+            reportErrorMonitorEvent({
+              source: 'sistema:paid-sync:move-visible-to-recovery',
+              level: 'warn',
+              message: 'Falha ao transferir pendencias visiveis para buffer de recovery.',
+              stack: error instanceof Error ? error.stack : undefined,
+              context: {
+                draftId,
+              },
+            });
+          });
+        }, 0);
+      }
       pushOperationalEvent('PAYMENT_FLOW', 'PAID_SYNC_SYNC_TRIGGERED', {
         draftId,
         jobId: queuedJob.id,
@@ -11325,29 +11329,6 @@ const App: React.FC = () => {
           receiptPrintId,
           jobId: queuedJob.id,
         });
-        requestPendingPaidSyncProcessing('print-opened');
-        void processPendingPaidSyncQueue();
-        if (document.visibilityState === 'hidden') {
-          pushOperationalEvent('PAYMENT_FLOW', 'PAID_SYNC_PRINT_MAIN_HIDDEN_AFTER_OPEN', {
-            draftId,
-            jobId: queuedJob.id,
-            receiptPrintId,
-          });
-          window.setTimeout(() => {
-            try {
-              window.focus();
-            } catch {
-              // ignore focus restore failures
-            }
-            pushOperationalEvent('PAYMENT_FLOW', 'PAID_SYNC_PRINT_MAIN_FOCUS_RESTORE_ATTEMPTED', {
-              draftId,
-              jobId: queuedJob.id,
-              receiptPrintId,
-            });
-            requestPendingPaidSyncProcessing('print-main-focus-restore');
-            void processPendingPaidSyncQueue();
-          }, 120);
-        }
       }, 0);
     } catch (error) {
       reportErrorMonitorEvent({
