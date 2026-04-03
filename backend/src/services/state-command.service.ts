@@ -1658,10 +1658,13 @@ const applyCloseDay = (state: FrontAppState) => {
       const impact = Number(entry.cashRegisterImpact);
       return Number.isFinite(impact) && impact < 0;
     })
-    .map((entry) => {
+    .map((entry): FrontCashRegisterExpenseDetail => {
       const impact = Number(entry.cashRegisterImpact);
       const amount = roundMoney(Math.abs(impact));
       const isOtherExpense = entry.ingredientId === 'cash-expense' || Number(entry.quantity) === 0;
+      const expenseType: FrontCashRegisterExpenseDetail['expenseType'] = isOtherExpense
+        ? 'OTHER'
+        : 'INGREDIENT';
       const quantity = Number(entry.quantity);
       const ingredientUnit = entry.ingredientId
         ? ingredientUnitById.get(entry.ingredientId)
@@ -1670,7 +1673,7 @@ const applyCloseDay = (state: FrontAppState) => {
         entryId: entry.id,
         timestamp: entry.timestamp,
         amount,
-        expenseType: isOtherExpense ? 'OTHER' : 'INGREDIENT',
+        expenseType,
         ingredientId: isOtherExpense ? undefined : entry.ingredientId,
         ingredientName: isOtherExpense ? undefined : entry.ingredientName,
         ingredientUnit: isOtherExpense ? undefined : ingredientUnit,
