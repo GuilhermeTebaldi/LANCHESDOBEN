@@ -1,5 +1,6 @@
 import type {
   FrontAppState,
+  FrontCashRegisterExpenseDetail,
   FrontCleaningMaterial,
   FrontCleaningStockEntry,
   FrontDailySalesHistoryEntry,
@@ -194,6 +195,56 @@ const cloneRecipe = (recipe: FrontRecipeItem[] | undefined): FrontRecipeItem[] |
     ingredientId: item.ingredientId,
     quantity: item.quantity,
   }));
+
+const normalizeCashExpenseDetails = (value: unknown): FrontCashRegisterExpenseDetail[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item): FrontCashRegisterExpenseDetail | null => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+      const source = item as Record<string, unknown>;
+      const amount = toNonNegativeMoney(source.amount);
+      if (amount <= 0) return null;
+
+      const timestampRaw = source.timestamp;
+      const timestamp =
+        timestampRaw instanceof Date || typeof timestampRaw === 'string'
+          ? timestampRaw
+          : toTimestampIso();
+      const expenseType = source.expenseType === 'OTHER' ? 'OTHER' : 'INGREDIENT';
+      const quantity = Number(source.quantity);
+      const normalizedQuantity =
+        Number.isFinite(quantity) && quantity > 0 ? Number(quantity.toFixed(6)) : undefined;
+
+      return {
+        entryId:
+          typeof source.entryId === 'string' && source.entryId.trim()
+            ? source.entryId
+            : createId('cash-expense'),
+        timestamp,
+        amount,
+        expenseType,
+        ingredientId:
+          typeof source.ingredientId === 'string' && source.ingredientId.trim()
+            ? source.ingredientId
+            : undefined,
+        ingredientName:
+          typeof source.ingredientName === 'string' && source.ingredientName.trim()
+            ? source.ingredientName
+            : undefined,
+        ingredientUnit:
+          typeof source.ingredientUnit === 'string' && source.ingredientUnit.trim()
+            ? source.ingredientUnit
+            : undefined,
+        quantity: normalizedQuantity,
+        purchaseDescription:
+          typeof source.purchaseDescription === 'string' && source.purchaseDescription.trim()
+            ? source.purchaseDescription
+            : undefined,
+      };
+    })
+    .filter((item): item is FrontCashRegisterExpenseDetail => item !== null)
+    .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+};
 
 const isSaleBasePaymentMethod = (value: unknown): value is FrontSaleBasePaymentMethod =>
   value === 'PIX' || value === 'DEBITO' || value === 'CREDITO' || value === 'DINHEIRO';
@@ -423,6 +474,7 @@ const cloneDailySalesHistoryEntry = (
     totalProfit: roundMoney(totalRevenue - normalizedPurchases),
     saleCount: Number.isFinite(Number(entry.saleCount)) ? Math.max(0, Math.floor(Number(entry.saleCount))) : 0,
     cashExpenses: toNonNegativeMoney(entry.cashExpenses),
+    cashExpenseDetails: normalizeCashExpenseDetails(entry.cashExpenseDetails),
   };
 };
 
@@ -1598,6 +1650,38 @@ const applyCloseDay = (state: FrontAppState) => {
   const totalPurchases = roundMoney(
     state.sales.reduce((sum, sale) => sum + (Number.isFinite(sale.totalCost) ? sale.totalCost : 0), 0)
   );
+  const ingredientUnitById = new Map(
+    state.ingredients.map((ingredient): [string, string] => [ingredient.id, ingredient.unit])
+  );
+  const cashExpenseDetails: FrontCashRegisterExpenseDetail[] = state.stockEntries
+    .filter((entry) => {
+      const impact = Number(entry.cashRegisterImpact);
+      return Number.isFinite(impact) && impact < 0;
+    })
+    .map((entry) => {
+      const impact = Number(entry.cashRegisterImpact);
+      const amount = roundMoney(Math.abs(impact));
+      const isOtherExpense = entry.ingredientId === 'cash-expense' || Number(entry.quantity) === 0;
+      const quantity = Number(entry.quantity);
+      const ingredientUnit = entry.ingredientId
+        ? ingredientUnitById.get(entry.ingredientId)
+        : undefined;
+      return {
+        entryId: entry.id,
+        timestamp: entry.timestamp,
+        amount,
+        expenseType: isOtherExpense ? 'OTHER' : 'INGREDIENT',
+        ingredientId: isOtherExpense ? undefined : entry.ingredientId,
+        ingredientName: isOtherExpense ? undefined : entry.ingredientName,
+        ingredientUnit: isOtherExpense ? undefined : ingredientUnit,
+        quantity:
+          !isOtherExpense && Number.isFinite(quantity) && quantity > 0
+            ? Number(quantity.toFixed(6))
+            : undefined,
+        purchaseDescription: entry.purchaseDescription,
+      };
+    })
+    .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
   const cashExpenses = roundMoney(
     state.stockEntries.reduce((sum, entry) => {
       const impact = Number(entry.cashRegisterImpact);
@@ -1615,6 +1699,7 @@ const applyCloseDay = (state: FrontAppState) => {
     totalProfit: roundMoney(totalRevenue - totalPurchases),
     saleCount: state.sales.length,
     cashExpenses,
+    cashExpenseDetails,
   };
 
   const history = ensureDailySalesHistory(state);

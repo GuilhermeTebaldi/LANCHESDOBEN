@@ -16,6 +16,7 @@ import AdminLogin from './components/AdminLogin';
 import {
   CleaningMaterial,
   CleaningStockEntry,
+  CashRegisterExpenseDetail,
   DailySalesHistoryEntry,
   Ingredient,
   Product,
@@ -723,6 +724,56 @@ const writeLocalCashRegisterAmount = (amount: number): void => {
   }
 };
 
+const normalizeCashExpenseDetails = (value: unknown): CashRegisterExpenseDetail[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item): CashRegisterExpenseDetail | null => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+      const source = item as Record<string, unknown>;
+      const amount = roundMoney(Math.max(0, Number(source.amount) || 0));
+      if (amount <= 0) return null;
+
+      const timestampRaw = source.timestamp;
+      const timestamp =
+        timestampRaw instanceof Date || typeof timestampRaw === 'string'
+          ? timestampRaw
+          : new Date().toISOString();
+      const expenseType = source.expenseType === 'OTHER' ? 'OTHER' : 'INGREDIENT';
+      const quantity = Number(source.quantity);
+      const normalizedQuantity =
+        Number.isFinite(quantity) && quantity > 0 ? Number(quantity.toFixed(6)) : undefined;
+
+      return {
+        entryId:
+          typeof source.entryId === 'string' && source.entryId.trim()
+            ? source.entryId
+            : `cash-expense-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+        timestamp,
+        amount,
+        expenseType,
+        ingredientId:
+          typeof source.ingredientId === 'string' && source.ingredientId.trim()
+            ? source.ingredientId
+            : undefined,
+        ingredientName:
+          typeof source.ingredientName === 'string' && source.ingredientName.trim()
+            ? source.ingredientName
+            : undefined,
+        ingredientUnit:
+          typeof source.ingredientUnit === 'string' && source.ingredientUnit.trim()
+            ? source.ingredientUnit
+            : undefined,
+        quantity: normalizedQuantity,
+        purchaseDescription:
+          typeof source.purchaseDescription === 'string' && source.purchaseDescription.trim()
+            ? source.purchaseDescription
+            : undefined,
+      };
+    })
+    .filter((item): item is CashRegisterExpenseDetail => item !== null)
+    .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+};
+
 const normalizeDailyHistoryEntry = (value: unknown): DailySalesHistoryEntry | null => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const source = value as Record<string, unknown>;
@@ -761,6 +812,7 @@ const normalizeDailyHistoryEntry = (value: unknown): DailySalesHistoryEntry | nu
     totalProfit,
     saleCount,
     cashExpenses: roundMoney(Math.max(0, Number(source.cashExpenses) || 0)),
+    cashExpenseDetails: normalizeCashExpenseDetails(source.cashExpenseDetails),
   };
 };
 
@@ -10407,7 +10459,7 @@ const App: React.FC = () => {
       const safeDelayMs = Math.max(0, Math.round(delayMs));
       if (safeDelayMs === 0) {
         void processPendingPaidSyncQueue();
-        enqueueRetryDispatchTask('pending-paid-sync-main', () => processPendingPaidSyncQueue());
+        scheduleRetryDispatchTask('pending-paid-sync-main', 250, () => processPendingPaidSyncQueue());
         return;
       }
       scheduleRetryDispatchTask(
@@ -10416,7 +10468,7 @@ const App: React.FC = () => {
         () => processPendingPaidSyncQueue()
       );
     },
-    [enqueueRetryDispatchTask, processPendingPaidSyncQueue, scheduleRetryDispatchTask]
+    [processPendingPaidSyncQueue, scheduleRetryDispatchTask]
   );
 
   useEffect(() => {
@@ -11562,8 +11614,6 @@ const App: React.FC = () => {
           : 'Pedido em fila. Confirmando no banco...'
       );
       requestPendingPaidSyncProcessing('confirm-paid-enqueued');
-      // Kick off immediately in the current tab before any print navigation can block timers/event-loop.
-      void processPendingPaidSyncQueue();
       pushOperationalEvent('PAYMENT_FLOW', 'PAID_SYNC_SYNC_TRIGGERED', {
         draftId,
         jobId: queuedJob.id,
@@ -12067,6 +12117,38 @@ const App: React.FC = () => {
     );
     const cashExpenses = calculateCashRegisterExpensesFromStockEntries(stockEntries);
     const openingCash = roundMoney(Math.max(0, cashRegisterAmount));
+    const ingredientUnitById = new Map(
+      ingredients.map((ingredient): [string, string] => [ingredient.id, ingredient.unit])
+    );
+    const cashExpenseDetails: CashRegisterExpenseDetail[] = stockEntries
+      .filter((entry) => {
+        const impact = Number(entry.cashRegisterImpact);
+        return Number.isFinite(impact) && impact < 0;
+      })
+      .map((entry) => {
+        const impact = Number(entry.cashRegisterImpact);
+        const amount = roundMoney(Math.abs(impact));
+        const isOtherExpense = entry.ingredientId === 'cash-expense' || Number(entry.quantity) === 0;
+        const quantity = Number(entry.quantity);
+        const ingredientUnit = entry.ingredientId
+          ? ingredientUnitById.get(entry.ingredientId)
+          : undefined;
+        return {
+          entryId: entry.id,
+          timestamp: entry.timestamp,
+          amount,
+          expenseType: isOtherExpense ? 'OTHER' : 'INGREDIENT',
+          ingredientId: isOtherExpense ? undefined : entry.ingredientId,
+          ingredientName: isOtherExpense ? undefined : entry.ingredientName,
+          ingredientUnit: isOtherExpense ? undefined : ingredientUnit,
+          quantity:
+            !isOtherExpense && Number.isFinite(quantity) && quantity > 0
+              ? Number(quantity.toFixed(6))
+              : undefined,
+          purchaseDescription: entry.purchaseDescription || undefined,
+        } satisfies CashRegisterExpenseDetail;
+      })
+      .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 
     return {
       id: createClientId('day'),
@@ -12077,8 +12159,9 @@ const App: React.FC = () => {
       totalProfit: roundMoney(totalRevenue - totalPurchases),
       saleCount: countSaleOrders(sales),
       cashExpenses,
+      cashExpenseDetails,
     };
-  }, [cashRegisterAmount, sales, stockEntries]);
+  }, [cashRegisterAmount, ingredients, sales, stockEntries]);
 
   const persistLocalCloseDayReport = useCallback((report: DailySalesHistoryEntry) => {
     const normalizedReport = normalizeDailyHistoryEntry(report);

@@ -26,6 +26,20 @@ export interface FrontStockEntry {
   purchaseDescription?: string;
 }
 
+export type FrontCashRegisterExpenseType = 'INGREDIENT' | 'OTHER';
+
+export interface FrontCashRegisterExpenseDetail {
+  entryId: string;
+  timestamp: Date | string;
+  amount: number;
+  expenseType: FrontCashRegisterExpenseType;
+  ingredientId?: string;
+  ingredientName?: string;
+  ingredientUnit?: string;
+  quantity?: number;
+  purchaseDescription?: string;
+}
+
 export interface FrontCleaningMaterial {
   id: string;
   name: string;
@@ -143,6 +157,7 @@ export interface FrontDailySalesHistoryEntry {
   totalProfit: number;
   saleCount: number;
   cashExpenses?: number;
+  cashExpenseDetails?: FrontCashRegisterExpenseDetail[];
 }
 
 export interface FrontAppState {

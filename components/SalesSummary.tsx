@@ -1,7 +1,14 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Bar, BarChart, CartesianGrid, Cell, ResponsiveContainer, Tooltip, XAxis, YAxis } from 'recharts';
-import { DailySalesHistoryEntry, Ingredient, Sale, SaleOrigin, StockEntry } from '../types';
+import {
+  CashRegisterExpenseDetail,
+  DailySalesHistoryEntry,
+  Ingredient,
+  Sale,
+  SaleOrigin,
+  StockEntry,
+} from '../types';
 import { APP_ORIGINS, AppOrigin, buildAppChannelSummary } from '../utils/appChannelSummary';
 import { buildSalesReportPrintRoutePath } from '../utils/printRoutes';
 import { getReceiptPaperWidthMm } from '../utils/receiptPaper';
@@ -258,6 +265,75 @@ const normalizeLegacyHistoryCost = (rawCost: number, rawRevenue: number): number
 };
 const LOCAL_DAILY_HISTORY_KEY = 'qb_daily_sales_history_local_v1';
 
+const normalizeCashExpenseDetails = (value: unknown): CashRegisterExpenseDetail[] => {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item): CashRegisterExpenseDetail | null => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+      const source = item as Record<string, unknown>;
+      const amount = roundMoney(Math.max(0, Number(source.amount) || 0));
+      if (amount <= 0) return null;
+
+      const timestampRaw = source.timestamp;
+      const timestamp =
+        timestampRaw instanceof Date || typeof timestampRaw === 'string'
+          ? timestampRaw
+          : new Date().toISOString();
+      const expenseType = source.expenseType === 'OTHER' ? 'OTHER' : 'INGREDIENT';
+      const quantity = Number(source.quantity);
+      const normalizedQuantity =
+        Number.isFinite(quantity) && quantity > 0 ? Number(quantity.toFixed(6)) : undefined;
+
+      return {
+        entryId:
+          typeof source.entryId === 'string' && source.entryId.trim()
+            ? source.entryId
+            : `cash-expense-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
+        timestamp,
+        amount,
+        expenseType,
+        ingredientId:
+          typeof source.ingredientId === 'string' && source.ingredientId.trim()
+            ? source.ingredientId
+            : undefined,
+        ingredientName:
+          typeof source.ingredientName === 'string' && source.ingredientName.trim()
+            ? source.ingredientName
+            : undefined,
+        ingredientUnit:
+          typeof source.ingredientUnit === 'string' && source.ingredientUnit.trim()
+            ? source.ingredientUnit
+            : undefined,
+        quantity: normalizedQuantity,
+        purchaseDescription:
+          typeof source.purchaseDescription === 'string' && source.purchaseDescription.trim()
+            ? source.purchaseDescription
+            : undefined,
+      };
+    })
+    .filter((item): item is CashRegisterExpenseDetail => item !== null)
+    .sort((a, b) => toDate(a.timestamp).getTime() - toDate(b.timestamp).getTime());
+};
+
+const getCashExpenseDetailLabel = (detail: CashRegisterExpenseDetail): string => {
+  if (detail.expenseType === 'OTHER') {
+    return detail.purchaseDescription?.trim() || 'Outros';
+  }
+
+  const ingredientName = detail.ingredientName?.trim();
+  const fallbackDescription = detail.purchaseDescription?.trim();
+  const baseLabel = ingredientName || fallbackDescription || 'Insumo';
+  const quantity = Number(detail.quantity);
+  const unit = detail.ingredientUnit?.trim() || '';
+  if (Number.isFinite(quantity) && quantity > 0 && unit) {
+    return `${baseLabel} (${formatStockQuantityByUnit(unit, quantity)} ${unit})`;
+  }
+  if (Number.isFinite(quantity) && quantity > 0) {
+    return `${baseLabel} (Qtd: ${quantity.toFixed(3).replace(/\.?0+$/, '')})`;
+  }
+  return baseLabel;
+};
+
 const normalizeDailyHistoryEntry = (value: unknown): DailySalesHistoryEntry | null => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
   const source = value as Record<string, unknown>;
@@ -296,6 +372,7 @@ const normalizeDailyHistoryEntry = (value: unknown): DailySalesHistoryEntry | nu
     totalProfit,
     saleCount,
     cashExpenses: roundMoney(Math.max(0, Number(source.cashExpenses) || 0)),
+    cashExpenseDetails: normalizeCashExpenseDetails(source.cashExpenseDetails),
   };
 };
 
@@ -572,6 +649,37 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
         .sort((a, b) => toDate(b.timestamp).getTime() - toDate(a.timestamp).getTime()),
     [stockEntries]
   );
+  const ingredientUnitsById = useMemo(
+    () => new Map(allIngredients.map((ingredient): [string, string] => [ingredient.id, ingredient.unit])),
+    [allIngredients]
+  );
+  const cashRegisterExpenseDetails = useMemo(
+    () =>
+      cashRegisterExpenseEntries.map((entry) => {
+        const impact = Number(entry.cashRegisterImpact);
+        const amount = roundMoney(Math.abs(impact));
+        const isOtherExpense = entry.ingredientId === 'cash-expense' || Number(entry.quantity) === 0;
+        const quantity = Number(entry.quantity);
+        const ingredientUnit = entry.ingredientId
+          ? ingredientUnitsById.get(entry.ingredientId)
+          : undefined;
+        return {
+          entryId: entry.id,
+          timestamp: entry.timestamp,
+          amount,
+          expenseType: isOtherExpense ? 'OTHER' : 'INGREDIENT',
+          ingredientId: isOtherExpense ? undefined : entry.ingredientId,
+          ingredientName: isOtherExpense ? undefined : entry.ingredientName,
+          ingredientUnit: isOtherExpense ? undefined : ingredientUnit,
+          quantity:
+            !isOtherExpense && Number.isFinite(quantity) && quantity > 0
+              ? Number(quantity.toFixed(6))
+              : undefined,
+          purchaseDescription: entry.purchaseDescription || undefined,
+        } satisfies CashRegisterExpenseDetail;
+      }),
+    [cashRegisterExpenseEntries, ingredientUnitsById]
+  );
   const totalProfit = useMemo(() => totalRevenue - totalCost, [totalRevenue, totalCost]);
   const appChannelSummary = useMemo(() => buildAppChannelSummary(sales), [sales]);
   const reportRevenueExcludingApps = useMemo(
@@ -624,8 +732,17 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
       totalProfit,
       saleCount: totalOrderCount,
       cashExpenses: cashRegisterExpenses,
+      cashExpenseDetails: cashRegisterExpenseDetails,
     }),
-    [cashRegisterAmount, cashRegisterExpenses, totalCost, totalOrderCount, totalProfit, totalRevenue]
+    [
+      cashRegisterAmount,
+      cashRegisterExpenseDetails,
+      cashRegisterExpenses,
+      totalCost,
+      totalOrderCount,
+      totalProfit,
+      totalRevenue,
+    ]
   );
 
   const archiveSalesByDay = useMemo(() => {
@@ -820,6 +937,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
       const wrap = (value: string) => wrapThermalText(value, contentColumns).map(withLeftInset);
       const closedAt = toDate(report.closedAt);
       const cashExpenses = roundMoney(Math.max(0, Number(report.cashExpenses) || 0));
+      const cashExpenseDetails = normalizeCashExpenseDetails(report.cashExpenseDetails);
       const estimatedCash = roundMoney(report.openingCash + report.totalRevenue - report.totalPurchases - cashExpenses);
       const orderedSales = [...reportSales].sort(
         (a, b) => toDate(a.timestamp).getTime() - toDate(b.timestamp).getTime()
@@ -864,6 +982,38 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
           reportLines.push(line);
         });
       };
+      const appendCashExpenseDetailsSection = () => {
+        if (cashExpenses <= 0) return;
+        reportLines.push(thermalSeparator);
+        reportLines.push(center('RETIRADAS DO CAIXA'));
+        reportLines.push(thermalSeparator);
+
+        if (cashExpenseDetails.length === 0) {
+          pushWrappedLine('Sem detalhamento das retiradas neste fechamento.');
+          reportLines.push(align('Total retiradas:', formatThermalCurrency(cashExpenses)));
+          return;
+        }
+
+        cashExpenseDetails.forEach((detail, index) => {
+          const detailTime = toDate(detail.timestamp).toLocaleTimeString('pt-BR', {
+            hour: '2-digit',
+            minute: '2-digit',
+          });
+          const detailLabel = getCashExpenseDetailLabel(detail);
+          reportLines.push(
+            align(`#${String(index + 1).padStart(2, '0')} ${detailTime}`, formatThermalCurrency(detail.amount))
+          );
+          wrap(detailLabel).forEach((line) => {
+            reportLines.push(line);
+          });
+          if (index < cashExpenseDetails.length - 1) {
+            reportLines.push(thermalSeparator);
+          }
+        });
+
+        reportLines.push(thermalSeparator);
+        reportLines.push(align('Total retiradas:', formatThermalCurrency(cashExpenses)));
+      };
       const closedDate = closedAt.toLocaleDateString('pt-BR');
       const closedTime = closedAt.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 
@@ -879,6 +1029,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
         reportLines.push(align('Resultado operacional:', formatThermalCurrency(report.totalProfit)));
         reportLines.push(align('Caixa estimado:', formatThermalCurrency(estimatedCash)));
         reportLines.push(align('Total de pedidos:', String(reportOrderCount)));
+        appendCashExpenseDetailsSection();
         reportLines.push(thermalSeparator);
         reportLines.push(center('VALORES INFORMADOS'));
         reportLines.push(thermalSeparator);
@@ -917,6 +1068,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
         reportLines.push(align('Pedidos:', String(reportOrderCount)));
         reportLines.push(align('Saida de Caixa:', formatThermalCurrency(cashExpenses)));
         reportLines.push(align('Caixa Estimado:', formatThermalCurrency(estimatedCash)));
+        appendCashExpenseDetailsSection();
         reportLines.push(thermalSeparator);
         reportLines.push(center('FORMA PAGAMENTO'));
 
@@ -1406,6 +1558,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
                 orderedHistory.map(({ entry, sales: historySales, inferred }) => {
                   const entryDate = toDate(entry.closedAt);
                   const entryCashExpenses = roundMoney(Math.max(0, Number(entry.cashExpenses) || 0));
+                  const entryCashExpenseDetails = normalizeCashExpenseDetails(entry.cashExpenseDetails);
                   const entryEstimatedCash =
                     entry.openingCash + entry.totalRevenue - entry.totalPurchases - entryCashExpenses;
                   return (
@@ -1432,6 +1585,23 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
                           <p className="text-[11px] font-black text-amber-700 uppercase tracking-widest">
                             Saída no caixa do dia: {formatCurrency(entryCashExpenses)}
                           </p>
+                        )}
+                        {entryCashExpenseDetails.length > 0 && (
+                          <div className="pt-1 space-y-1">
+                            <p className="text-[10px] font-black uppercase tracking-widest text-amber-700">
+                              Itens retirados do caixa
+                            </p>
+                            {entryCashExpenseDetails.slice(0, 4).map((detail) => (
+                              <p key={detail.entryId} className="text-[10px] font-bold text-slate-600">
+                                {getCashExpenseDetailLabel(detail)}: {formatCurrency(detail.amount)}
+                              </p>
+                            ))}
+                            {entryCashExpenseDetails.length > 4 && (
+                              <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">
+                                +{entryCashExpenseDetails.length - 4} item(ns)
+                              </p>
+                            )}
+                          </div>
                         )}
                       </div>
                       <button

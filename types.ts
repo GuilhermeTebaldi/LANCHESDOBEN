@@ -27,6 +27,20 @@ export interface StockEntry {
   purchaseDescription?: string;
 }
 
+export type CashRegisterExpenseType = 'INGREDIENT' | 'OTHER';
+
+export interface CashRegisterExpenseDetail {
+  entryId: string;
+  timestamp: Date | string;
+  amount: number;
+  expenseType: CashRegisterExpenseType;
+  ingredientId?: string;
+  ingredientName?: string;
+  ingredientUnit?: string;
+  quantity?: number;
+  purchaseDescription?: string;
+}
+
 export interface CleaningMaterial {
   id: string;
   name: string;
@@ -144,6 +158,7 @@ export interface DailySalesHistoryEntry {
   totalProfit: number;
   saleCount: number;
   cashExpenses?: number;
+  cashExpenseDetails?: CashRegisterExpenseDetail[];
 }
 
 export enum ViewMode {
