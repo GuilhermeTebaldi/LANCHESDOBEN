@@ -340,16 +340,19 @@ const buildReceiptViewModel = (state: AppState, receiptId: string): ReceiptViewM
   const saleOrigin = relatedDraft?.saleOrigin || targetSale.saleOrigin || 'LOCAL';
   const isAppSale = isAppSaleOrigin(saleOrigin);
   const appOrderTotal = isAppSale
-    ? normalizeMoneyValue(relatedDraft?.appOrderTotal ?? targetSale.appOrderTotal)
+    ? normalizeMoneyValue(targetSale.appOrderTotal ?? relatedDraft?.appOrderTotal)
     : null;
   const total = isAppSale ? appOrderTotal ?? linesTotal : linesTotal;
 
   const paidAt =
-    toDate(relatedDraft?.payment?.confirmedAt) ||
     toDate(targetSale.payment?.confirmedAt) ||
+    toDate(relatedDraft?.payment?.confirmedAt) ||
     toDate(targetSale.timestamp);
 
-  const payment = relatedDraft?.payment ?? targetSale.payment;
+  const payment =
+    targetSale.payment?.method !== null && targetSale.payment?.method !== undefined
+      ? targetSale.payment
+      : relatedDraft?.payment ?? targetSale.payment;
   const paymentMethod = payment?.method ?? null;
   const paymentCashReceived = normalizeMoneyValue(payment?.cashReceived);
   const paymentChange = normalizeMoneyValue(payment?.change);

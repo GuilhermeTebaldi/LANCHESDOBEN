@@ -1525,6 +1525,41 @@ const applySaleEditById = (
     };
   };
 
+  if (targetDraftId.length > 0) {
+    const editedDraft = (state.saleDrafts || []).find((draft) => draft.id === targetDraftId);
+    if (editedDraft) {
+      const draftOrigin = normalizeSaleOrigin(editedDraft.saleOrigin ?? targetSale.saleOrigin);
+      const draftAppOrderTotal = isAppSaleOrigin(draftOrigin)
+        ? hasOrderTotalOverride
+          ? orderTotal
+          : normalizeAppOrderTotal(
+              editedDraft.appOrderTotal ?? targetSale.appOrderTotal ?? orderTotal
+            )
+        : null;
+
+      editedDraft.saleOrigin = draftOrigin;
+      editedDraft.total = orderTotal;
+      editedDraft.appOrderTotal = draftAppOrderTotal;
+      editedDraft.payment = normalizeSalePayment(paymentSnapshot);
+      editedDraft.status = 'PAID';
+      editedDraft.stockDebited = true;
+      editedDraft.updatedAt = toTimestampIso();
+
+      if (hasOrderTotalOverride) {
+        editedDraft.items = editedDraft.items.map((item) => {
+          const lineSaleId = `${editedDraft.id}-${item.id}`;
+          const lineTotal = totalBySaleId.get(lineSaleId);
+          if (lineTotal === undefined) return item;
+          const qty = Number.isFinite(Number(item.qty)) && Number(item.qty) > 0 ? Number(item.qty) : 1;
+          return {
+            ...item,
+            unitPriceSnapshot: roundMoney(lineTotal / qty),
+          };
+        });
+      }
+    }
+  }
+
   state.sales = state.sales.map(applyEdit);
   state.globalSales = state.globalSales.map(applyEdit);
 };

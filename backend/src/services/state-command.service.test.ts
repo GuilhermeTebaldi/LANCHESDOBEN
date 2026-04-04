@@ -1113,6 +1113,23 @@ test('sale edit by id updates paid order payment and total without touching stoc
     ),
     true
   );
+
+  const editedDraft = edited.saleDrafts?.find((draft) => draft.id === 'draft-edit-order');
+  assert.ok(editedDraft);
+  assert.equal(editedDraft?.status, 'PAID');
+  assert.equal(editedDraft?.total, 24);
+  assert.equal(editedDraft?.payment.method, 'DINHEIRO');
+  assert.equal(editedDraft?.payment.cashReceived, 30);
+  assert.equal(editedDraft?.payment.change, 6);
+  assert.equal(
+    Number(
+      (editedDraft?.items || []).reduce((sum, item) => {
+        const unitPrice = Number(item.unitPriceSnapshot) || 0;
+        return sum + unitPrice * item.qty;
+      }, 0).toFixed(2)
+    ),
+    24
+  );
 });
 
 test('sale edit by id requires cash amount when switching payment to dinheiro', () => {
