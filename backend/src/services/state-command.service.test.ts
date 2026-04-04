@@ -72,6 +72,7 @@ test('commandTouchesArchiveState classifies hot-only commands safely', () => {
   assert.equal(commandTouchesArchiveState('SALE_REGISTER'), true);
   assert.equal(commandTouchesArchiveState('SALE_DRAFT_CONFIRM_PAID'), true);
   assert.equal(commandTouchesArchiveState('SALE_DRAFT_FINALIZE_AND_CONFIRM_PAID'), true);
+  assert.equal(commandTouchesArchiveState('SALE_EDIT_BY_ID'), true);
   assert.equal(commandTouchesArchiveState('CASH_EXPENSE'), true);
   assert.equal(commandTouchesArchiveState('CLOSE_DAY'), true);
 });
@@ -1034,6 +1035,104 @@ test('sale undo by id returns 404 when sale does not exist in session history', 
     (error: unknown) => {
       assert.ok(error instanceof HttpError);
       assert.equal(error.statusCode, 404);
+      return true;
+    }
+  );
+});
+
+test('sale edit by id updates paid order payment and total without touching stock', () => {
+  const base = createBaseState();
+  const withExtraProduct: FrontAppState = {
+    ...base,
+    products: [
+      ...base.products,
+      {
+        id: 'p-sauce-shot',
+        name: 'Molho Extra',
+        price: 6,
+        imageUrl: 'https://example.com/sauce.jpg',
+        category: 'Side',
+        recipe: [{ ingredientId: 'i-sauce', quantity: 10 }],
+      },
+    ],
+  };
+
+  const withDraft = applyStateCommand(withExtraProduct, {
+    type: 'SALE_DRAFT_CREATE',
+    draftId: 'draft-edit-order',
+  });
+  const withBurger = applyStateCommand(withDraft, {
+    type: 'SALE_DRAFT_ADD_ITEM',
+    draftId: 'draft-edit-order',
+    productId: 'p-burger',
+  });
+  const withSauce = applyStateCommand(withBurger, {
+    type: 'SALE_DRAFT_ADD_ITEM',
+    draftId: 'draft-edit-order',
+    productId: 'p-sauce-shot',
+  });
+  const pending = applyStateCommand(withSauce, {
+    type: 'SALE_DRAFT_FINALIZE',
+    draftId: 'draft-edit-order',
+    paymentMethod: 'PIX',
+  });
+  const paid = applyStateCommand(pending, {
+    type: 'SALE_DRAFT_CONFIRM_PAID',
+    draftId: 'draft-edit-order',
+  });
+
+  const targetSaleId = paid.sales[0]?.id;
+  assert.ok(targetSaleId);
+
+  const edited = applyStateCommand(paid, {
+    type: 'SALE_EDIT_BY_ID',
+    saleId: targetSaleId as string,
+    paymentMethod: 'DINHEIRO',
+    cashReceived: 30,
+    orderTotal: 24,
+  });
+
+  assert.equal(edited.sales.length, 2);
+  assert.equal(edited.globalSales.length, 2);
+  assert.equal(edited.stockEntries.length, paid.stockEntries.length);
+  assert.equal(edited.globalStockEntries.length, paid.globalStockEntries.length);
+  assert.equal(edited.ingredients.find((entry) => entry.id === 'i-bread')?.currentStock, 49);
+  assert.equal(edited.ingredients.find((entry) => entry.id === 'i-meat')?.currentStock, 39);
+  assert.equal(edited.ingredients.find((entry) => entry.id === 'i-sauce')?.currentStock, 170);
+  assert.equal(
+    Number(edited.sales.reduce((sum, sale) => sum + sale.total, 0).toFixed(2)),
+    24
+  );
+  assert.equal(
+    Number(edited.globalSales.reduce((sum, sale) => sum + sale.total, 0).toFixed(2)),
+    24
+  );
+  assert.equal(
+    edited.sales.every(
+      (sale) => sale.payment?.method === 'DINHEIRO' && sale.payment?.cashReceived === 30 && sale.payment?.change === 6
+    ),
+    true
+  );
+});
+
+test('sale edit by id requires cash amount when switching payment to dinheiro', () => {
+  const sold = applyStateCommand(createBaseState(), {
+    type: 'SALE_REGISTER',
+    productId: 'p-burger',
+  });
+  const saleId = sold.sales[0]?.id;
+  assert.ok(saleId);
+
+  assert.throws(
+    () =>
+      applyStateCommand(sold, {
+        type: 'SALE_EDIT_BY_ID',
+        saleId: saleId as string,
+        paymentMethod: 'DINHEIRO',
+      }),
+    (error: unknown) => {
+      assert.ok(error instanceof HttpError);
+      assert.equal(error.statusCode, 422);
       return true;
     }
   );

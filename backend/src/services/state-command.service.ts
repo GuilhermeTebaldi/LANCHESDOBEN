@@ -1383,6 +1383,152 @@ const applySaleRegister = (state: FrontAppState, command: Extract<StateCommandIn
   state.globalSales.push({ ...newSale });
 };
 
+const applySaleEditById = (
+  state: FrontAppState,
+  command: Extract<StateCommandInput, { type: 'SALE_EDIT_BY_ID' }>
+) => {
+  const saleIndex = state.sales.map((sale) => sale.id).lastIndexOf(command.saleId);
+  if (saleIndex < 0) {
+    throw new HttpError(404, 'Venda não encontrada para edição.');
+  }
+
+  const targetSale = state.sales[saleIndex];
+  if (targetSale.status && targetSale.status !== 'PAID') {
+    throw new HttpError(409, 'Apenas vendas pagas podem ser editadas.', {
+      saleId: targetSale.id,
+      status: targetSale.status,
+    });
+  }
+
+  const targetDraftId = typeof targetSale.saleDraftId === 'string' ? targetSale.saleDraftId.trim() : '';
+  const targetSales =
+    targetDraftId.length > 0
+      ? state.sales.filter((sale) => {
+          const saleDraftId = typeof sale.saleDraftId === 'string' ? sale.saleDraftId.trim() : '';
+          return saleDraftId === targetDraftId;
+        })
+      : [targetSale];
+
+  if (targetSales.length === 0) {
+    throw new HttpError(404, 'Pedido não encontrado para edição.');
+  }
+
+  const currentOrderTotal = roundMoney(
+    targetSales.reduce((sum, sale) => sum + (Number.isFinite(Number(sale.total)) ? Number(sale.total) : 0), 0)
+  );
+  const orderTotalOverride = command.orderTotal;
+  const hasOrderTotalOverride = orderTotalOverride !== undefined;
+  const orderTotal = hasOrderTotalOverride ? roundMoney(orderTotalOverride) : currentOrderTotal;
+  if (!Number.isFinite(orderTotal) || orderTotal <= 0) {
+    throw new HttpError(422, 'Valor total inválido para edição da venda.', {
+      orderTotal: command.orderTotal,
+    });
+  }
+
+  const currentPayment = normalizeSalePayment(targetSale.payment);
+  const confirmedAt = currentPayment.confirmedAt ?? targetSale.timestamp ?? toTimestampIso();
+
+  let paymentSnapshot: FrontSalePayment;
+  if (command.paymentMethod === 'DIVIDIDO') {
+    const splitPlan = buildSplitPaymentPlan({
+      splitMode: command.splitMode ?? currentPayment.splitMode,
+      splitCount: command.splitCount ?? currentPayment.splitCount,
+      splitPayments: command.splitPayments ?? currentPayment.splitPayments,
+      amountDue: orderTotal,
+    });
+
+    paymentSnapshot = {
+      method: 'DIVIDIDO',
+      cashReceived: splitPlan.totalCashReceived,
+      change: splitPlan.totalCashChange,
+      confirmedAt,
+      splitMode: splitPlan.splitMode,
+      splitCount: splitPlan.splitCount,
+      splitPayments: splitPlan.splitPayments,
+    };
+  } else if (command.paymentMethod === 'DINHEIRO') {
+    const resolvedCashRaw =
+      command.cashReceived !== undefined
+        ? command.cashReceived
+        : currentPayment.method === 'DINHEIRO'
+          ? currentPayment.cashReceived
+          : null;
+    if (resolvedCashRaw === null || !Number.isFinite(resolvedCashRaw)) {
+      throw new HttpError(422, 'Informe o valor recebido em dinheiro para editar esta venda.');
+    }
+    const resolvedCash = roundMoney(resolvedCashRaw);
+    if (resolvedCash + Number.EPSILON < orderTotal) {
+      throw new HttpError(409, 'Valor em dinheiro insuficiente para editar esta venda.', {
+        total: orderTotal,
+        cashReceived: resolvedCash,
+      });
+    }
+
+    paymentSnapshot = {
+      method: 'DINHEIRO',
+      cashReceived: resolvedCash,
+      change: roundMoney(resolvedCash - orderTotal),
+      confirmedAt,
+      splitMode: null,
+      splitCount: null,
+      splitPayments: [],
+    };
+  } else {
+    paymentSnapshot = {
+      method: command.paymentMethod,
+      cashReceived: null,
+      change: null,
+      confirmedAt,
+      splitMode: null,
+      splitCount: null,
+      splitPayments: [],
+    };
+  }
+
+  const lineTotals = hasOrderTotalOverride
+    ? allocateOrderTotalByWeight(
+        targetSales.map((sale) => {
+          const value = Number(sale.total);
+          return Number.isFinite(value) && value > 0 ? value : 0;
+        }),
+        orderTotal
+      )
+    : targetSales.map((sale) => roundMoney(Number(sale.total) || 0));
+  const orderSaleIds = new Set(targetSales.map((sale) => sale.id));
+  const totalBySaleId = new Map<string, number>();
+  targetSales.forEach((sale, index) => {
+    totalBySaleId.set(sale.id, lineTotals[index] ?? 0);
+  });
+
+  const applyEdit = (sale: FrontSale): FrontSale => {
+    if (!orderSaleIds.has(sale.id)) return sale;
+    const nextTotal = totalBySaleId.get(sale.id) ?? roundMoney(Number(sale.total) || 0);
+    const basePrice = Number(sale.basePrice);
+    const nextPriceAdjustment =
+      hasOrderTotalOverride && Number.isFinite(basePrice)
+        ? roundMoney(nextTotal - basePrice)
+        : sale.priceAdjustment;
+    const normalizedOrigin = normalizeSaleOrigin(sale.saleOrigin);
+    const nextAppOrderTotal = isAppSaleOrigin(normalizedOrigin)
+      ? hasOrderTotalOverride
+        ? orderTotal
+        : normalizeAppOrderTotal(sale.appOrderTotal ?? orderTotal)
+      : sale.appOrderTotal ?? null;
+
+    return {
+      ...sale,
+      status: 'PAID',
+      total: nextTotal,
+      priceAdjustment: nextPriceAdjustment,
+      payment: cloneSalePayment(paymentSnapshot),
+      appOrderTotal: nextAppOrderTotal,
+    };
+  };
+
+  state.sales = state.sales.map(applyEdit);
+  state.globalSales = state.globalSales.map(applyEdit);
+};
+
 const applyUndoSaleById = (state: FrontAppState, saleId: string) => {
   const saleIndex = state.sales.map((sale) => sale.id).lastIndexOf(saleId);
   if (saleIndex < 0) {
@@ -1774,6 +1920,9 @@ export const applyStateCommand = (
     case 'SALE_UNDO_BY_ID':
       applyUndoSaleById(state, command.saleId);
       return state;
+    case 'SALE_EDIT_BY_ID':
+      applySaleEditById(state, command);
+      return state;
     case 'INGREDIENT_STOCK_MOVE':
       applyIngredientStockMove(state, command);
       return state;
@@ -1907,6 +2056,7 @@ const ARCHIVE_MUTATING_COMMAND_TYPES = new Set<StateCommandInput['type']>([
   'SALE_DRAFT_FINALIZE_AND_CONFIRM_PAID',
   'SALE_UNDO_LAST',
   'SALE_UNDO_BY_ID',
+  'SALE_EDIT_BY_ID',
   'INGREDIENT_STOCK_MOVE',
   'CASH_EXPENSE',
   'CASH_EXPENSE_REVERT',

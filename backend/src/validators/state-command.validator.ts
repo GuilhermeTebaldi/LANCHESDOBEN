@@ -156,6 +156,17 @@ const saleUndoByIdCommandSchema = baseCommandSchema.extend({
   saleId: idSchema,
 });
 
+const saleEditByIdCommandSchema = baseCommandSchema.extend({
+  type: z.literal('SALE_EDIT_BY_ID'),
+  saleId: idSchema,
+  paymentMethod: salePaymentMethodSchema,
+  cashReceived: z.coerce.number().finite().min(0).optional(),
+  orderTotal: z.coerce.number().finite().positive().optional(),
+  splitMode: salePaymentSplitModeSchema.optional(),
+  splitCount: z.coerce.number().int().min(1).max(99).optional(),
+  splitPayments: z.array(salePaymentSplitItemSchema).min(1).max(99).optional(),
+});
+
 const ingredientStockMoveCommandSchema = baseCommandSchema.extend({
   type: z.literal('INGREDIENT_STOCK_MOVE'),
   ingredientId: idSchema,
@@ -269,6 +280,7 @@ export const stateCommandSchema = z.discriminatedUnion('type', [
   saleDraftCancelCommandSchema,
   saleUndoCommandSchema,
   saleUndoByIdCommandSchema,
+  saleEditByIdCommandSchema,
   ingredientStockMoveCommandSchema,
   cashExpenseCommandSchema,
   cashExpenseRevertCommandSchema,

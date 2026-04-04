@@ -481,6 +481,17 @@ interface UndoSaleGroup {
   totalCost: number;
 }
 
+interface SaleEditSession {
+  groupId: string;
+  saleId: string;
+  orderTotal: number;
+  paymentMethod: SalePaymentMethod;
+  cashReceived: number | null;
+  splitMode: SalePaymentSplitMode | null;
+  splitCount: number | null;
+  splitPayments: SalePaymentSplitEntry[];
+}
+
 interface AdminSessionBarrier {
   token: string;
   issuedAt: number;
@@ -1608,6 +1619,7 @@ const toCommandSyncErrorContext = (command: StateCommand): Record<string, unknow
   if ('saleId' in command) context.saleId = command.saleId;
   if ('saleIds' in command) context.saleIdsCount = command.saleIds.length;
   if ('paymentMethod' in command) context.paymentMethod = command.paymentMethod;
+  if ('orderTotal' in command) context.orderTotal = command.orderTotal;
   if ('splitMode' in command) context.splitMode = command.splitMode || null;
 
   return context;
@@ -2742,7 +2754,8 @@ const getCommandExecutionPriority = (command: StateCommand): CommandPriority => 
   if (
     command.type === 'SALE_DRAFT_ADD_ITEM' ||
     command.type === 'SALE_DRAFT_UPDATE_ITEM' ||
-    command.type === 'SALE_DRAFT_REMOVE_ITEM'
+    command.type === 'SALE_DRAFT_REMOVE_ITEM' ||
+    command.type === 'SALE_EDIT_BY_ID'
   ) {
     return 'HIGH';
   }
@@ -3112,6 +3125,11 @@ const App: React.FC = () => {
   });
   const [expandedUndoGroupId, setExpandedUndoGroupId] = useState<string | null>(null);
   const [isUndoProcessing, setIsUndoProcessing] = useState(false);
+  const [saleEditSession, setSaleEditSession] = useState<SaleEditSession | null>(null);
+  const [saleEditPaymentMethod, setSaleEditPaymentMethod] = useState<SalePaymentMethod>('PIX');
+  const [saleEditOrderTotalInput, setSaleEditOrderTotalInput] = useState('');
+  const [saleEditCashReceivedInput, setSaleEditCashReceivedInput] = useState('');
+  const [isSaleEditProcessing, setIsSaleEditProcessing] = useState(false);
   const [isCartOpen, setIsCartOpen] = useState(false);
   const [isPaymentOpen, setIsPaymentOpen] = useState(false);
   const [isCancellingDraft, setIsCancellingDraft] = useState(false);
@@ -11800,6 +11818,157 @@ const App: React.FC = () => {
     setIsUndoHistoryOpen(true);
   };
 
+  const handleStartSaleEdit = (groupId: string) => {
+    const group = recentUndoGroups.find((entry) => entry.id === groupId);
+    if (!group) {
+      showNotification('Pedido não encontrado para edição.');
+      return;
+    }
+    const firstSale = group.sales[0];
+    if (!firstSale) {
+      showNotification('Pedido sem itens para edição.');
+      return;
+    }
+
+    const methodCandidate = firstSale.payment?.method;
+    const paymentMethod: SalePaymentMethod =
+      methodCandidate === 'PIX' ||
+      methodCandidate === 'DEBITO' ||
+      methodCandidate === 'CREDITO' ||
+      methodCandidate === 'DINHEIRO' ||
+      methodCandidate === 'DIVIDIDO'
+        ? methodCandidate
+        : 'PIX';
+    const cashReceived =
+      paymentMethod === 'DINHEIRO' && Number.isFinite(Number(firstSale.payment?.cashReceived))
+        ? roundMoney(Number(firstSale.payment?.cashReceived))
+        : null;
+    const splitMode = paymentMethod === 'DIVIDIDO' ? firstSale.payment?.splitMode || null : null;
+    const splitCount =
+      paymentMethod === 'DIVIDIDO' && Number.isFinite(Number(firstSale.payment?.splitCount))
+        ? Number(firstSale.payment?.splitCount)
+        : null;
+    const splitPayments =
+      paymentMethod === 'DIVIDIDO'
+        ? (firstSale.payment?.splitPayments || [])
+            .filter((entry): entry is SalePaymentSplitEntry => BASE_PAYMENT_METHODS.includes(entry.method))
+            .map((entry) => ({
+              sequence: entry.sequence,
+              label: entry.label,
+              method: entry.method,
+              amount: roundMoney(Number(entry.amount) || 0),
+              cashReceived:
+                entry.cashReceived !== null && entry.cashReceived !== undefined
+                  ? roundMoney(Number(entry.cashReceived))
+                  : null,
+              change:
+                entry.change !== null && entry.change !== undefined
+                  ? roundMoney(Number(entry.change))
+                  : null,
+            }))
+        : [];
+
+    const orderTotal = roundMoney(group.total);
+    setSaleEditSession({
+      groupId: group.id,
+      saleId: firstSale.id,
+      orderTotal,
+      paymentMethod,
+      cashReceived,
+      splitMode,
+      splitCount,
+      splitPayments,
+    });
+    setSaleEditPaymentMethod(paymentMethod);
+    setSaleEditOrderTotalInput(formatMoney(orderTotal));
+    setSaleEditCashReceivedInput(cashReceived !== null ? formatMoney(cashReceived) : '');
+  };
+
+  const handleCloseSaleEdit = () => {
+    if (isSaleEditProcessing) return;
+    setSaleEditSession(null);
+  };
+
+  const handleSubmitSaleEdit = async () => {
+    if (!saleEditSession || isSaleEditProcessing) return;
+
+    const currentGroup = recentUndoGroups.find((entry) => entry.id === saleEditSession.groupId);
+    if (!currentGroup) {
+      showNotification('Pedido não encontrado para edição.');
+      setSaleEditSession(null);
+      return;
+    }
+
+    const parsedOrderTotal = parseMoneyInput(saleEditOrderTotalInput);
+    if (parsedOrderTotal === null || parsedOrderTotal <= 0) {
+      showNotification('Informe um valor total válido para o pedido.');
+      return;
+    }
+
+    const normalizedOrderTotal = roundMoney(parsedOrderTotal);
+    const currentOrderTotal = roundMoney(saleEditSession.orderTotal);
+    const hasOrderTotalChange = Math.abs(normalizedOrderTotal - currentOrderTotal) > 0.009;
+    const amountDue = hasOrderTotalChange ? normalizedOrderTotal : currentOrderTotal;
+
+    const command: StateCommand = {
+      type: 'SALE_EDIT_BY_ID',
+      saleId: saleEditSession.saleId,
+      paymentMethod: saleEditPaymentMethod,
+    };
+
+    if (hasOrderTotalChange) {
+      command.orderTotal = normalizedOrderTotal;
+    }
+
+    if (saleEditPaymentMethod === 'DINHEIRO') {
+      const parsedCashReceived = parseMoneyInput(saleEditCashReceivedInput);
+      if (parsedCashReceived === null || parsedCashReceived + 0.009 < amountDue) {
+        showNotification('Valor em dinheiro insuficiente para o total informado.');
+        return;
+      }
+      command.cashReceived = roundMoney(parsedCashReceived);
+    } else if (saleEditPaymentMethod === 'DIVIDIDO') {
+      if (
+        !saleEditSession.splitMode ||
+        !saleEditSession.splitCount ||
+        saleEditSession.splitPayments.length === 0
+      ) {
+        showNotification('Pagamento dividido sem parcelas válidas para edição.');
+        return;
+      }
+      if (hasOrderTotalChange) {
+        showNotification(
+          'Para alterar o valor, escolha PIX, Débito, Crédito ou Dinheiro.'
+        );
+        return;
+      }
+
+      command.splitMode = saleEditSession.splitMode;
+      command.splitCount = saleEditSession.splitCount;
+      command.splitPayments = saleEditSession.splitPayments.map((entry) => ({
+        sequence: entry.sequence,
+        label: entry.label,
+        method: entry.method,
+        amount: entry.amount,
+        cashReceived: entry.cashReceived === null ? undefined : entry.cashReceived,
+      }));
+    }
+
+    const confirmed = confirm(
+      `Salvar edição do pedido?\nItens: ${currentGroup.sales.length}\nTotal: R$ ${amountDue.toFixed(2)}`
+    );
+    if (!confirmed) return;
+
+    setIsSaleEditProcessing(true);
+    try {
+      const ok = await runCommandWithSync(command, 'Pedido atualizado com sucesso!');
+      if (!ok) return;
+      setSaleEditSession(null);
+    } finally {
+      setIsSaleEditProcessing(false);
+    }
+  };
+
   const handleUndoSaleGroup = async (groupId: string) => {
     if (isUndoProcessing) return;
     const targetGroup = recentUndoGroups.find((group) => group.id === groupId);
@@ -12131,7 +12300,7 @@ const App: React.FC = () => {
         const isOtherExpense = entry.ingredientId === 'cash-expense' || Number(entry.quantity) === 0;
         const quantity = Number(entry.quantity);
         const ingredientUnit = entry.ingredientId
-          ? ingredientUnitById.get(entry.ingredientId)
+          ? (ingredientUnitById.get(entry.ingredientId) as string | undefined)
           : undefined;
         return {
           entryId: entry.id,
@@ -12358,6 +12527,36 @@ const App: React.FC = () => {
 
     return groupOrder;
   }, [recentSalesForUndo]);
+  const activeSaleEditGroup = useMemo<UndoSaleGroup | null>(() => {
+    if (!saleEditSession) return null;
+    return recentUndoGroups.find((group) => group.id === saleEditSession.groupId) || null;
+  }, [recentUndoGroups, saleEditSession]);
+  const saleEditParsedOrderTotal = useMemo(
+    () => parseMoneyInput(saleEditOrderTotalInput),
+    [saleEditOrderTotalInput]
+  );
+  const saleEditOrderTotal = useMemo(() => {
+    if (!saleEditSession) return 0;
+    if (saleEditParsedOrderTotal === null || saleEditParsedOrderTotal <= 0) {
+      return roundMoney(saleEditSession.orderTotal);
+    }
+    return roundMoney(saleEditParsedOrderTotal);
+  }, [saleEditParsedOrderTotal, saleEditSession]);
+  const saleEditParsedCashReceived = useMemo(() => {
+    if (saleEditPaymentMethod !== 'DINHEIRO') return null;
+    return parseMoneyInput(saleEditCashReceivedInput);
+  }, [saleEditCashReceivedInput, saleEditPaymentMethod]);
+  const saleEditCashDelta = useMemo(() => {
+    if (saleEditPaymentMethod !== 'DINHEIRO') return null;
+    if (saleEditParsedCashReceived === null) return null;
+    return saleEditParsedCashReceived - saleEditOrderTotal;
+  }, [saleEditOrderTotal, saleEditParsedCashReceived, saleEditPaymentMethod]);
+  const canUseDividedOnSaleEdit = Boolean(
+    saleEditSession &&
+    saleEditSession.splitMode &&
+    saleEditSession.splitCount &&
+    saleEditSession.splitPayments.length > 0
+  );
   const parsedAppOrderTotalInput = useMemo(
     () => parseMoneyInput(appOrderTotalInput),
     [appOrderTotalInput]
@@ -12620,6 +12819,19 @@ const App: React.FC = () => {
       setExpandedUndoGroupId(null);
     }
   }, [expandedUndoGroupId, isUndoHistoryOpen, recentUndoGroups]);
+
+  useEffect(() => {
+    if (!saleEditSession) return;
+    if (!isUndoHistoryOpen || view !== ViewMode.POS) {
+      if (!isSaleEditProcessing) {
+        setSaleEditSession(null);
+      }
+      return;
+    }
+    if (!recentUndoGroups.some((group) => group.id === saleEditSession.groupId) && !isSaleEditProcessing) {
+      setSaleEditSession(null);
+    }
+  }, [isSaleEditProcessing, isUndoHistoryOpen, recentUndoGroups, saleEditSession, view]);
 
   const filteredProducts = useMemo(() => {
     return products.filter(p => {
@@ -14033,7 +14245,8 @@ const App: React.FC = () => {
               )}
               {recentUndoGroups.map((group, index) => {
                 const isLatest = index === 0;
-                const isCommandBusy = isUndoProcessing || isStateHydrating || pendingStateOps > 0;
+                const isCommandBusy =
+                  isUndoProcessing || isStateHydrating || pendingStateOps > 0 || isSaleEditProcessing;
                 const isExpanded = expandedUndoGroupId === group.id;
                 const firstSale = group.sales[0];
                 const title =
@@ -14115,6 +14328,15 @@ const App: React.FC = () => {
                           </button>
                           <button
                             onClick={() => {
+                              handleStartSaleEdit(group.id);
+                            }}
+                            disabled={isCommandBusy}
+                            className="qb-btn-touch bg-emerald-600 text-white px-4 py-2 rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-emerald-700 transition-all active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
+                          >
+                            Editar Pedido
+                          </button>
+                          <button
+                            onClick={() => {
                               void handleUndoSaleGroup(group.id);
                             }}
                             disabled={isCommandBusy}
@@ -14135,6 +14357,156 @@ const App: React.FC = () => {
                 className="qb-btn-touch bg-slate-100 text-slate-700 px-4 py-2 rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-slate-200 transition-colors"
               >
                 Fechar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {saleEditSession && (
+        <div className="fixed inset-0 z-[230] bg-slate-900/85 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-xl bg-white rounded-[30px] border-2 border-slate-100 shadow-2xl overflow-hidden">
+            <div className="p-4 bg-emerald-700 text-white flex items-center justify-between gap-3">
+              <div>
+                <h3 className="text-lg font-black uppercase tracking-tight">Editar Pedido</h3>
+                <p className="text-[10px] uppercase tracking-widest text-emerald-100">
+                  Ajuste forma de pagamento e valor do pedido já pago
+                </p>
+              </div>
+              <button
+                onClick={handleCloseSaleEdit}
+                disabled={isSaleEditProcessing}
+                className="qb-btn-touch bg-emerald-800 hover:bg-emerald-900 p-2 rounded-full transition-colors disabled:opacity-50"
+                title="Fechar"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+              </button>
+            </div>
+
+            <div className="p-4 space-y-4 bg-slate-50">
+              <div className="rounded-2xl border border-slate-200 bg-white p-3">
+                <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">
+                  Pedido
+                </p>
+                <p className="text-sm font-black uppercase text-slate-800">
+                  {activeSaleEditGroup
+                    ? activeSaleEditGroup.sales.length > 1
+                      ? `${activeSaleEditGroup.sales.length} itens`
+                      : activeSaleEditGroup.sales[0]?.productName || 'Venda'
+                    : 'Pedido selecionado'}
+                </p>
+                <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">
+                  Total atual: R$ {saleEditSession.orderTotal.toFixed(2)}
+                </p>
+              </div>
+
+              <label className="block">
+                <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">
+                  Valor total do pedido
+                </span>
+                <input
+                  type="text"
+                  value={saleEditOrderTotalInput}
+                  onChange={(event) => setSaleEditOrderTotalInput(event.target.value)}
+                  disabled={isSaleEditProcessing}
+                  className="mt-1 w-full bg-white border border-slate-200 rounded-xl px-3 py-2 text-sm font-black text-slate-800"
+                  placeholder="0.00"
+                />
+              </label>
+
+              <div>
+                <p className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1.5">
+                  Forma de pagamento
+                </p>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                  {(['PIX', 'DEBITO', 'CREDITO', 'DINHEIRO'] as SaleBasePaymentMethod[]).map((method) => (
+                    <button
+                      key={method}
+                      type="button"
+                      onClick={() => setSaleEditPaymentMethod(method)}
+                      disabled={isSaleEditProcessing}
+                      className={`qb-btn-touch px-3 py-2 rounded-xl border text-[10px] font-black uppercase tracking-widest transition-all ${
+                        saleEditPaymentMethod === method
+                          ? 'bg-emerald-600 text-white border-emerald-600'
+                          : 'bg-white text-slate-700 border-slate-200 hover:border-emerald-400'
+                      } disabled:opacity-40`}
+                    >
+                      {formatPaymentMethodLabel(method)}
+                    </button>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => setSaleEditPaymentMethod('DIVIDIDO')}
+                    disabled={isSaleEditProcessing || !canUseDividedOnSaleEdit}
+                    className={`qb-btn-touch px-3 py-2 rounded-xl border text-[10px] font-black uppercase tracking-widest transition-all ${
+                      saleEditPaymentMethod === 'DIVIDIDO'
+                        ? 'bg-emerald-600 text-white border-emerald-600'
+                        : 'bg-white text-slate-700 border-slate-200 hover:border-emerald-400'
+                    } disabled:opacity-40`}
+                    title={
+                      canUseDividedOnSaleEdit
+                        ? 'Reaproveita as parcelas já registradas'
+                        : 'Disponível apenas para pedidos que já foram pagos como dividido'
+                    }
+                  >
+                    Dividido
+                  </button>
+                </div>
+              </div>
+
+              {saleEditPaymentMethod === 'DINHEIRO' && (
+                <div className="rounded-2xl border border-slate-200 bg-white p-3 space-y-2">
+                  <label className="block">
+                    <span className="text-[10px] font-black uppercase tracking-widest text-slate-500">
+                      Valor recebido
+                    </span>
+                    <input
+                      type="text"
+                      value={saleEditCashReceivedInput}
+                      onChange={(event) => setSaleEditCashReceivedInput(event.target.value)}
+                      disabled={isSaleEditProcessing}
+                      className="mt-1 w-full bg-slate-100 border border-slate-200 rounded-xl px-3 py-2 text-sm font-black text-slate-800"
+                      placeholder="0.00"
+                    />
+                  </label>
+                  {saleEditCashDelta !== null && (
+                    saleEditCashDelta >= 0 ? (
+                      <p className="text-[11px] font-black text-emerald-700">
+                        Troco: R$ {formatMoney(saleEditCashDelta)}
+                      </p>
+                    ) : (
+                      <p className="text-[11px] font-black text-red-700">
+                        Faltam: R$ {formatMoney(Math.abs(saleEditCashDelta))}
+                      </p>
+                    )
+                  )}
+                </div>
+              )}
+
+              {saleEditPaymentMethod === 'DIVIDIDO' && (
+                <p className="text-[10px] font-bold text-amber-700 bg-amber-100 border border-amber-300 rounded-xl px-3 py-2">
+                  Pagamento dividido reutiliza as parcelas já registradas. Para alterar o valor total,
+                  escolha PIX, Débito, Crédito ou Dinheiro.
+                </p>
+              )}
+            </div>
+
+            <div className="p-4 bg-white border-t border-slate-100 flex justify-end gap-2">
+              <button
+                onClick={handleCloseSaleEdit}
+                disabled={isSaleEditProcessing}
+                className="qb-btn-touch bg-slate-100 text-slate-700 px-4 py-2 rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-slate-200 transition-colors disabled:opacity-40"
+              >
+                Cancelar
+              </button>
+              <button
+                onClick={() => {
+                  void handleSubmitSaleEdit();
+                }}
+                disabled={isSaleEditProcessing || saleEditParsedOrderTotal === null || saleEditParsedOrderTotal <= 0}
+                className="qb-btn-touch bg-emerald-600 text-white px-4 py-2 rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-emerald-700 transition-colors disabled:opacity-40"
+              >
+                {isSaleEditProcessing ? 'Salvando...' : 'Salvar Edição'}
               </button>
             </div>
           </div>

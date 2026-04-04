@@ -141,6 +141,22 @@ export type StateCommand =
   | (BaseCommand & { type: 'SALE_UNDO_LAST' })
   | (BaseCommand & { type: 'SALE_UNDO_BY_ID'; saleId: string })
   | (BaseCommand & {
+      type: 'SALE_EDIT_BY_ID';
+      saleId: string;
+      paymentMethod: SalePaymentMethod;
+      cashReceived?: number;
+      orderTotal?: number;
+      splitMode?: SalePaymentSplitMode;
+      splitCount?: number;
+      splitPayments?: Array<{
+        sequence?: number;
+        label?: string;
+        method: SaleBasePaymentMethod;
+        amount: number;
+        cashReceived?: number;
+      }>;
+    })
+  | (BaseCommand & {
       type: 'INGREDIENT_STOCK_MOVE';
       ingredientId: string;
       amount: number;
