@@ -11892,8 +11892,8 @@ const App: React.FC = () => {
   const handleSubmitSaleEdit = async () => {
     if (!saleEditSession || isSaleEditProcessing) return;
 
-    const currentGroup = recentUndoGroups.find((entry) => entry.id === saleEditSession.groupId);
-    if (!currentGroup) {
+    const hasCurrentGroup = recentUndoGroups.some((entry) => entry.id === saleEditSession.groupId);
+    if (!hasCurrentGroup) {
       showNotification('Pedido não encontrado para edição.');
       setSaleEditSession(null);
       return;
@@ -11953,11 +11953,6 @@ const App: React.FC = () => {
         cashReceived: entry.cashReceived === null ? undefined : entry.cashReceived,
       }));
     }
-
-    const confirmed = confirm(
-      `Salvar edição do pedido?\nItens: ${currentGroup.sales.length}\nTotal: R$ ${amountDue.toFixed(2)}`
-    );
-    if (!confirmed) return;
 
     setIsSaleEditProcessing(true);
     try {
