@@ -152,6 +152,7 @@ export interface Sale {
 export interface DailySalesHistoryEntry {
   id: string;
   closedAt: Date | string;
+  businessDate?: string;
   openingCash: number;
   totalRevenue: number;
   totalPurchases: number;

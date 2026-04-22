@@ -151,6 +151,7 @@ export interface FrontSale {
 export interface FrontDailySalesHistoryEntry {
   id: string;
   closedAt: Date | string;
+  businessDate?: string;
   openingCash: number;
   totalRevenue: number;
   totalPurchases: number;

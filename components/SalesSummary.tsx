@@ -236,7 +236,43 @@ const toDate = (value: Date | string): Date => {
   return date;
 };
 
-const getDayKey = (value: Date | string): string => toDate(value).toLocaleDateString('pt-BR');
+const BUSINESS_DAY_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+const pad2 = (value: number): string => value.toString().padStart(2, '0');
+const toDayKey = (date: Date): string =>
+  `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+
+const normalizeBusinessDayKey = (value: unknown): string | undefined => {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (!BUSINESS_DAY_KEY_PATTERN.test(trimmed)) return undefined;
+  return trimmed;
+};
+
+const formatBusinessDayLabel = (dayKey: string): string => {
+  const match = BUSINESS_DAY_KEY_PATTERN.exec(dayKey);
+  if (!match) return dayKey;
+  const [year, month, day] = dayKey.split('-');
+  return `${day}/${month}/${year}`;
+};
+
+const getDayKey = (value: Date | string): string => toDayKey(toDate(value));
+
+const getHistoryBusinessDayKey = (entry: DailySalesHistoryEntry): string =>
+  normalizeBusinessDayKey(entry.businessDate) || getDayKey(entry.closedAt);
+
+const resolveSessionBusinessDayKey = (sales: Sale[], stockEntries: StockEntry[]): string => {
+  let earliestMs = Number.POSITIVE_INFINITY;
+  sales.forEach((sale) => {
+    const saleMs = toDate(sale.timestamp).getTime();
+    if (saleMs < earliestMs) earliestMs = saleMs;
+  });
+  stockEntries.forEach((entry) => {
+    const entryMs = toDate(entry.timestamp).getTime();
+    if (entryMs < earliestMs) earliestMs = entryMs;
+  });
+  if (Number.isFinite(earliestMs)) return toDayKey(new Date(earliestMs));
+  return toDayKey(new Date());
+};
 
 const roundMoney = (value: number): number => Number(value.toFixed(2));
 const LEGACY_COST_RATIO_MAX = 3.5;
@@ -342,6 +378,8 @@ const normalizeDailyHistoryEntry = (value: unknown): DailySalesHistoryEntry | nu
     closedAtRaw instanceof Date || typeof closedAtRaw === 'string'
       ? closedAtRaw
       : new Date().toISOString();
+  const fallbackBusinessDate = getDayKey(closedAt);
+  const businessDate = normalizeBusinessDayKey(source.businessDate) || fallbackBusinessDate;
 
   const saleCountRaw = Number(source.saleCount);
   const saleCount = Number.isFinite(saleCountRaw) && saleCountRaw >= 0 ? Math.floor(saleCountRaw) : 0;
@@ -366,6 +404,7 @@ const normalizeDailyHistoryEntry = (value: unknown): DailySalesHistoryEntry | nu
         ? source.id
         : `day-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
     closedAt,
+    businessDate,
     openingCash: roundMoney(Math.max(0, Number(source.openingCash) || 0)),
     totalRevenue,
     totalPurchases: normalizedPurchases,
@@ -393,11 +432,12 @@ const readLocalDailySalesHistory = (): DailySalesHistoryEntry[] => {
 
 const getHistoryEntryFingerprint = (entry: DailySalesHistoryEntry): string => {
   const closedAtIso = toDate(entry.closedAt).toISOString();
+  const businessDate = getHistoryBusinessDayKey(entry);
   const totalRevenue = roundMoney(Number(entry.totalRevenue) || 0);
   const totalPurchases = roundMoney(Number(entry.totalPurchases) || 0);
   const saleCount = Math.max(0, Math.floor(Number(entry.saleCount) || 0));
   const cashExpenses = roundMoney(Math.max(0, Number(entry.cashExpenses) || 0));
-  return `${closedAtIso}|${totalRevenue}|${totalPurchases}|${saleCount}|${cashExpenses}`;
+  return `${closedAtIso}|${businessDate}|${totalRevenue}|${totalPurchases}|${saleCount}|${cashExpenses}`;
 };
 
 const escapeHtml = (value: string): string =>
@@ -723,21 +763,27 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
   const totalOrderCount = useMemo(() => countOrders(sales), [sales]);
 
   const currentDayReport = useMemo<DailySalesHistoryEntry>(
-    () => ({
-      id: 'current-day',
-      closedAt: new Date(),
-      openingCash: cashRegisterAmount,
-      totalRevenue,
-      totalPurchases: totalCost,
-      totalProfit,
-      saleCount: totalOrderCount,
-      cashExpenses: cashRegisterExpenses,
-      cashExpenseDetails: cashRegisterExpenseDetails,
-    }),
+    () => {
+      const closedAt = new Date();
+      return {
+        id: 'current-day',
+        closedAt,
+        businessDate: resolveSessionBusinessDayKey(sales, stockEntries),
+        openingCash: cashRegisterAmount,
+        totalRevenue,
+        totalPurchases: totalCost,
+        totalProfit,
+        saleCount: totalOrderCount,
+        cashExpenses: cashRegisterExpenses,
+        cashExpenseDetails: cashRegisterExpenseDetails,
+      };
+    },
     [
       cashRegisterAmount,
       cashRegisterExpenseDetails,
       cashRegisterExpenses,
+      sales,
+      stockEntries,
       totalCost,
       totalOrderCount,
       totalProfit,
@@ -830,7 +876,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
     }
 
     const explicitEntries: HistoryDrawerEntry[] = mergedDailySalesHistory.map((entry) => {
-      const dayKey = getDayKey(entry.closedAt);
+      const dayKey = getHistoryBusinessDayKey(entry);
       const dayMappedSales = archiveSalesByDay.get(dayKey) || [];
       const timeMappedSales = historySalesByEntryId.get(entry.id) || [];
       return {
@@ -844,7 +890,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
     const consumedSaleIds = new Set(
       explicitEntries.flatMap((item) => item.sales.map((sale) => sale.id))
     );
-    const todayKey = getDayKey(new Date());
+    const todayKey = resolveSessionBusinessDayKey(sales, stockEntries);
     const inferredEntries: HistoryDrawerEntry[] = [];
 
     archiveSalesByDay.forEach((daySales, dayKey) => {
@@ -877,6 +923,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
         entry: {
           id: `legacy-history-${dayKey.replace(/[^0-9]/g, '')}`,
           closedAt: latestTimestamp,
+          businessDate: dayKey,
           openingCash: 0,
           totalRevenue,
           totalPurchases,
@@ -890,7 +937,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
     return [...explicitEntries, ...inferredEntries].sort(
       (a, b) => toDate(b.entry.closedAt).getTime() - toDate(a.entry.closedAt).getTime()
     );
-  }, [archiveSalesByDay, archivedSales, mergedDailySalesHistory]);
+  }, [archiveSalesByDay, archivedSales, mergedDailySalesHistory, sales, stockEntries]);
 
   const printReport = useCallback(
     (
@@ -1014,7 +1061,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
         reportLines.push(thermalSeparator);
         reportLines.push(align('Total retiradas:', formatThermalCurrency(cashExpenses)));
       };
-      const closedDate = closedAt.toLocaleDateString('pt-BR');
+      const closedDate = formatBusinessDayLabel(getHistoryBusinessDayKey(report));
       const closedTime = closedAt.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
 
       if (mode === 'SUMMARY') {
@@ -1557,6 +1604,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
               ) : (
                 orderedHistory.map(({ entry, sales: historySales, inferred }) => {
                   const entryDate = toDate(entry.closedAt);
+                  const entryBusinessDateLabel = formatBusinessDayLabel(getHistoryBusinessDayKey(entry));
                   const entryCashExpenses = roundMoney(Math.max(0, Number(entry.cashExpenses) || 0));
                   const entryCashExpenseDetails = normalizeCashExpenseDetails(entry.cashExpenseDetails);
                   const entryEstimatedCash =
@@ -1568,7 +1616,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
                     >
                       <div className="space-y-1">
                         <p className="text-sm font-black uppercase text-slate-800">
-                          {entryDate.toLocaleDateString('pt-BR')}
+                          {entryBusinessDateLabel}
                         </p>
                         <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">
                           Fechado em {entryDate.toLocaleString('pt-BR')}

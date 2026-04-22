@@ -1750,6 +1750,7 @@ test('close day snapshots report in history and resets session sales state', () 
   assert.equal(closed.dailySalesHistory?.[0]?.totalPurchases, 6.1);
   assert.equal(closed.dailySalesHistory?.[0]?.totalProfit, 13.9);
   assert.equal(closed.dailySalesHistory?.[0]?.cashExpenses, 0.2);
+  assert.match(closed.dailySalesHistory?.[0]?.businessDate || '', /^\d{4}-\d{2}-\d{2}$/);
   assert.equal(closed.dailySalesHistory?.[0]?.cashExpenseDetails?.length, 1);
   assert.equal(closed.dailySalesHistory?.[0]?.cashExpenseDetails?.[0]?.expenseType, 'INGREDIENT');
   assert.equal(closed.dailySalesHistory?.[0]?.cashExpenseDetails?.[0]?.ingredientName, 'Molho');

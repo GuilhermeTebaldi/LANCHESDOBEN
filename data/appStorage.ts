@@ -172,6 +172,18 @@ const roundMoney = (value: number): number => Number(value.toFixed(2));
 const LEGACY_COST_RATIO_MAX = 3.5;
 const LEGACY_COST_RATIO_TARGET = 0.45;
 const LEGACY_COST_DIVISORS = [1, 10, 100, 1000] as const;
+const BUSINESS_DAY_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+const pad2 = (value: number): string => value.toString().padStart(2, '0');
+const toDayKey = (date: Date): string =>
+  `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+
+const normalizeBusinessDate = (value: unknown): string | undefined => {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (!BUSINESS_DAY_KEY_PATTERN.test(trimmed)) return undefined;
+  return trimmed;
+};
 
 const toNonNegativeNumber = (value: unknown, fallback = 0): number => {
   const parsed = Number(value);
@@ -201,6 +213,10 @@ const normalizeLegacyHistoryCost = (rawCost: number, rawRevenue: number): number
 };
 
 const normalizeDailyHistoryEntry = (item: DailySalesHistoryEntry): DailySalesHistoryEntry => {
+  const closedAt =
+    item.closedAt && !(item.closedAt instanceof Date) ? new Date(item.closedAt as string) : item.closedAt;
+  const closedAtDate = closedAt instanceof Date ? closedAt : new Date(closedAt);
+  const fallbackBusinessDate = Number.isNaN(closedAtDate.getTime()) ? toDayKey(new Date()) : toDayKey(closedAtDate);
   const totalRevenue = roundMoney(toNonNegativeNumber(item.totalRevenue));
   const rawTotalPurchases = Number(item.totalPurchases);
   const rawTotalProfit = Number(item.totalProfit);
@@ -217,7 +233,8 @@ const normalizeDailyHistoryEntry = (item: DailySalesHistoryEntry): DailySalesHis
 
   return {
     ...item,
-    closedAt: item.closedAt && !(item.closedAt instanceof Date) ? new Date(item.closedAt as string) : item.closedAt,
+    closedAt,
+    businessDate: normalizeBusinessDate(item.businessDate) || fallbackBusinessDate,
     openingCash: roundMoney(toNonNegativeNumber(item.openingCash)),
     totalRevenue,
     totalPurchases: normalizedPurchases,

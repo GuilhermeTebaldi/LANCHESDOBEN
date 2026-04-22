@@ -603,6 +603,31 @@ const roundMoney = (value: number): number => Number(value.toFixed(2));
 const LEGACY_COST_RATIO_MAX = 3.5;
 const LEGACY_COST_RATIO_TARGET = 0.45;
 const LEGACY_COST_DIVISORS = [1, 10, 100, 1000] as const;
+const BUSINESS_DAY_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+const pad2 = (value: number): string => value.toString().padStart(2, '0');
+const toDayKey = (date: Date): string =>
+  `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+
+const toValidDate = (value: Date | string): Date | null => {
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed;
+};
+
+const normalizeBusinessDayKey = (value: unknown): string | undefined => {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (!BUSINESS_DAY_KEY_PATTERN.test(trimmed)) return undefined;
+  return trimmed;
+};
+
+const formatBusinessDayLabel = (dayKey: string): string => {
+  const match = BUSINESS_DAY_KEY_PATTERN.exec(dayKey);
+  if (!match) return dayKey;
+  const [year, month, day] = dayKey.split('-');
+  return `${day}/${month}/${year}`;
+};
 
 const normalizeLegacyHistoryCost = (rawCost: number, rawRevenue: number): number => {
   if (!Number.isFinite(rawCost) || rawCost <= 0) return 0;
@@ -793,6 +818,8 @@ const normalizeDailyHistoryEntry = (value: unknown): DailySalesHistoryEntry | nu
     closedAtRaw instanceof Date || typeof closedAtRaw === 'string'
       ? closedAtRaw
       : new Date().toISOString();
+  const fallbackBusinessDate = toDayKey(toValidDate(closedAt) || new Date());
+  const businessDate = normalizeBusinessDayKey(source.businessDate) || fallbackBusinessDate;
 
   const saleCountRaw = Number(source.saleCount);
   const saleCount = Number.isFinite(saleCountRaw) && saleCountRaw >= 0 ? Math.floor(saleCountRaw) : 0;
@@ -817,6 +844,7 @@ const normalizeDailyHistoryEntry = (value: unknown): DailySalesHistoryEntry | nu
         ? source.id
         : `day-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
     closedAt,
+    businessDate,
     openingCash: roundMoney(Math.max(0, Number(source.openingCash) || 0)),
     totalRevenue,
     totalPurchases: normalizedPurchases,
@@ -1123,11 +1151,7 @@ const ensureSaleCommandIdentifiers = (command: SaleRegisterCommand): SaleRegiste
 });
 
 const toSaleDate = (timestamp: Date | string): Date | null => {
-  if (timestamp instanceof Date) {
-    return Number.isFinite(timestamp.getTime()) ? timestamp : null;
-  }
-  const parsed = new Date(timestamp);
-  return Number.isFinite(parsed.getTime()) ? parsed : null;
+  return toValidDate(timestamp);
 };
 
 const formatSaleTime = (timestamp: Date | string): string => {
@@ -1181,7 +1205,41 @@ const countSaleOrders = (sales: Sale[]): number => {
 const getSaleDayKey = (timestamp: Date | string): string | null => {
   const saleDate = toSaleDate(timestamp);
   if (!saleDate) return null;
-  return saleDate.toLocaleDateString('pt-BR');
+  return toDayKey(saleDate);
+};
+
+const resolveSalesSessionDayKey = (sales: Sale[]): string => {
+  let earliestMs = Number.POSITIVE_INFINITY;
+  sales.forEach((sale) => {
+    const saleDate = toSaleDate(sale.timestamp);
+    if (!saleDate) return;
+    const saleMs = saleDate.getTime();
+    if (saleMs < earliestMs) earliestMs = saleMs;
+  });
+  if (Number.isFinite(earliestMs)) {
+    return toDayKey(new Date(earliestMs));
+  }
+  return toDayKey(new Date());
+};
+
+const resolveCloseReportBusinessDayKey = (sales: Sale[], stockEntries: StockEntry[]): string => {
+  let earliestMs = Number.POSITIVE_INFINITY;
+  sales.forEach((sale) => {
+    const saleDate = toSaleDate(sale.timestamp);
+    if (!saleDate) return;
+    const saleMs = saleDate.getTime();
+    if (saleMs < earliestMs) earliestMs = saleMs;
+  });
+  stockEntries.forEach((entry) => {
+    const entryDate = toSaleDate(entry.timestamp);
+    if (!entryDate) return;
+    const entryMs = entryDate.getTime();
+    if (entryMs < earliestMs) earliestMs = entryMs;
+  });
+  if (Number.isFinite(earliestMs)) {
+    return toDayKey(new Date(earliestMs));
+  }
+  return toDayKey(new Date());
 };
 
 const formatMoney = (value: number): string => value.toFixed(2);
@@ -12313,10 +12371,13 @@ const App: React.FC = () => {
         } satisfies CashRegisterExpenseDetail;
       })
       .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+    const closedAt = new Date().toISOString();
+    const businessDate = resolveCloseReportBusinessDayKey(sales, stockEntries);
 
     return {
       id: createClientId('day'),
-      closedAt: new Date().toISOString(),
+      closedAt,
+      businessDate,
       openingCash,
       totalRevenue,
       totalPurchases,
@@ -12485,7 +12546,8 @@ const App: React.FC = () => {
 
   const dailyTotal = useMemo(() => sales.reduce((acc, sale) => acc + sale.total, 0), [sales]);
   const isDailyTotalSyncing = pendingPaidSyncJobs > 0 || syncingPaidDraftIds.length > 0;
-  const todaySaleDayKey = new Date().toLocaleDateString('pt-BR');
+  const todaySaleDayKey = useMemo(() => resolveSalesSessionDayKey(sales), [sales]);
+  const todaySaleDayLabel = useMemo(() => formatBusinessDayLabel(todaySaleDayKey), [todaySaleDayKey]);
   const recentSalesForUndo = useMemo(
     () =>
       sales
@@ -13965,7 +14027,7 @@ const App: React.FC = () => {
             <div className="p-5 bg-slate-900 text-white flex items-center justify-between">
               <div>
                 <h3 className="text-xl font-black uppercase tracking-tight">
-                  {`Histórico de Vendas ${new Date().toLocaleDateString('pt-BR')}`}
+                  {`Histórico de Vendas ${todaySaleDayLabel}`}
                 </h3>
                 <p className="text-[10px] uppercase tracking-widest text-slate-300">
                   Apenas vendas do dia atual (até Fechar Dia / Reiniciar)

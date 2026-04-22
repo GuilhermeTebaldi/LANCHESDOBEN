@@ -118,6 +118,7 @@ const roundMoney = (value: number): number => Number(value.toFixed(2));
 const LEGACY_COST_RATIO_MAX = 3.5;
 const LEGACY_COST_RATIO_TARGET = 0.45;
 const LEGACY_COST_DIVISORS = [1, 10, 100, 1000] as const;
+const BUSINESS_DAY_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
 const normalizeLegacySaleCost = (rawCost: number, rawRevenue: number): number => {
   if (!Number.isFinite(rawCost) || rawCost <= 0) return 0;
@@ -153,6 +154,23 @@ const pad2 = (value: number): string => value.toString().padStart(2, '0');
 
 const toDayKey = (date: Date): string =>
   `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+
+const normalizeBusinessDayKey = (value: unknown): string | undefined => {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (!BUSINESS_DAY_KEY_PATTERN.test(trimmed)) return undefined;
+  return trimmed;
+};
+
+const formatBusinessDayLabel = (dayKey: string): string => {
+  const match = BUSINESS_DAY_KEY_PATTERN.exec(dayKey);
+  if (!match) return dayKey;
+  const [year, month, day] = dayKey.split('-');
+  return `${day}/${month}/${year}`;
+};
+
+const getHistoryBusinessDayKey = (entry: DailySalesHistoryEntry): string =>
+  normalizeBusinessDayKey(entry.businessDate) || toDayKey(toDate(entry.closedAt));
 
 const toShortDayLabel = (date: Date): string =>
   date.toLocaleDateString('pt-BR', {
@@ -1014,6 +1032,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
       .sort((a, b) => toDate(a.closedAt).getTime() - toDate(b.closedAt).getTime())
       .map((entry) => {
         const closedDate = toDate(entry.closedAt);
+        const businessDayKey = getHistoryBusinessDayKey(entry);
         const cashExpenses = Number(entry.cashExpenses) > 0 ? Number(entry.cashExpenses) : 0;
         const estimated = roundMoney(
           entry.openingCash + entry.totalRevenue - entry.totalPurchases - cashExpenses
@@ -1024,7 +1043,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
         return {
           id: entry.id,
           date: closedDate,
-          label: toShortDayLabel(closedDate),
+          label: formatBusinessDayLabel(businessDayKey),
           estimated,
           informed,
           difference,
@@ -1631,7 +1650,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 {latestDailyClose ? (
                   <>
                     <p className="text-lg font-black text-blue-700">
-                      {toDate(latestDailyClose.closedAt).toLocaleDateString('pt-BR')}
+                      {formatBusinessDayLabel(getHistoryBusinessDayKey(latestDailyClose))}
                     </p>
                     <p className="text-[11px] font-black text-slate-700">
                       Lucro: R$ {latestDailyClose.totalProfit.toFixed(2)}
@@ -1696,7 +1715,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
                           <div>
                             <p className="text-xs font-black uppercase text-slate-800">
-                              {closedAt.toLocaleDateString('pt-BR')}
+                              {formatBusinessDayLabel(getHistoryBusinessDayKey(entry))}
                             </p>
                             <p className="text-[10px] font-bold uppercase tracking-widest text-slate-500">
                               Fechado em {closedAt.toLocaleString('pt-BR')}

@@ -48,6 +48,55 @@ const toTimestampIso = (value?: Date | string): string => {
   return date.toISOString();
 };
 
+const BUSINESS_DAY_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+const pad2 = (value: number): string => value.toString().padStart(2, '0');
+const toDayKey = (date: Date): string =>
+  `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+
+const normalizeBusinessDate = (value: unknown): string | undefined => {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  if (!BUSINESS_DAY_KEY_PATTERN.test(trimmed)) return undefined;
+  return trimmed;
+};
+
+const toTimestampMs = (value: Date | string | null | undefined): number | null => {
+  if (!(value instanceof Date) && typeof value !== 'string') return null;
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return parsed.getTime();
+};
+
+const resolveSessionBusinessDate = (
+  state: Pick<FrontAppState, 'sales' | 'stockEntries'>,
+  fallback?: Date | string
+): string => {
+  let earliestMs = Number.POSITIVE_INFINITY;
+
+  state.sales.forEach((sale) => {
+    const candidateMs = toTimestampMs(sale.timestamp);
+    if (candidateMs === null) return;
+    if (candidateMs < earliestMs) earliestMs = candidateMs;
+  });
+
+  state.stockEntries.forEach((entry) => {
+    const candidateMs = toTimestampMs(entry.timestamp);
+    if (candidateMs === null) return;
+    if (candidateMs < earliestMs) earliestMs = candidateMs;
+  });
+
+  if (Number.isFinite(earliestMs)) {
+    return toDayKey(new Date(earliestMs));
+  }
+
+  const fallbackDate = fallback ? new Date(fallback) : new Date();
+  if (Number.isNaN(fallbackDate.getTime())) return toDayKey(new Date());
+  return toDayKey(fallbackDate);
+};
+
+const resolveHistoryBusinessDate = (closedAt: Date | string, businessDate?: string): string =>
+  normalizeBusinessDate(businessDate) || toDayKey(new Date(toTimestampIso(closedAt)));
+
 const aggregateRecipe = (recipe: FrontRecipeItem[] = []): Record<string, number> => {
   return recipe.reduce<Record<string, number>>((acc, item) => {
     if (!item?.ingredientId) return acc;
@@ -461,13 +510,15 @@ const cloneDailySalesHistoryEntry = (
       : fallbackTotalPurchases
   );
   const normalizedPurchases = normalizeLegacyHistoryCost(totalPurchases, totalRevenue);
+  const closedAt =
+    entry.closedAt instanceof Date || typeof entry.closedAt === 'string'
+      ? entry.closedAt
+      : toTimestampIso();
 
   return {
     ...entry,
-    closedAt:
-      entry.closedAt instanceof Date || typeof entry.closedAt === 'string'
-        ? entry.closedAt
-        : toTimestampIso(),
+    closedAt,
+    businessDate: resolveHistoryBusinessDate(closedAt, entry.businessDate),
     openingCash: toNonNegativeMoney(entry.openingCash),
     totalRevenue,
     totalPurchases: normalizedPurchases,
@@ -1874,9 +1925,11 @@ const applyCloseDay = (state: FrontAppState) => {
     }, 0)
   );
   const openingCash = toNonNegativeMoney(state.cashRegisterAmount);
+  const closedAt = toTimestampIso();
   const report: FrontDailySalesHistoryEntry = {
     id: createId('day'),
-    closedAt: toTimestampIso(),
+    closedAt,
+    businessDate: resolveSessionBusinessDate(state, closedAt),
     openingCash,
     totalRevenue,
     totalPurchases,
