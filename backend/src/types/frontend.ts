@@ -161,6 +161,11 @@ export interface FrontDailySalesHistoryEntry {
   cashExpenseDetails?: FrontCashRegisterExpenseDetail[];
 }
 
+export interface FrontBusinessSettings {
+  infiniteStockEnabled?: boolean;
+  ignoreStockCosts?: boolean;
+}
+
 export interface FrontAppState {
   ingredients: FrontIngredient[];
   products: FrontProduct[];
@@ -175,4 +180,5 @@ export interface FrontAppState {
   saleDrafts?: FrontSaleDraft[];
   cashRegisterAmount?: number;
   dailySalesHistory?: FrontDailySalesHistoryEntry[];
+  businessSettings?: FrontBusinessSettings;
 }

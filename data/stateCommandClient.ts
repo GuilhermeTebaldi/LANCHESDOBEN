@@ -1,4 +1,5 @@
 import type {
+  BusinessSettings,
   CleaningMaterial,
   DailySalesHistoryEntry,
   Ingredient,
@@ -137,6 +138,11 @@ export type StateCommand =
   | (BaseCommand & {
       type: 'SALE_DRAFT_CANCEL';
       draftId: string;
+    })
+  | (BaseCommand & {
+      type: 'SET_BUSINESS_SETTINGS';
+      infiniteStockEnabled: boolean;
+      ignoreStockCosts?: boolean;
     })
   | (BaseCommand & { type: 'SALE_UNDO_LAST' })
   | (BaseCommand & { type: 'SALE_UNDO_BY_ID'; saleId: string })
@@ -595,6 +601,25 @@ const toNonNegativeNumber = (value: unknown, fallback = 0): number => {
   return parsed;
 };
 
+const normalizeBusinessSettings = (
+  value: unknown,
+  fallback: BusinessSettings
+): BusinessSettings => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { ...fallback };
+  }
+
+  const source = value as Record<string, unknown>;
+  const infiniteStockEnabled = source.infiniteStockEnabled === true;
+  const ignoreStockCosts =
+    source.ignoreStockCosts === true || infiniteStockEnabled;
+
+  return {
+    infiniteStockEnabled,
+    ignoreStockCosts,
+  };
+};
+
 const normalizeLegacyHistoryCost = (rawCost: number, rawRevenue: number): number => {
   if (!Number.isFinite(rawCost) || rawCost <= 0) return 0;
   const cost = roundMoney(rawCost);
@@ -685,6 +710,10 @@ const normalizeAppState = (payload: unknown): AppState => {
     ),
     dailySalesHistory: reviveDailySalesHistory(
       toArray<DailySalesHistoryEntry>(source.dailySalesHistory, DEFAULT_APP_STATE.dailySalesHistory)
+    ),
+    businessSettings: normalizeBusinessSettings(
+      source.businessSettings,
+      DEFAULT_APP_STATE.businessSettings
     ),
   };
 };

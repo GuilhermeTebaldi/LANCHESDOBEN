@@ -77,6 +77,11 @@ export type SalePaymentSplitMode = 'PEOPLE' | 'MIXED';
 export type SaleCustomerType = 'BALCAO' | 'ENTREGA';
 export type SaleOrigin = 'LOCAL' | 'IFOOD' | 'APP99' | 'KEETA';
 
+export interface BusinessSettings {
+  infiniteStockEnabled: boolean;
+  ignoreStockCosts: boolean;
+}
+
 export interface SalePaymentSplitEntry {
   sequence: number;
   label: string;
@@ -165,6 +170,7 @@ export interface DailySalesHistoryEntry {
 export enum ViewMode {
   POS = 'POS',
   INVENTORY = 'INVENTORY',
+  PRODUCT_REPORTS = 'PRODUCT_REPORTS',
   REPORTS = 'REPORTS',
   ADMIN = 'ADMIN',
   OTHERS = 'OTHERS',

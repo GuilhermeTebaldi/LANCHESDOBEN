@@ -25,6 +25,7 @@ interface SalesSummaryProps {
   archivedSales?: Sale[];
   allIngredients: Ingredient[];
   stockEntries: StockEntry[];
+  ignoreStockCosts?: boolean;
   cashRegisterAmount: number;
   dailySalesHistory: DailySalesHistoryEntry[];
   onSetCashRegister?: (amount: number) => Promise<boolean> | boolean;
@@ -580,6 +581,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
   archivedSales = [],
   allIngredients,
   stockEntries,
+  ignoreStockCosts = false,
   cashRegisterAmount,
   dailySalesHistory,
   onSetCashRegister,
@@ -665,8 +667,20 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
     [productSalesMap]
   );
 
+  const resolveSaleCost = useCallback(
+    (sale: Sale): number => {
+      if (ignoreStockCosts) return 0;
+      const cost = Number(sale.totalCost);
+      return Number.isFinite(cost) ? cost : 0;
+    },
+    [ignoreStockCosts]
+  );
+
   const totalRevenue = useMemo(() => sales.reduce((sum, s) => sum + s.total, 0), [sales]);
-  const totalCost = useMemo(() => sales.reduce((sum, s) => sum + (s.totalCost || 0), 0), [sales]);
+  const totalCost = useMemo(
+    () => sales.reduce((sum, sale) => sum + resolveSaleCost(sale), 0),
+    [resolveSaleCost, sales]
+  );
   const cashRegisterExpenses = useMemo(
     () =>
       roundMoney(
@@ -901,8 +915,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
       const totals = unassignedDaySales.reduce(
         (acc, sale) => ({
           totalRevenue: acc.totalRevenue + (Number.isFinite(sale.total) ? sale.total : 0),
-          totalPurchases:
-            acc.totalPurchases + (Number.isFinite(sale.totalCost) ? sale.totalCost : 0),
+          totalPurchases: acc.totalPurchases + resolveSaleCost(sale),
         }),
         { totalRevenue: 0, totalPurchases: 0 }
       );
@@ -937,7 +950,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
     return [...explicitEntries, ...inferredEntries].sort(
       (a, b) => toDate(b.entry.closedAt).getTime() - toDate(a.entry.closedAt).getTime()
     );
-  }, [archiveSalesByDay, archivedSales, mergedDailySalesHistory, sales, stockEntries]);
+  }, [archiveSalesByDay, archivedSales, mergedDailySalesHistory, resolveSaleCost, sales, stockEntries]);
 
   const printReport = useCallback(
     (
@@ -1017,7 +1030,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
           }
           acc[key].qty += 1;
           acc[key].revenue += Number(sale.total) || 0;
-          acc[key].cost += Number(sale.totalCost) || 0;
+          acc[key].cost += resolveSaleCost(sale);
           return acc;
         },
         {}
@@ -1156,7 +1169,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
             const saleDate = toDate(sale.timestamp);
             const saleHour = saleDate.toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
             const saleTotal = Number(sale.total) || 0;
-            const saleCost = Number(sale.totalCost) || 0;
+            const saleCost = resolveSaleCost(sale);
             const saleProfit = saleTotal - saleCost;
             const paymentMethod = (sale.payment?.method || 'NAO INFORMADO').toUpperCase();
             const saleOrigin = getSaleOriginLabel(sale.saleOrigin).toUpperCase();
@@ -1314,7 +1327,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
       }, 120);
       return true;
     },
-    [selectedCashPrintPreset, selectedHistoryPrintPreset]
+    [resolveSaleCost, selectedCashPrintPreset, selectedHistoryPrintPreset]
   );
 
   const handleSaleClick = (e: React.MouseEvent<HTMLButtonElement>, saleId: string) => {
@@ -1458,8 +1471,9 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
   const hasPriceAdjustment = selectedSale !== undefined && Math.abs(selectedAdjustment) > 0.009;
   const basePrice = selectedSale?.basePrice;
   const baseCost = selectedSale?.baseCost;
+  const selectedSaleCost = selectedSale ? resolveSaleCost(selectedSale) : 0;
   const costAdjustment =
-    selectedSale && baseCost !== undefined ? selectedSale.totalCost - baseCost : undefined;
+    selectedSale && baseCost !== undefined ? selectedSaleCost - baseCost : undefined;
 
   return (
     <div
@@ -2117,8 +2131,8 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
                   )}
               </div>
               <div className="mt-5 pt-3 border-t border-slate-800 flex justify-between items-center">
-                <div><p className="text-[8px] font-bold text-slate-500 uppercase">Custo</p><p className="text-sm font-black text-slate-100">{formatCurrency(selectedSale.totalCost)}</p></div>
-                <div className="text-right"><p className="text-[8px] font-bold text-green-500 uppercase">Lucro</p><p className="text-sm font-black text-green-500">{formatCurrency(selectedSale.total - selectedSale.totalCost)}</p></div>
+                <div><p className="text-[8px] font-bold text-slate-500 uppercase">Custo</p><p className="text-sm font-black text-slate-100">{formatCurrency(selectedSaleCost)}</p></div>
+                <div className="text-right"><p className="text-[8px] font-bold text-green-500 uppercase">Lucro</p><p className="text-sm font-black text-green-500">{formatCurrency(selectedSale.total - selectedSaleCost)}</p></div>
               </div>
               {(basePrice !== undefined || baseCost !== undefined || hasPriceAdjustment) && (
                 <div className="mt-3 pt-3 border-t border-slate-800 space-y-1.5 text-[10px] uppercase font-bold">

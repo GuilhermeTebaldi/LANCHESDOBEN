@@ -77,6 +77,12 @@ const Header: React.FC<HeaderProps> = ({
             ESTOQUE
           </button>
           <button
+            onClick={() => handleChangeView(ViewMode.PRODUCT_REPORTS)}
+            className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all ${currentView === ViewMode.PRODUCT_REPORTS ? 'bg-white text-red-600 shadow-sm' : 'hover:bg-red-500'}`}
+          >
+            RELATORIOS
+          </button>
+          <button
             onClick={() => handleChangeView(ViewMode.REPORTS)}
             className={`px-4 py-1.5 rounded-full text-xs font-bold transition-all ${currentView === ViewMode.REPORTS ? 'bg-white text-red-600 shadow-sm' : 'hover:bg-red-500'}`}
           >
@@ -191,6 +197,14 @@ const Header: React.FC<HeaderProps> = ({
               }`}
             >
               ESTOQUE
+            </button>
+            <button
+              onClick={() => handleChangeView(ViewMode.PRODUCT_REPORTS)}
+              className={`px-3 py-3 rounded-xl text-[11px] font-black tracking-wide transition-all ${
+                currentView === ViewMode.PRODUCT_REPORTS ? 'bg-white text-red-600 shadow-sm' : 'bg-red-600/50 hover:bg-red-500'
+              }`}
+            >
+              RELATORIOS
             </button>
             <button
               onClick={() => handleChangeView(ViewMode.REPORTS)}

@@ -1,6 +1,6 @@
 
 import React, { useMemo, useRef, useState } from 'react';
-import { Ingredient, StockEntry } from '../types';
+import { BusinessSettings, Ingredient, StockEntry } from '../types';
 import {
   allowsFractionalStockInput,
   formatIngredientStockQuantity,
@@ -11,7 +11,9 @@ import {
 interface InventoryManagerProps {
   ingredients: Ingredient[];
   entries: StockEntry[];
+  businessSettings: BusinessSettings;
   onUpdateStock: (id: string, amount: number, options?: { useCashRegister?: boolean }) => void;
+  onUpdateBusinessSettings: (settings: BusinessSettings) => void;
   onOpenAddIngredient: () => void;
   onEditIngredient: (ingredient: Ingredient) => void;
   onDeleteIngredient?: (id: string) => void;
@@ -40,15 +42,20 @@ const parseStockMoveAmount = (
 const InventoryManager: React.FC<InventoryManagerProps> = ({
   ingredients,
   entries,
+  businessSettings,
   onUpdateStock,
+  onUpdateBusinessSettings,
   onOpenAddIngredient,
   onEditIngredient,
   onDeleteIngredient,
 }) => {
   const [replenishValues, setReplenishValues] = useState<Record<string, string>>({});
   const [showHistory, setShowHistory] = useState(false);
+  const [showStockSettings, setShowStockSettings] = useState(false);
   const [deleteMenuId, setDeleteMenuId] = useState<string | null>(null);
   const [searchValue, setSearchValue] = useState('');
+  const infiniteStockEnabled = businessSettings.infiniteStockEnabled === true;
+  const ignoreStockCosts = businessSettings.ignoreStockCosts === true || infiniteStockEnabled;
   
   const timerRef = useRef<number | null>(null);
   const normalizedSearch = searchValue.trim().toLowerCase();
@@ -91,6 +98,22 @@ const InventoryManager: React.FC<InventoryManagerProps> = ({
     setReplenishValues(prev => ({ ...prev, [id]: '' }));
   };
 
+  const handleToggleInfiniteStock = () => {
+    const nextInfiniteStockEnabled = !infiniteStockEnabled;
+    onUpdateBusinessSettings({
+      infiniteStockEnabled: nextInfiniteStockEnabled,
+      ignoreStockCosts: nextInfiniteStockEnabled ? true : false,
+    });
+  };
+
+  const handleToggleIgnoreStockCosts = () => {
+    if (infiniteStockEnabled) return;
+    onUpdateBusinessSettings({
+      infiniteStockEnabled,
+      ignoreStockCosts: !ignoreStockCosts,
+    });
+  };
+
   const handleContextMenu = (e: React.MouseEvent, id: string) => {
     e.preventDefault();
     setDeleteMenuId(id);
@@ -124,6 +147,12 @@ const InventoryManager: React.FC<InventoryManagerProps> = ({
           <p className="text-slate-500 font-semibold">Gerencie os insumos e reposições em tempo real.</p>
         </div>
         <div className="qb-inventory-actions flex gap-2">
+          <button
+            onClick={() => setShowStockSettings(true)}
+            className="qb-btn-touch bg-white text-slate-800 border border-slate-200 px-5 py-2 rounded-2xl text-sm font-black flex items-center gap-2 hover:bg-slate-50 transition-colors shadow-sm"
+          >
+            CONFIGURAÇÕES
+          </button>
           <button 
             onClick={() => setShowHistory(true)}
             className="qb-btn-touch bg-slate-800 text-white px-5 py-2 rounded-2xl text-sm font-bold flex items-center gap-2 hover:bg-slate-700 transition-colors shadow-lg"
@@ -367,6 +396,87 @@ const InventoryManager: React.FC<InventoryManagerProps> = ({
 
             <div className="qb-stock-history-footer p-6 bg-slate-50 border-t">
               <button onClick={() => setShowHistory(false)} className="qb-btn-touch w-full bg-slate-800 text-white py-4 rounded-2xl font-black uppercase">FECHAR PAINEL</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showStockSettings && (
+        <div className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-900/80 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-2xl overflow-hidden rounded-[32px] border border-slate-200 bg-white shadow-2xl">
+            <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50 px-6 py-4">
+              <div>
+                <h3 className="text-lg font-black uppercase tracking-tight text-slate-900">Configurações de Estoque</h3>
+                <p className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+                  Ajuste o comportamento do estoque no sistema.
+                </p>
+              </div>
+              <button
+                onClick={() => setShowStockSettings(false)}
+                className="qb-btn-touch rounded-full bg-slate-200 p-2 text-slate-700 hover:bg-slate-300 transition-colors"
+              >
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>
+              </button>
+            </div>
+
+            <div className="space-y-4 p-6">
+              <div className="rounded-3xl border border-slate-200 bg-white p-4">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <h4 className="text-base font-black uppercase text-slate-900">Estoque infinito</h4>
+                    <p className="text-xs font-semibold text-slate-600">
+                      Quando ativado, o sistema mantém os produtos disponíveis e não controla baixa de estoque nem custos de insumos.
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={infiniteStockEnabled}
+                    onClick={handleToggleInfiniteStock}
+                    className={`qb-btn-touch relative inline-flex h-8 w-14 items-center rounded-full transition ${
+                      infiniteStockEnabled ? 'bg-emerald-500' : 'bg-slate-300'
+                    }`}
+                  >
+                    <span
+                      className={`inline-block h-6 w-6 transform rounded-full bg-white shadow transition ${
+                        infiniteStockEnabled ? 'translate-x-7' : 'translate-x-1'
+                      }`}
+                    />
+                  </button>
+                </div>
+              </div>
+
+              <div className="rounded-3xl border border-slate-200 bg-white p-4">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <h4 className="text-base font-black uppercase text-slate-900">Não contar gastos de estoque</h4>
+                    <p className="text-xs font-semibold text-slate-600">
+                      Ignora custos de insumos/CMV para evitar lucro falso quando o estoque real não está sendo controlado.
+                    </p>
+                    <p className="mt-1 text-[10px] font-black uppercase tracking-wider text-amber-600">
+                      {infiniteStockEnabled
+                        ? 'Ativado automaticamente com estoque infinito.'
+                        : 'Recomendado quando custos não estão confiáveis.'}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={ignoreStockCosts}
+                    onClick={handleToggleIgnoreStockCosts}
+                    disabled={infiniteStockEnabled}
+                    className={`qb-btn-touch relative inline-flex h-8 w-14 items-center rounded-full transition ${
+                      ignoreStockCosts ? 'bg-amber-500' : 'bg-slate-300'
+                    } ${infiniteStockEnabled ? 'cursor-not-allowed opacity-60' : ''}`}
+                  >
+                    <span
+                      className={`inline-block h-6 w-6 transform rounded-full bg-white shadow transition ${
+                        ignoreStockCosts ? 'translate-x-7' : 'translate-x-1'
+                      }`}
+                    />
+                  </button>
+                </div>
+              </div>
             </div>
           </div>
         </div>

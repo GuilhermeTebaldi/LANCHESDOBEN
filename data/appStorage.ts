@@ -1,4 +1,5 @@
 import {
+  BusinessSettings,
   CleaningMaterial,
   CleaningStockEntry,
   DailySalesHistoryEntry,
@@ -24,6 +25,7 @@ export interface AppState {
   saleDrafts: SaleDraft[];
   cashRegisterAmount: number;
   dailySalesHistory: DailySalesHistoryEntry[];
+  businessSettings: BusinessSettings;
 }
 
 interface LocalMirrorSnapshot {
@@ -85,6 +87,10 @@ export const DEFAULT_APP_STATE: AppState = {
   saleDrafts: [],
   cashRegisterAmount: 0,
   dailySalesHistory: [],
+  businessSettings: {
+    infiniteStockEnabled: false,
+    ignoreStockCosts: false,
+  },
 };
 
 const DATA_KEYS = [
@@ -191,6 +197,25 @@ const toNonNegativeNumber = (value: unknown, fallback = 0): number => {
   return parsed;
 };
 
+const normalizeBusinessSettings = (
+  value: unknown,
+  fallback: BusinessSettings
+): BusinessSettings => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return { ...fallback };
+  }
+
+  const source = value as Record<string, unknown>;
+  const infiniteStockEnabled = source.infiniteStockEnabled === true;
+  const ignoreStockCosts =
+    source.ignoreStockCosts === true || infiniteStockEnabled;
+
+  return {
+    infiniteStockEnabled,
+    ignoreStockCosts,
+  };
+};
+
 const normalizeLegacyHistoryCost = (rawCost: number, rawRevenue: number): number => {
   if (!Number.isFinite(rawCost) || rawCost <= 0) return 0;
   const cost = roundMoney(rawCost);
@@ -279,6 +304,7 @@ const normalizeStateRecord = (
   dailySalesHistory: reviveDailySalesHistory(
     toArray<DailySalesHistoryEntry>(source.dailySalesHistory, defaults.dailySalesHistory)
   ),
+  businessSettings: normalizeBusinessSettings(source.businessSettings, defaults.businessSettings),
 });
 
 const normalizeVersionHeader = (value: string | null): string | null => {

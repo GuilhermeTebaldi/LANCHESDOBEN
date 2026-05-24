@@ -15,6 +15,7 @@ import {
   YAxis,
 } from 'recharts';
 import {
+  BusinessSettings,
   CleaningMaterial,
   CleaningStockEntry,
   DailySalesHistoryEntry,
@@ -35,10 +36,12 @@ interface AdminDashboardProps {
   cancelledSales: Sale[];
   stockEntries: StockEntry[];
   sessionStockEntries: StockEntry[];
+  businessSettings: BusinessSettings;
   allProducts: Product[];
   allIngredients: Ingredient[];
   cleaningMaterials: CleaningMaterial[];
   cleaningStockEntries: CleaningStockEntry[];
+  onUpdateBusinessSettings: (settings: BusinessSettings) => void;
   onFactoryReset: () => void;
   onClearOperationalData: () => void;
   onClearOnlyStock: () => void;
@@ -460,10 +463,12 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   cancelledSales: rawCancelledSales,
   stockEntries: rawStockEntries,
   sessionStockEntries: rawSessionStockEntries,
+  businessSettings,
   allProducts,
   allIngredients,
   cleaningMaterials,
   cleaningStockEntries: rawCleaningStockEntries,
+  onUpdateBusinessSettings,
   onFactoryReset,
   onClearOperationalData,
   onClearOnlyStock,
@@ -486,6 +491,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [selectedVendasYear, setSelectedVendasYear] = useState<string | null>(null);
   const [selectedEstornosYear, setSelectedEstornosYear] = useState<string | null>(null);
   const [selectedEstoqueYear, setSelectedEstoqueYear] = useState<string | null>(null);
+  const [estoqueSubTab, setEstoqueSubTab] = useState<'movimentacoes' | 'configuracoes'>('movimentacoes');
   const [selectedMateriaisYear, setSelectedMateriaisYear] = useState<string | null>(null);
   const [isStockCostPopoverOpen, setIsStockCostPopoverOpen] = useState(false);
   const [stockCostPopoverMode, setStockCostPopoverMode] = useState<'products' | 'ingredients'>('ingredients');
@@ -495,6 +501,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [adminPeriodYear, setAdminPeriodYear] = useState<string>(() => `${new Date().getFullYear()}`);
   const [adminPeriodRangeStart, setAdminPeriodRangeStart] = useState<string>(() => toInputDate(new Date()));
   const [adminPeriodRangeEnd, setAdminPeriodRangeEnd] = useState<string>(() => toInputDate(new Date()));
+  const infiniteStockEnabled = businessSettings.infiniteStockEnabled === true;
+  const ignoreStockCosts = businessSettings.ignoreStockCosts === true || infiniteStockEnabled;
   const stockCostPopoverRef = useRef<HTMLDivElement | null>(null);
   const stockCostPopoverButtonRef = useRef<HTMLButtonElement | null>(null);
   const availablePeriodYears = useMemo(() => {
@@ -1171,6 +1179,22 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
       setSelectedArchiveDay(null);
     }
     setPendingDelete(null);
+  };
+
+  const handleToggleInfiniteStock = () => {
+    const nextInfiniteStockEnabled = !infiniteStockEnabled;
+    onUpdateBusinessSettings({
+      infiniteStockEnabled: nextInfiniteStockEnabled,
+      ignoreStockCosts: nextInfiniteStockEnabled ? true : false,
+    });
+  };
+
+  const handleToggleIgnoreStockCosts = () => {
+    if (infiniteStockEnabled) return;
+    onUpdateBusinessSettings({
+      infiniteStockEnabled,
+      ignoreStockCosts: !ignoreStockCosts,
+    });
   };
 
   const StatCard = ({ title, value, color, icon }: any) => (
@@ -2628,117 +2652,205 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><polyline points="12 22.08 12 12"/></svg>
             </div>
             <div>
-              <h3 className="text-2xl font-black text-slate-800 uppercase tracking-tighter">Movimentações de Estoque</h3>
-              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">Organizado por período.</p>
+              <h3 className="text-2xl font-black text-slate-800 uppercase tracking-tighter">Estoque</h3>
+              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">Movimentações e modo operacional.</p>
             </div>
           </div>
 
-          {(() => {
-            const stockGroups: Record<string, Record<string, typeof stockEntries>> = {};
-            stockEntries.forEach(entry => {
-              const month = entry.timestamp.toLocaleString('pt-BR', { month: 'long', year: 'numeric' });
-              const day = entry.timestamp.toLocaleDateString('pt-BR');
-              if (!stockGroups[month]) stockGroups[month] = {};
-              if (!stockGroups[month][day]) stockGroups[month][day] = [];
-              stockGroups[month][day].push(entry);
-            });
-            
-            // Extrair anos disponíveis
-            const yearsSet = new Set<string>();
-            Object.keys(stockGroups).forEach(month => {
-              const year = month.split(' ').pop();
-              if (year) yearsSet.add(year);
-            });
-            const years = Array.from(yearsSet).sort((a, b) => parseInt(b) - parseInt(a));
-            const currentYear = years[0] || new Date().getFullYear().toString();
-            const selectedYearCandidate = selectedEstoqueYear || currentYear;
-            const selectedYear = years.includes(selectedYearCandidate) ? selectedYearCandidate : currentYear;
-            
-            // Filtrar meses por ano
-            const filteredMonths = Object.keys(stockGroups)
-              .filter(month => month.endsWith(selectedYear))
-              .sort((a, b) => new Date(b).getTime() - new Date(a).getTime());
-            
-            return (
-              <div className="space-y-6">
-                {years.length > 1 && (
-                  <div className="flex gap-2 flex-wrap mb-6">
-                    {years.map(year => (
-                      <button
-                        key={year}
-                        onClick={() => setSelectedEstoqueYear(year)}
-                        className={`qb-btn-touch px-5 py-2 rounded-2xl font-black text-[10px] uppercase transition-all ${
-                          selectedYear === year
-                            ? 'bg-slate-900 text-white shadow-lg shadow-slate-400'
-                            : 'bg-white text-slate-600 border border-slate-200 hover:border-slate-400'
-                        }`}
-                      >
-                        {year}
-                      </button>
-                    ))}
+          <div className="mb-6 flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => setEstoqueSubTab('movimentacoes')}
+              className={`qb-btn-touch rounded-2xl px-4 py-2 text-[10px] font-black uppercase tracking-wider transition ${
+                estoqueSubTab === 'movimentacoes'
+                  ? 'bg-slate-900 text-white shadow-lg shadow-slate-300'
+                  : 'bg-white text-slate-700 border border-slate-200 hover:border-slate-400'
+              }`}
+            >
+              Movimentações
+            </button>
+            <button
+              type="button"
+              onClick={() => setEstoqueSubTab('configuracoes')}
+              className={`qb-btn-touch rounded-2xl px-4 py-2 text-[10px] font-black uppercase tracking-wider transition ${
+                estoqueSubTab === 'configuracoes'
+                  ? 'bg-slate-900 text-white shadow-lg shadow-slate-300'
+                  : 'bg-white text-slate-700 border border-slate-200 hover:border-slate-400'
+              }`}
+            >
+              Configurações
+            </button>
+          </div>
+
+          {estoqueSubTab === 'configuracoes' && (
+            <div className="space-y-4">
+              <div className="rounded-[28px] border border-slate-200 bg-white p-5 sm:p-6 shadow-sm">
+                <div className="flex items-start justify-between gap-4">
+                  <div className="space-y-1">
+                    <h4 className="text-lg font-black uppercase tracking-tight text-slate-900">Estoque infinito</h4>
+                    <p className="text-xs font-semibold text-slate-600">
+                      Quando ativado, o sistema mantém os produtos disponíveis e não controla baixa de estoque nem custos de insumos. Use quando a loja não estiver trabalhando com estoque real.
+                    </p>
                   </div>
-                )}
-                {filteredMonths.map(month => (
-                  <div key={month} className="bg-white rounded-[32px] overflow-hidden border border-slate-200 shadow-sm">
-                    <button 
-                      className="qb-admin-month-toggle qb-btn-touch w-full p-6 flex items-center justify-between hover:bg-slate-50 transition-colors"
-                      onClick={() => setExpandedMonths({...expandedMonths, [`estoque_${month}`]: !expandedMonths[`estoque_${month}`]})}
-                    >
-                      <span className="font-black text-base sm:text-lg text-slate-800 uppercase">{month}</span>
-                      <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" className={`transition-transform ${expandedMonths[`estoque_${month}`] ? 'rotate-180' : ''}`}><polyline points="6 9 12 15 18 9"/></svg>
-                    </button>
-                    {expandedMonths[`estoque_${month}`] && (
-                      <div className="px-6 pb-6 border-t border-slate-100 space-y-4">
-                        {Object.keys(stockGroups[month]).reverse().map(day => (
-                          <div key={day} className="bg-slate-50 rounded-2xl overflow-hidden border border-slate-200">
-                            <button 
-                              className="qb-admin-day-toggle qb-btn-touch w-full p-4 flex items-center justify-between hover:bg-slate-100 transition-colors"
-                              onClick={() => setExpandedDays({...expandedDays, [`estoque_${day}`]: !expandedDays[`estoque_${day}`]})}
-                            >
-                              <span className="font-black text-slate-700 text-xs sm:text-sm uppercase">{day}</span>
-                              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" className={`transition-transform ${expandedDays[`estoque_${day}`] ? 'rotate-180' : ''}`}><polyline points="6 9 12 15 18 9"/></svg>
-                            </button>
-                            {expandedDays[`estoque_${day}`] && (
-                              <div className="overflow-x-auto">
-                                <table className="w-full text-left bg-white">
-                                  <thead>
-                                    <tr className="border-b border-slate-100">
-                                      <th className="px-4 py-3 text-[10px] font-black uppercase text-slate-400">Horário</th>
-                                      <th className="px-4 py-3 text-[10px] font-black uppercase text-slate-400">Insumo</th>
-                                      <th className="px-4 py-3 text-[10px] font-black uppercase text-slate-400 text-right">Quantidade</th>
-                                    </tr>
-                                  </thead>
-                                  <tbody className="divide-y divide-slate-50">
-                                    {stockGroups[month][day].slice().reverse().map(entry => {
-                                      const isOut = entry.quantity < 0;
-                                      const ingredient = ingredientsById.get(entry.ingredientId);
-                                      const displayQty = ingredient
-                                        ? formatIngredientStockQuantity(ingredient, Math.abs(entry.quantity))
-                                        : formatStockQuantityByUnit('', Math.abs(entry.quantity));
-                                      return (
-                                        <tr key={entry.id}>
-                                          <td className="px-4 py-3 text-xs font-bold text-slate-500">{entry.timestamp.toLocaleTimeString()}</td>
-                                          <td className="px-4 py-3 font-black text-slate-800 uppercase text-xs">{entry.ingredientName}</td>
-                                          <td className={`px-4 py-3 text-xs font-black text-right ${isOut ? 'text-red-600' : 'text-blue-600'}`}>
-                                            {isOut ? '-' : '+'}{displayQty}
-                                            {ingredient?.unit ? ` ${ingredient.unit}` : ''}
-                                          </td>
-                                        </tr>
-                                      );
-                                    })}
-                                  </tbody>
-                                </table>
-                              </div>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-                ))}
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={infiniteStockEnabled}
+                    onClick={handleToggleInfiniteStock}
+                    className={`qb-btn-touch relative inline-flex h-8 w-14 items-center rounded-full transition ${
+                      infiniteStockEnabled ? 'bg-emerald-500' : 'bg-slate-300'
+                    }`}
+                  >
+                    <span
+                      className={`inline-block h-6 w-6 transform rounded-full bg-white shadow transition ${
+                        infiniteStockEnabled ? 'translate-x-7' : 'translate-x-1'
+                      }`}
+                    />
+                  </button>
+                </div>
               </div>
-            );
-          })()}
+
+              <div className="rounded-[28px] border border-slate-200 bg-white p-5 sm:p-6 shadow-sm">
+                <div className="flex items-start justify-between gap-4">
+                  <div className="space-y-1">
+                    <h4 className="text-lg font-black uppercase tracking-tight text-slate-900">Não contar gastos de estoque</h4>
+                    <p className="text-xs font-semibold text-slate-600">
+                      Evita cálculo falso de lucro quando custos de ingredientes e insumos não estão confiáveis.
+                    </p>
+                    <p className="text-[10px] font-black uppercase tracking-wider text-amber-600">
+                      {infiniteStockEnabled
+                        ? 'Ativado automaticamente porque o estoque infinito está ligado.'
+                        : 'Recomendado quando a loja não controla custo real de insumos.'}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={ignoreStockCosts}
+                    onClick={handleToggleIgnoreStockCosts}
+                    disabled={infiniteStockEnabled}
+                    className={`qb-btn-touch relative inline-flex h-8 w-14 items-center rounded-full transition ${
+                      ignoreStockCosts ? 'bg-amber-500' : 'bg-slate-300'
+                    } ${infiniteStockEnabled ? 'cursor-not-allowed opacity-60' : ''}`}
+                  >
+                    <span
+                      className={`inline-block h-6 w-6 transform rounded-full bg-white shadow transition ${
+                        ignoreStockCosts ? 'translate-x-7' : 'translate-x-1'
+                      }`}
+                    />
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {estoqueSubTab === 'movimentacoes' &&
+            (() => {
+              const stockGroups: Record<string, Record<string, typeof stockEntries>> = {};
+              stockEntries.forEach(entry => {
+                const month = entry.timestamp.toLocaleString('pt-BR', { month: 'long', year: 'numeric' });
+                const day = entry.timestamp.toLocaleDateString('pt-BR');
+                if (!stockGroups[month]) stockGroups[month] = {};
+                if (!stockGroups[month][day]) stockGroups[month][day] = [];
+                stockGroups[month][day].push(entry);
+              });
+              
+              // Extrair anos disponíveis
+              const yearsSet = new Set<string>();
+              Object.keys(stockGroups).forEach(month => {
+                const year = month.split(' ').pop();
+                if (year) yearsSet.add(year);
+              });
+              const years = Array.from(yearsSet).sort((a, b) => parseInt(b) - parseInt(a));
+              const currentYear = years[0] || new Date().getFullYear().toString();
+              const selectedYearCandidate = selectedEstoqueYear || currentYear;
+              const selectedYear = years.includes(selectedYearCandidate) ? selectedYearCandidate : currentYear;
+              
+              // Filtrar meses por ano
+              const filteredMonths = Object.keys(stockGroups)
+                .filter(month => month.endsWith(selectedYear))
+                .sort((a, b) => new Date(b).getTime() - new Date(a).getTime());
+              
+              return (
+                <div className="space-y-6">
+                  {years.length > 1 && (
+                    <div className="flex gap-2 flex-wrap mb-6">
+                      {years.map(year => (
+                        <button
+                          key={year}
+                          onClick={() => setSelectedEstoqueYear(year)}
+                          className={`qb-btn-touch px-5 py-2 rounded-2xl font-black text-[10px] uppercase transition-all ${
+                            selectedYear === year
+                              ? 'bg-slate-900 text-white shadow-lg shadow-slate-400'
+                              : 'bg-white text-slate-600 border border-slate-200 hover:border-slate-400'
+                          }`}
+                        >
+                          {year}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  {filteredMonths.map(month => (
+                    <div key={month} className="bg-white rounded-[32px] overflow-hidden border border-slate-200 shadow-sm">
+                      <button 
+                        className="qb-admin-month-toggle qb-btn-touch w-full p-6 flex items-center justify-between hover:bg-slate-50 transition-colors"
+                        onClick={() => setExpandedMonths({...expandedMonths, [`estoque_${month}`]: !expandedMonths[`estoque_${month}`]})}
+                      >
+                        <span className="font-black text-base sm:text-lg text-slate-800 uppercase">{month}</span>
+                        <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" className={`transition-transform ${expandedMonths[`estoque_${month}`] ? 'rotate-180' : ''}`}><polyline points="6 9 12 15 18 9"/></svg>
+                      </button>
+                      {expandedMonths[`estoque_${month}`] && (
+                        <div className="px-6 pb-6 border-t border-slate-100 space-y-4">
+                          {Object.keys(stockGroups[month]).reverse().map(day => (
+                            <div key={day} className="bg-slate-50 rounded-2xl overflow-hidden border border-slate-200">
+                              <button 
+                                className="qb-admin-day-toggle qb-btn-touch w-full p-4 flex items-center justify-between hover:bg-slate-100 transition-colors"
+                                onClick={() => setExpandedDays({...expandedDays, [`estoque_${day}`]: !expandedDays[`estoque_${day}`]})}
+                              >
+                                <span className="font-black text-slate-700 text-xs sm:text-sm uppercase">{day}</span>
+                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" className={`transition-transform ${expandedDays[`estoque_${day}`] ? 'rotate-180' : ''}`}><polyline points="6 9 12 15 18 9"/></svg>
+                              </button>
+                              {expandedDays[`estoque_${day}`] && (
+                                <div className="overflow-x-auto">
+                                  <table className="w-full text-left bg-white">
+                                    <thead>
+                                      <tr className="border-b border-slate-100">
+                                        <th className="px-4 py-3 text-[10px] font-black uppercase text-slate-400">Horário</th>
+                                        <th className="px-4 py-3 text-[10px] font-black uppercase text-slate-400">Insumo</th>
+                                        <th className="px-4 py-3 text-[10px] font-black uppercase text-slate-400 text-right">Quantidade</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-50">
+                                      {stockGroups[month][day].slice().reverse().map(entry => {
+                                        const isOut = entry.quantity < 0;
+                                        const ingredient = ingredientsById.get(entry.ingredientId);
+                                        const displayQty = ingredient
+                                          ? formatIngredientStockQuantity(ingredient, Math.abs(entry.quantity))
+                                          : formatStockQuantityByUnit('', Math.abs(entry.quantity));
+                                        return (
+                                          <tr key={entry.id}>
+                                            <td className="px-4 py-3 text-xs font-bold text-slate-500">{entry.timestamp.toLocaleTimeString()}</td>
+                                            <td className="px-4 py-3 font-black text-slate-800 uppercase text-xs">{entry.ingredientName}</td>
+                                            <td className={`px-4 py-3 text-xs font-black text-right ${isOut ? 'text-red-600' : 'text-blue-600'}`}>
+                                              {isOut ? '-' : '+'}{displayQty}
+                                              {ingredient?.unit ? ` ${ingredient.unit}` : ''}
+                                            </td>
+                                          </tr>
+                                        );
+                                      })}
+                                    </tbody>
+                                  </table>
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              );
+            })()}
         </div>
       )}
     </div>

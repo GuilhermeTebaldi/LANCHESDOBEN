@@ -147,6 +147,12 @@ const saleDraftCancelCommandSchema = baseCommandSchema.extend({
   draftId: idSchema,
 });
 
+const setBusinessSettingsCommandSchema = baseCommandSchema.extend({
+  type: z.literal('SET_BUSINESS_SETTINGS'),
+  infiniteStockEnabled: z.boolean(),
+  ignoreStockCosts: z.boolean().optional(),
+});
+
 const saleUndoCommandSchema = baseCommandSchema.extend({
   type: z.literal('SALE_UNDO_LAST'),
 });
@@ -278,6 +284,7 @@ export const stateCommandSchema = z.discriminatedUnion('type', [
   saleDraftFinalizeAndConfirmPaidCommandSchema,
   saleDraftConfirmPaidCommandSchema,
   saleDraftCancelCommandSchema,
+  setBusinessSettingsCommandSchema,
   saleUndoCommandSchema,
   saleUndoByIdCommandSchema,
   saleEditByIdCommandSchema,

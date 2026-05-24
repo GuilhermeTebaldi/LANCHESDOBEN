@@ -34,6 +34,10 @@ const EMPTY_APP_STATE: FrontAppState = {
   saleDrafts: [],
   cashRegisterAmount: 0,
   dailySalesHistory: [],
+  businessSettings: {
+    infiniteStockEnabled: false,
+    ignoreStockCosts: false,
+  },
 };
 
 const arrayOrEmpty = <T>(value: unknown): T[] => (Array.isArray(value) ? (value as T[]) : []);
@@ -41,6 +45,25 @@ const toNonNegativeNumber = (value: unknown): number => {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) return 0;
   return parsed;
+};
+
+const normalizeBusinessSettings = (
+  value: unknown
+): NonNullable<FrontAppState['businessSettings']> => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {
+      infiniteStockEnabled: false,
+      ignoreStockCosts: false,
+    };
+  }
+
+  const source = value as Record<string, unknown>;
+  const infiniteStockEnabled = source.infiniteStockEnabled === true;
+  const ignoreStockCosts = source.ignoreStockCosts === true || infiniteStockEnabled;
+  return {
+    infiniteStockEnabled,
+    ignoreStockCosts,
+  };
 };
 
 const normalizeStatePayload = (value: unknown): FrontAppState => {
@@ -63,6 +86,7 @@ const normalizeStatePayload = (value: unknown): FrontAppState => {
     saleDrafts: arrayOrEmpty(payload.saleDrafts),
     cashRegisterAmount: toNonNegativeNumber(payload.cashRegisterAmount),
     dailySalesHistory: arrayOrEmpty(payload.dailySalesHistory),
+    businessSettings: normalizeBusinessSettings(payload.businessSettings),
   };
 };
 
@@ -82,6 +106,10 @@ const normalizeStatePayloadSafe = (value: unknown): FrontAppState => {
       saleDrafts: [],
       cashRegisterAmount: 0,
       dailySalesHistory: [],
+      businessSettings: {
+        infiniteStockEnabled: false,
+        ignoreStockCosts: false,
+      },
     };
   }
   return normalizeStatePayload(value);
@@ -137,6 +165,7 @@ interface HotStatePatch {
   cleaningStockEntries: FrontAppState['cleaningStockEntries'];
   saleDrafts: FrontAppState['saleDrafts'];
   cashRegisterAmount: FrontAppState['cashRegisterAmount'];
+  businessSettings: FrontAppState['businessSettings'];
 }
 
 // SALE_DRAFT_CONFIRM_PAID mutates only these top-level keys in AppState.
@@ -164,6 +193,7 @@ const toHotStatePatch = (state: FrontAppState): HotStatePatch => ({
   cleaningStockEntries: state.cleaningStockEntries,
   saleDrafts: state.saleDrafts,
   cashRegisterAmount: state.cashRegisterAmount,
+  businessSettings: state.businessSettings,
 });
 
 const toConfirmPaidStatePatch = (state: FrontAppState): ConfirmPaidStatePatch => ({

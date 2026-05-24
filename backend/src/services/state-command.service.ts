@@ -1,5 +1,6 @@
 import type {
   FrontAppState,
+  FrontBusinessSettings,
   FrontCashRegisterExpenseDetail,
   FrontCleaningMaterial,
   FrontCleaningStockEntry,
@@ -217,6 +218,31 @@ const toNonNegativeMoney = (value: unknown): number => {
   if (!Number.isFinite(parsed) || parsed < 0) return 0;
   return roundMoney(parsed);
 };
+
+const DEFAULT_BUSINESS_SETTINGS: Required<FrontBusinessSettings> = {
+  infiniteStockEnabled: false,
+  ignoreStockCosts: false,
+};
+
+const normalizeBusinessSettings = (
+  value: FrontBusinessSettings | undefined
+): Required<FrontBusinessSettings> => {
+  const infiniteStockEnabled = value?.infiniteStockEnabled === true;
+  const ignoreStockCosts = value?.ignoreStockCosts === true || infiniteStockEnabled;
+  return {
+    infiniteStockEnabled,
+    ignoreStockCosts,
+  };
+};
+
+const getBusinessSettings = (state: FrontAppState): Required<FrontBusinessSettings> =>
+  normalizeBusinessSettings(state.businessSettings);
+
+const isInfiniteStockEnabled = (state: FrontAppState): boolean =>
+  getBusinessSettings(state).infiniteStockEnabled;
+
+const shouldIgnoreStockCosts = (state: FrontAppState): boolean =>
+  getBusinessSettings(state).ignoreStockCosts;
 
 const normalizeLegacyHistoryCost = (rawCost: number, rawRevenue: number): number => {
   if (!Number.isFinite(rawCost) || rawCost <= 0) return 0;
@@ -561,6 +587,7 @@ const cloneState = (state: FrontAppState): FrontAppState => ({
         Boolean(entry && typeof entry === 'object' && !Array.isArray(entry))
     )
     .map(cloneDailySalesHistoryEntry),
+  businessSettings: normalizeBusinessSettings(state.businessSettings),
 });
 
 const emptyAppState = (): FrontAppState => ({
@@ -577,6 +604,7 @@ const emptyAppState = (): FrontAppState => ({
   saleDrafts: [],
   cashRegisterAmount: 0,
   dailySalesHistory: [],
+  businessSettings: { ...DEFAULT_BUSINESS_SETTINGS },
 });
 
 const requireIngredient = (state: FrontAppState, ingredientId: string): FrontIngredient => {
@@ -1161,6 +1189,8 @@ const applySaleDraftConfirmPaid = (
     draft.payment.splitPayments = [];
   }
   const validationMs = Date.now() - validationStartedAt;
+  const infiniteStockMode = isInfiniteStockEnabled(state);
+  const ignoreStockCostsMode = shouldIgnoreStockCosts(state);
 
   type PlannedDraftSale = {
     saleId: string;
@@ -1196,16 +1226,20 @@ const applySaleDraftConfirmPaid = (
     const basePrice = roundMoney(unitBasePrice * quantity);
     const baseCostInfo = product ? calculateRecipeCost(state.ingredients, scaleRecipe(product.recipe, quantity)) : null;
     const baseCost =
-      baseCostInfo && baseCostInfo.missingIngredientIds.length === 0
+      ignoreStockCostsMode
+        ? 0
+        : baseCostInfo && baseCostInfo.missingIngredientIds.length === 0
         ? roundMoney(baseCostInfo.totalCost)
         : undefined;
 
-    Object.entries(saleCost.totals).forEach(([ingredientId, recipeQuantity]) => {
-      const ingredient = requireIngredient(state, ingredientId);
-      const stockQuantity = toStockQuantity(ingredient, recipeQuantity);
-      const current = consumptionByIngredient.get(ingredientId) || 0;
-      consumptionByIngredient.set(ingredientId, current + stockQuantity);
-    });
+    if (!infiniteStockMode) {
+      Object.entries(saleCost.totals).forEach(([ingredientId, recipeQuantity]) => {
+        const ingredient = requireIngredient(state, ingredientId);
+        const stockQuantity = toStockQuantity(ingredient, recipeQuantity);
+        const current = consumptionByIngredient.get(ingredientId) || 0;
+        consumptionByIngredient.set(ingredientId, current + stockQuantity);
+      });
+    }
 
     plannedSales.push({
       saleId: `${draft.id}-${item.id}`,
@@ -1214,7 +1248,7 @@ const applySaleDraftConfirmPaid = (
       saleRecipe,
       stockTotals: saleCost.totals,
       total,
-      totalCost: roundMoney(saleCost.totalCost),
+      totalCost: ignoreStockCostsMode ? 0 : roundMoney(saleCost.totalCost),
       basePrice,
       priceAdjustment: roundMoney(total - basePrice),
       baseCost,
@@ -1223,14 +1257,16 @@ const applySaleDraftConfirmPaid = (
   const planningMs = Date.now() - planningStartedAt;
 
   const stockCheckStartedAt = Date.now();
-  for (const [ingredientId, neededStock] of consumptionByIngredient.entries()) {
-    const ingredient = requireIngredient(state, ingredientId);
-    if (ingredient.currentStock + Number.EPSILON < neededStock) {
-      throw new HttpError(409, `Estoque insuficiente para ${ingredient.name}.`, {
-        ingredientId,
-        required: neededStock,
-        available: ingredient.currentStock,
-      });
+  if (!infiniteStockMode) {
+    for (const [ingredientId, neededStock] of consumptionByIngredient.entries()) {
+      const ingredient = requireIngredient(state, ingredientId);
+      if (ingredient.currentStock + Number.EPSILON < neededStock) {
+        throw new HttpError(409, `Estoque insuficiente para ${ingredient.name}.`, {
+          ingredientId,
+          required: neededStock,
+          available: ingredient.currentStock,
+        });
+      }
     }
   }
   const stockCheckMs = Date.now() - stockCheckStartedAt;
@@ -1261,29 +1297,31 @@ const applySaleDraftConfirmPaid = (
 
   const mutationStartedAt = Date.now();
   plannedSales.forEach((plan) => {
-    Object.entries(plan.stockTotals).forEach(([ingredientId, recipeQuantity]) => {
-      const ingredient = requireIngredient(state, ingredientId);
-      const stockQuantity = toStockQuantity(ingredient, recipeQuantity);
+    if (!infiniteStockMode) {
+      Object.entries(plan.stockTotals).forEach(([ingredientId, recipeQuantity]) => {
+        const ingredient = requireIngredient(state, ingredientId);
+        const stockQuantity = toStockQuantity(ingredient, recipeQuantity);
 
-      state.ingredients = state.ingredients.map((entry) =>
-        entry.id === ingredientId
-          ? { ...entry, currentStock: Math.max(0, entry.currentStock - stockQuantity) }
-          : entry
-      );
+        state.ingredients = state.ingredients.map((entry) =>
+          entry.id === ingredientId
+            ? { ...entry, currentStock: Math.max(0, entry.currentStock - stockQuantity) }
+            : entry
+        );
 
-      const updatedIngredient = requireIngredient(state, ingredientId);
-      const entry: FrontStockEntry = {
-        id: `st-sale-${plan.saleId}-${ingredientId}`,
-        ingredientId,
-        ingredientName: updatedIngredient.name,
-        quantity: -stockQuantity,
-        unitCost: updatedIngredient.cost,
-        timestamp,
-        source: 'SALE',
-        saleId: plan.saleId,
-      };
-      pushIngredientMovement(state, entry);
-    });
+        const updatedIngredient = requireIngredient(state, ingredientId);
+        const entry: FrontStockEntry = {
+          id: `st-sale-${plan.saleId}-${ingredientId}`,
+          ingredientId,
+          ingredientName: updatedIngredient.name,
+          quantity: -stockQuantity,
+          unitCost: updatedIngredient.cost,
+          timestamp,
+          source: 'SALE',
+          saleId: plan.saleId,
+        };
+        pushIngredientMovement(state, entry);
+      });
+    }
 
     const paidSale: FrontSale = {
       id: plan.saleId,
@@ -1293,7 +1331,7 @@ const applySaleDraftConfirmPaid = (
       total: plan.total,
       totalCost: plan.totalCost,
       recipe: plan.saleRecipe,
-      stockDebited: plan.saleRecipe,
+      stockDebited: infiniteStockMode ? [] : plan.saleRecipe,
       basePrice: plan.basePrice,
       priceAdjustment: plan.priceAdjustment,
       baseCost: plan.baseCost,
@@ -1319,6 +1357,8 @@ const applySaleDraftConfirmPaid = (
     ingredientsTouched: consumptionByIngredient.size,
     saleOrigin,
     paymentMethod,
+    infiniteStockMode,
+    ignoreStockCostsMode,
     validationMs,
     planningMs,
     stockCheckMs,
@@ -1359,6 +1399,8 @@ const applySaleRegister = (state: FrontAppState, command: Extract<StateCommandIn
   }
 
   const recipeToUse = normalizeRecipeItems(command.recipeOverride || product.recipe);
+  const infiniteStockMode = isInfiniteStockEnabled(state);
+  const ignoreStockCostsMode = shouldIgnoreStockCosts(state);
 
   const { totalCost, missingIngredientIds, totals } = calculateRecipeCost(state.ingredients, recipeToUse);
   if (Object.keys(totals).length === 0) {
@@ -1368,15 +1410,17 @@ const applySaleRegister = (state: FrontAppState, command: Extract<StateCommandIn
     throw new HttpError(422, 'Receita com insumos ausentes.', { missingIngredientIds });
   }
 
-  for (const [ingredientId, requiredRecipeQuantity] of Object.entries(totals)) {
-    const ingredient = requireIngredient(state, ingredientId);
-    const requiredStockQuantity = toStockQuantity(ingredient, requiredRecipeQuantity);
-    if (ingredient.currentStock + Number.EPSILON < requiredStockQuantity) {
-      throw new HttpError(409, `Estoque insuficiente para ${ingredient.name}.`, {
-        ingredientId,
-        required: requiredStockQuantity,
-        available: ingredient.currentStock,
-      });
+  if (!infiniteStockMode) {
+    for (const [ingredientId, requiredRecipeQuantity] of Object.entries(totals)) {
+      const ingredient = requireIngredient(state, ingredientId);
+      const requiredStockQuantity = toStockQuantity(ingredient, requiredRecipeQuantity);
+      if (ingredient.currentStock + Number.EPSILON < requiredStockQuantity) {
+        throw new HttpError(409, `Estoque insuficiente para ${ingredient.name}.`, {
+          ingredientId,
+          required: requiredStockQuantity,
+          available: ingredient.currentStock,
+        });
+      }
     }
   }
 
@@ -1384,11 +1428,18 @@ const applySaleRegister = (state: FrontAppState, command: Extract<StateCommandIn
   const saleId = command.clientSaleId || createId('s');
   const finalPrice = command.priceOverride !== undefined ? command.priceOverride : product.price;
   const baseCostInfo = calculateRecipeCost(state.ingredients, product.recipe);
-  const baseCost = baseCostInfo.missingIngredientIds.length > 0 ? undefined : baseCostInfo.totalCost;
-  const stockDebited = Object.entries(totals).map(([ingredientId, quantity]) => ({
-    ingredientId,
-    quantity,
-  }));
+  const baseCost =
+    ignoreStockCostsMode
+      ? 0
+      : baseCostInfo.missingIngredientIds.length > 0
+      ? undefined
+      : baseCostInfo.totalCost;
+  const stockDebited = infiniteStockMode
+    ? []
+    : Object.entries(totals).map(([ingredientId, quantity]) => ({
+        ingredientId,
+        quantity,
+      }));
 
   const newSale: FrontSale = {
     id: saleId,
@@ -1396,7 +1447,7 @@ const applySaleRegister = (state: FrontAppState, command: Extract<StateCommandIn
     productName: product.name,
     timestamp,
     total: finalPrice,
-    totalCost,
+    totalCost: ignoreStockCostsMode ? 0 : totalCost,
     recipe: recipeToUse,
     stockDebited,
     basePrice: product.price,
@@ -1407,28 +1458,30 @@ const applySaleRegister = (state: FrontAppState, command: Extract<StateCommandIn
     appOrderTotal: null,
   };
 
-  Object.entries(totals).forEach(([ingredientId, quantity]) => {
-    const ingredient = requireIngredient(state, ingredientId);
-    const stockQuantity = toStockQuantity(ingredient, quantity);
-    state.ingredients = state.ingredients.map((ingredient) =>
-      ingredient.id === ingredientId
-        ? { ...ingredient, currentStock: Math.max(0, ingredient.currentStock - stockQuantity) }
-        : ingredient
-    );
+  if (!infiniteStockMode) {
+    Object.entries(totals).forEach(([ingredientId, quantity]) => {
+      const ingredient = requireIngredient(state, ingredientId);
+      const stockQuantity = toStockQuantity(ingredient, quantity);
+      state.ingredients = state.ingredients.map((ingredient) =>
+        ingredient.id === ingredientId
+          ? { ...ingredient, currentStock: Math.max(0, ingredient.currentStock - stockQuantity) }
+          : ingredient
+      );
 
-    const updatedIngredient = requireIngredient(state, ingredientId);
-    const entry: FrontStockEntry = {
-      id: `st-sale-${saleId}-${ingredientId}`,
-      ingredientId,
-      ingredientName: updatedIngredient.name,
-      quantity: -stockQuantity,
-      unitCost: updatedIngredient.cost,
-      timestamp,
-      source: 'SALE',
-      saleId,
-    };
-    pushIngredientMovement(state, entry);
-  });
+      const updatedIngredient = requireIngredient(state, ingredientId);
+      const entry: FrontStockEntry = {
+        id: `st-sale-${saleId}-${ingredientId}`,
+        ingredientId,
+        ingredientName: updatedIngredient.name,
+        quantity: -stockQuantity,
+        unitCost: updatedIngredient.cost,
+        timestamp,
+        source: 'SALE',
+        saleId,
+      };
+      pushIngredientMovement(state, entry);
+    });
+  }
 
   state.sales.push(newSale);
   state.globalSales.push({ ...newSale });
@@ -1875,13 +1928,26 @@ const applySetCashRegister = (
   state.cashRegisterAmount = toNonNegativeMoney(command.amount);
 };
 
+const applySetBusinessSettings = (
+  state: FrontAppState,
+  command: Extract<StateCommandInput, { type: 'SET_BUSINESS_SETTINGS' }>
+) => {
+  const normalized = normalizeBusinessSettings({
+    infiniteStockEnabled: command.infiniteStockEnabled,
+    ignoreStockCosts: command.ignoreStockCosts,
+  });
+  state.businessSettings = normalized;
+};
+
 const applyCloseDay = (state: FrontAppState) => {
   const totalRevenue = roundMoney(
     state.sales.reduce((sum, sale) => sum + (Number.isFinite(sale.total) ? sale.total : 0), 0)
   );
-  const totalPurchases = roundMoney(
-    state.sales.reduce((sum, sale) => sum + (Number.isFinite(sale.totalCost) ? sale.totalCost : 0), 0)
-  );
+  const totalPurchases = shouldIgnoreStockCosts(state)
+    ? 0
+    : roundMoney(
+        state.sales.reduce((sum, sale) => sum + (Number.isFinite(sale.totalCost) ? sale.totalCost : 0), 0)
+      );
   const ingredientUnitById = new Map(
     state.ingredients.map((ingredient): [string, string] => [ingredient.id, ingredient.unit])
   );
@@ -2001,6 +2067,9 @@ export const applyStateCommand = (
       return state;
     case 'SALE_DRAFT_CANCEL':
       applySaleDraftCancel(state, command);
+      return state;
+    case 'SET_BUSINESS_SETTINGS':
+      applySetBusinessSettings(state, command);
       return state;
     case 'SALE_UNDO_LAST':
       applyUndoLastSale(state);

@@ -2,6 +2,7 @@
 import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import Header from './components/Header';
 import ProductCard from './components/ProductCard';
+import ProductReports from './components/ProductReports';
 import InventoryManager from './components/InventoryManager';
 import CleaningMaterialsManager from './components/CleaningMaterialsManager';
 import SalesSummary from './components/SalesSummary';
@@ -14,6 +15,7 @@ import EditProductModal from './components/EditProductModal';
 import AdminDashboard from './components/AdminDashboard';
 import AdminLogin from './components/AdminLogin';
 import {
+  BusinessSettings,
   CleaningMaterial,
   CleaningStockEntry,
   CashRegisterExpenseDetail,
@@ -1250,6 +1252,17 @@ const parseMoneyInput = (raw: string): number | null => {
   const parsed = Number(normalized);
   if (!Number.isFinite(parsed)) return null;
   return parsed;
+};
+
+const normalizeBusinessSettings = (
+  source: Partial<BusinessSettings> | null | undefined
+): BusinessSettings => {
+  const infiniteStockEnabled = source?.infiniteStockEnabled === true;
+  const ignoreStockCosts = source?.ignoreStockCosts === true || infiniteStockEnabled;
+  return {
+    infiniteStockEnabled,
+    ignoreStockCosts,
+  };
 };
 
 const BASE_PAYMENT_METHODS: SaleBasePaymentMethod[] = ['PIX', 'DEBITO', 'CREDITO', 'DINHEIRO'];
@@ -3082,6 +3095,11 @@ const App: React.FC = () => {
   const [products, setProducts] = useState<Product[]>(DEFAULT_APP_STATE.products);
   const [sales, setSales] = useState<Sale[]>(DEFAULT_APP_STATE.sales);
   const [stockEntries, setStockEntries] = useState<StockEntry[]>(DEFAULT_APP_STATE.stockEntries);
+  const [businessSettings, setBusinessSettings] = useState<BusinessSettings>(
+    normalizeBusinessSettings(DEFAULT_APP_STATE.businessSettings)
+  );
+  const infiniteStockEnabled = businessSettings.infiniteStockEnabled;
+  const ignoreStockCosts = businessSettings.ignoreStockCosts;
   const [cleaningMaterials, setCleaningMaterials] = useState<CleaningMaterial[]>(
     DEFAULT_APP_STATE.cleaningMaterials
   );
@@ -3594,6 +3612,7 @@ const App: React.FC = () => {
         setProducts(state.products);
         setSales(state.sales);
         setStockEntries(state.stockEntries);
+        setBusinessSettings(normalizeBusinessSettings(state.businessSettings));
         setCleaningMaterials(normalizeCleaningMaterialsStockList(state.cleaningMaterials));
         setCleaningStockEntries(state.cleaningStockEntries);
         setGlobalSales(state.globalSales);
@@ -5551,6 +5570,7 @@ const App: React.FC = () => {
     setProducts(state.products);
     setSales(state.sales);
     setStockEntries(state.stockEntries);
+    setBusinessSettings(normalizeBusinessSettings(state.businessSettings));
     setCleaningMaterials(normalizeCleaningMaterialsStockList(state.cleaningMaterials));
     setCleaningStockEntries(state.cleaningStockEntries);
     setGlobalSales(state.globalSales);
@@ -6303,6 +6323,7 @@ const App: React.FC = () => {
       recipe: RecipeItem[] | undefined,
       quantityDelta: number
     ): { ingredient: Ingredient; required: number; available: number } | null => {
+      if (infiniteStockEnabled) return null;
       const normalizedDelta = Math.max(0, Math.round(Number(quantityDelta) || 0));
       if (normalizedDelta <= 0) return null;
 
@@ -6329,7 +6350,7 @@ const App: React.FC = () => {
 
       return null;
     },
-    [saleIngredientById]
+    [infiniteStockEnabled, saleIngredientById]
   );
 
   const notifyDraftItemStockIssue = useCallback(
@@ -12324,6 +12345,23 @@ const App: React.FC = () => {
     );
   }, [cleaningMaterials, runCommandWithSync]);
 
+  const handleUpdateBusinessSettings = useCallback(
+    (nextSettings: BusinessSettings) => {
+      const normalized = normalizeBusinessSettings(nextSettings);
+      void runCommandWithSync(
+        {
+          type: 'SET_BUSINESS_SETTINGS',
+          infiniteStockEnabled: normalized.infiniteStockEnabled,
+          ignoreStockCosts: normalized.ignoreStockCosts,
+        },
+        normalized.infiniteStockEnabled
+          ? 'Estoque infinito ativado.'
+          : 'Estoque infinito desativado.'
+      );
+    },
+    [runCommandWithSync]
+  );
+
   const buildCurrentCloseDayReport = useCallback((): DailySalesHistoryEntry => {
     const totalRevenue = roundMoney(
       sales.reduce(
@@ -12331,12 +12369,14 @@ const App: React.FC = () => {
         0
       )
     );
-    const totalPurchases = roundMoney(
-      sales.reduce(
-        (sum, sale) => sum + (Number.isFinite(sale.totalCost) ? sale.totalCost : 0),
-        0
-      )
-    );
+    const totalPurchases = ignoreStockCosts
+      ? 0
+      : roundMoney(
+          sales.reduce(
+            (sum, sale) => sum + (Number.isFinite(sale.totalCost) ? sale.totalCost : 0),
+            0
+          )
+        );
     const cashExpenses = calculateCashRegisterExpensesFromStockEntries(stockEntries);
     const openingCash = roundMoney(Math.max(0, cashRegisterAmount));
     const ingredientUnitById = new Map(
@@ -12386,7 +12426,7 @@ const App: React.FC = () => {
       cashExpenses,
       cashExpenseDetails,
     };
-  }, [cashRegisterAmount, ingredients, sales, stockEntries]);
+  }, [cashRegisterAmount, ignoreStockCosts, ingredients, sales, stockEntries]);
 
   const persistLocalCloseDayReport = useCallback((report: DailySalesHistoryEntry) => {
     const normalizedReport = normalizeDailyHistoryEntry(report);
@@ -13231,6 +13271,7 @@ const App: React.FC = () => {
                   onSale={handleSale} 
                   allIngredients={ingredientsForSale}
                   allProducts={products}
+                  infiniteStockEnabled={infiniteStockEnabled}
                   resolvedRecipe={resolvedRecipeByProductId.get(product.id)}
                   onDelete={handleDeleteProduct}
                   onEdit={handleEditProduct}
@@ -13254,10 +13295,19 @@ const App: React.FC = () => {
           <InventoryManager 
             ingredients={ingredients} 
             entries={stockEntries} 
+            businessSettings={businessSettings}
             onUpdateStock={handleUpdateStock} 
+            onUpdateBusinessSettings={handleUpdateBusinessSettings}
             onOpenAddIngredient={() => setIsAddIngredientModalOpen(true)}
             onEditIngredient={handleEditIngredient}
             onDeleteIngredient={handleDeleteIngredient}
+          />
+        )}
+
+        {view === ViewMode.PRODUCT_REPORTS && (
+          <ProductReports
+            sales={sales}
+            archivedSales={globalSales}
           />
         )}
 
@@ -13267,6 +13317,7 @@ const App: React.FC = () => {
             archivedSales={globalSales}
             allIngredients={ingredients} 
             stockEntries={stockEntries}
+            ignoreStockCosts={ignoreStockCosts}
             cashRegisterAmount={cashRegisterAmount}
             dailySalesHistory={dailySalesHistory}
             onSetCashRegister={handleSetCashRegister}
@@ -13297,10 +13348,12 @@ const App: React.FC = () => {
               cancelledSales={globalCancelledSales} 
               stockEntries={globalStockEntries} 
               sessionStockEntries={stockEntries}
+              businessSettings={businessSettings}
               allProducts={products}
               allIngredients={ingredients}
               cleaningMaterials={cleaningMaterials}
               cleaningStockEntries={globalCleaningStockEntries}
+              onUpdateBusinessSettings={handleUpdateBusinessSettings}
               onFactoryReset={handleFactoryReset}
               onClearOperationalData={handleClearOperationalData}
               onClearOnlyStock={handleClearOnlyStock}

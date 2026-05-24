@@ -17,6 +17,7 @@ interface ProductCardProps {
   onSale: (product: Product, recipeOverride?: RecipeItem[], priceOverride?: number) => void;
   allIngredients: Ingredient[];
   allProducts: Product[];
+  infiniteStockEnabled?: boolean;
   resolvedRecipe?: RecipeItem[];
   onDelete?: (id: string) => void;
   onEdit?: (product: Product) => void;
@@ -27,6 +28,7 @@ const ProductCard: React.FC<ProductCardProps> = ({
   onSale,
   allIngredients,
   allProducts,
+  infiniteStockEnabled = false,
   resolvedRecipe,
   onDelete,
   onEdit,
@@ -53,6 +55,7 @@ const ProductCard: React.FC<ProductCardProps> = ({
 
   // Calcula disponibilidade baseada no ingrediente mais limitante
   const canMakeCount = React.useMemo(() => {
+    if (infiniteStockEnabled) return Number.POSITIVE_INFINITY;
     if (!saleBaseRecipe || saleBaseRecipe.length === 0) return 0;
     
     const totals = aggregateRecipe(saleBaseRecipe);
@@ -68,9 +71,9 @@ const ProductCard: React.FC<ProductCardProps> = ({
     });
     
     return Math.min(...limits);
-  }, [saleBaseRecipe, allIngredients]);
+  }, [allIngredients, infiniteStockEnabled, saleBaseRecipe]);
 
-  const isAvailable = canMakeCount > 0;
+  const isAvailable = infiniteStockEnabled || canMakeCount > 0;
   const productsById = React.useMemo(
     () => new Map(allProducts.map((entry) => [entry.id, entry])),
     [allProducts]
@@ -139,7 +142,7 @@ const ProductCard: React.FC<ProductCardProps> = ({
       const nextQty = Math.max(0, normalizeRecipeQuantity(currentQty + nextDelta));
       const requiredStockQuantity = getStockQuantityFromRecipeQuantity(ingredient, nextQty);
 
-      if (ingredient.currentStock + Number.EPSILON < requiredStockQuantity) {
+      if (!infiniteStockEnabled && ingredient.currentStock + Number.EPSILON < requiredStockQuantity) {
         return normalizedCurrentRecipe;
       }
 
@@ -178,7 +181,7 @@ const ProductCard: React.FC<ProductCardProps> = ({
 
       const nextQty = normalizeRecipeQuantity(parsed);
       const requiredStockQuantity = getStockQuantityFromRecipeQuantity(ingredient, nextQty);
-      if (ingredient.currentStock + Number.EPSILON < requiredStockQuantity) {
+      if (!infiniteStockEnabled && ingredient.currentStock + Number.EPSILON < requiredStockQuantity) {
         return normalizedCurrentRecipe;
       }
 
@@ -196,6 +199,7 @@ const ProductCard: React.FC<ProductCardProps> = ({
   };
 
   const canIncrementCustomIngredient = (ingredient: Ingredient): boolean => {
+    if (infiniteStockEnabled) return true;
     const totals = aggregateRecipe(customRecipe);
     const selectedQty = totals[ingredient.id] || 0;
     const step = getRecipeAdjustmentStep(ingredient, selectedQty);
@@ -259,6 +263,7 @@ const ProductCard: React.FC<ProductCardProps> = ({
     const totals = aggregateRecipe(finalRecipe);
     const entries = Object.entries(totals);
     if (entries.length === 0) return false;
+    if (infiniteStockEnabled) return true;
 
     return entries.every(([ingredientId, quantity]) => {
       const ingredient = ingredientsById.get(ingredientId);
@@ -266,7 +271,7 @@ const ProductCard: React.FC<ProductCardProps> = ({
       const requiredStockQuantity = getStockQuantityFromRecipeQuantity(ingredient, quantity);
       return ingredient.currentStock + Number.EPSILON >= requiredStockQuantity;
     });
-  }, [customRecipe, ingredientsById]);
+  }, [customRecipe, infiniteStockEnabled, ingredientsById]);
 
   const customTotals = React.useMemo(() => aggregateRecipe(customRecipe), [customRecipe]);
 
@@ -292,7 +297,7 @@ const ProductCard: React.FC<ProductCardProps> = ({
         {isAvailable && !showDeleteMenu && (
           <div className="absolute top-2 right-2 z-20 bg-green-500 text-white text-[10px] font-black px-2 py-0.5 rounded-lg shadow-sm border border-green-600 flex items-center gap-1">
             <span className="opacity-70">DISP:</span>
-            <span>{canMakeCount}</span>
+            <span>{infiniteStockEnabled ? '∞' : canMakeCount}</span>
           </div>
         )}
 
