@@ -1,5 +1,5 @@
 
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bar,
   BarChart,
@@ -398,7 +398,11 @@ interface ProductCostConsumerEntry {
 const isAppOrigin = (origin: SaleOrigin): boolean =>
   origin === 'IFOOD' || origin === 'APP99' || origin === 'KEETA';
 
-const buildConsolidatedArchiveFinance = (entries: Sale[]): ConsolidatedArchiveFinance => {
+const buildConsolidatedArchiveFinance = (
+  entries: Sale[],
+  options: { ignoreStockCosts?: boolean } = {}
+): ConsolidatedArchiveFinance => {
+  const ignoreStockCosts = options.ignoreStockCosts === true;
   const grouped = new Map<
     string,
     {
@@ -426,10 +430,12 @@ const buildConsolidatedArchiveFinance = (entries: Sale[]): ConsolidatedArchiveFi
       current.fallbackRevenue = roundMoney(current.fallbackRevenue + fallbackRevenue);
     }
 
-    const cost = Number(sale.totalCost);
-    const saleRevenueReference = Math.max(0, Number(sale.total) || 0);
-    if (Number.isFinite(cost)) {
-      current.cost = roundMoney(current.cost + normalizeLegacySaleCost(cost, saleRevenueReference));
+    if (!ignoreStockCosts) {
+      const cost = Number(sale.totalCost);
+      const saleRevenueReference = Math.max(0, Number(sale.total) || 0);
+      if (Number.isFinite(cost)) {
+        current.cost = roundMoney(current.cost + normalizeLegacySaleCost(cost, saleRevenueReference));
+      }
     }
 
     const appRevenue = Number(sale.appOrderTotal);
@@ -446,14 +452,17 @@ const buildConsolidatedArchiveFinance = (entries: Sale[]): ConsolidatedArchiveFi
   grouped.forEach((group) => {
     const effectiveRevenue = roundMoney(group.appRevenue ?? group.fallbackRevenue);
     revenue = roundMoney(revenue + effectiveRevenue);
-    cost = roundMoney(cost + group.cost);
+    if (!ignoreStockCosts) {
+      cost = roundMoney(cost + group.cost);
+    }
   });
 
-  const profit = roundMoney(revenue - cost);
+  const normalizedCost = ignoreStockCosts ? 0 : cost;
+  const profit = roundMoney(revenue - normalizedCost);
   return {
     orders: grouped.size,
     revenue,
-    cost,
+    cost: normalizedCost,
     profit,
   };
 };
@@ -592,14 +601,20 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   }, [availablePeriodYears, adminPeriodYear]);
 
   const consolidatedSalesFinance = useMemo(
-    () => buildConsolidatedArchiveFinance(sales),
-    [sales]
+    () => buildConsolidatedArchiveFinance(sales, { ignoreStockCosts }),
+    [ignoreStockCosts, sales]
   );
   const totalRevenue = consolidatedSalesFinance.revenue;
   const salesCost = consolidatedSalesFinance.cost;
   const salesProfit = consolidatedSalesFinance.profit;
   const cancelledRevenue = cancelledSales.reduce((sum, s) => sum + s.total, 0);
   const stockOutCostBreakdown = useMemo(() => {
+    if (ignoreStockCosts) {
+      return {
+        total: 0,
+        byDay: new Map<string, number>(),
+      };
+    }
     const saleOutByIngredient = new Map<string, number>();
     const byDay = new Map<string, number>();
 
@@ -664,8 +679,14 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
       total: roundMoney(total),
       byDay,
     };
-  }, [stockEntries, allIngredients]);
+  }, [ignoreStockCosts, stockEntries, allIngredients]);
   const cleaningStockCostBreakdown = useMemo(() => {
+    if (ignoreStockCosts) {
+      return {
+        total: 0,
+        byDay: new Map<string, number>(),
+      };
+    }
     const byDay = new Map<string, number>();
     const total = cleaningStockEntries.reduce((sum, entry) => {
       if (entry.quantity >= 0) return sum;
@@ -681,7 +702,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
       total: roundMoney(total),
       byDay,
     };
-  }, [cleaningStockEntries, cleaningMaterials]);
+  }, [ignoreStockCosts, cleaningStockEntries, cleaningMaterials]);
   const stockOutCost = stockOutCostBreakdown.total;
   const cleaningStockOutCost = cleaningStockCostBreakdown.total;
   const operationalExtraCost = roundMoney(stockOutCost + cleaningStockOutCost);
@@ -701,6 +722,12 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
     return map;
   }, [allProducts, allIngredients]);
   const productCostConsumerBreakdown = useMemo(() => {
+    if (ignoreStockCosts) {
+      return {
+        totalCost: 0,
+        entries: [] as ProductCostConsumerEntry[],
+      };
+    }
     const grouped = new Map<string, { id: string; name: string; totalCost: number; saleCount: number }>();
     let total = 0;
 
@@ -787,8 +814,14 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
       totalCost: total,
       entries,
     };
-  }, [sales, productById, productBaseCostById]);
+  }, [ignoreStockCosts, sales, productById, productBaseCostById]);
   const ingredientCostConsumerBreakdown = useMemo(() => {
+    if (ignoreStockCosts) {
+      return {
+        totalCost: 0,
+        entries: [] as IngredientCostConsumerEntry[],
+      };
+    }
     const grouped = new Map<
       string,
       { id: string; name: string; totalCost: number; saleCount: number; saleIds: Set<string> }
@@ -853,7 +886,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
       totalCost: total,
       entries,
     };
-  }, [stockEntries, allIngredients]);
+  }, [ignoreStockCosts, stockEntries, allIngredients]);
   const appChannelSummary = useMemo(() => buildAppChannelSummary(sales), [sales]);
   // KPI principal da aba GERAL: custo e lucro das vendas (COGS), sem misturar saídas operacionais.
   const totalCost = salesCost;
@@ -890,23 +923,40 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
       const dayKey = toDayKey(date);
       const day = ensureDay(dayKey, new Date(date.getFullYear(), date.getMonth(), date.getDate()));
       day.revenue = roundMoney(day.revenue + (Number(sale.total) || 0));
-      day.salesCost = roundMoney(
-        day.salesCost +
-          normalizeLegacySaleCost(Number(sale.totalCost) || 0, Math.max(0, Number(sale.total) || 0))
-      );
+      if (!ignoreStockCosts) {
+        day.salesCost = roundMoney(
+          day.salesCost +
+            normalizeLegacySaleCost(Number(sale.totalCost) || 0, Math.max(0, Number(sale.total) || 0))
+        );
+      }
     });
 
     return [...dailyMap.values()]
       .sort((a, b) => a.date.getTime() - b.date.getTime())
       .map((entry) => {
-        const cost = roundMoney(entry.salesCost);
+        const cost = ignoreStockCosts ? 0 : roundMoney(entry.salesCost);
         return {
           ...entry,
           cost,
           profit: roundMoney(entry.revenue - cost),
         };
       });
-  }, [sales]);
+  }, [ignoreStockCosts, sales]);
+  const resolveDailyHistoryPurchases = useCallback(
+    (entry: DailySalesHistoryEntry): number =>
+      ignoreStockCosts ? 0 : roundMoney(Number(entry.totalPurchases) || 0),
+    [ignoreStockCosts]
+  );
+  const resolveDailyHistoryProfit = useCallback(
+    (entry: DailySalesHistoryEntry): number => {
+      const revenue = roundMoney(Number(entry.totalRevenue) || 0);
+      if (ignoreStockCosts) return revenue;
+      const storedProfit = Number(entry.totalProfit);
+      if (Number.isFinite(storedProfit)) return roundMoney(storedProfit);
+      return roundMoney(revenue - resolveDailyHistoryPurchases(entry));
+    },
+    [ignoreStockCosts, resolveDailyHistoryPurchases]
+  );
   const revenueDistributionData = useMemo(() => {
     const grouped = new Map<
       string,
@@ -1042,8 +1092,9 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
         const closedDate = toDate(entry.closedAt);
         const businessDayKey = getHistoryBusinessDayKey(entry);
         const cashExpenses = Number(entry.cashExpenses) > 0 ? Number(entry.cashExpenses) : 0;
+        const totalPurchases = resolveDailyHistoryPurchases(entry);
         const estimated = roundMoney(
-          entry.openingCash + entry.totalRevenue - entry.totalPurchases - cashExpenses
+          entry.openingCash + entry.totalRevenue - totalPurchases - cashExpenses
         );
         const informed = roundMoney(entry.openingCash);
         const difference = roundMoney(informed - estimated);
@@ -1057,7 +1108,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
           difference,
         };
       });
-  }, [orderedDailySalesHistory]);
+  }, [orderedDailySalesHistory, resolveDailyHistoryPurchases]);
   const cashDifferenceStatus = useMemo(() => {
     if (cashEvolutionSeries.length === 0) {
       return {
@@ -1677,7 +1728,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       {formatBusinessDayLabel(getHistoryBusinessDayKey(latestDailyClose))}
                     </p>
                     <p className="text-[11px] font-black text-slate-700">
-                      Lucro: R$ {latestDailyClose.totalProfit.toFixed(2)}
+                      Lucro: R$ {resolveDailyHistoryProfit(latestDailyClose).toFixed(2)}
                     </p>
                   </>
                 ) : (
@@ -1732,8 +1783,10 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   {orderedDailySalesHistory.map((entry) => {
                     const closedAt = toDate(entry.closedAt);
                     const cashExpenses = Number(entry.cashExpenses) > 0 ? Number(entry.cashExpenses) : 0;
+                    const totalPurchases = resolveDailyHistoryPurchases(entry);
+                    const totalProfit = resolveDailyHistoryProfit(entry);
                     const closingEstimate =
-                      entry.openingCash + entry.totalRevenue - entry.totalPurchases - cashExpenses;
+                      entry.openingCash + entry.totalRevenue - totalPurchases - cashExpenses;
                     return (
                       <div key={entry.id} className="bg-slate-50 border border-slate-200 rounded-2xl p-4">
                         <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-2">
@@ -1750,7 +1803,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           </p>
                         </div>
                         <div className="mt-2 text-[11px] font-bold text-slate-700">
-                          Caixa: R$ {entry.openingCash.toFixed(2)} | Faturamento: R$ {entry.totalRevenue.toFixed(2)} | Compras: R$ {entry.totalPurchases.toFixed(2)} | Compra no caixa: R$ {cashExpenses.toFixed(2)} | Lucro: R$ {entry.totalProfit.toFixed(2)} | Caixa estimado: R$ {closingEstimate.toFixed(2)}
+                          Caixa: R$ {entry.openingCash.toFixed(2)} | Faturamento: R$ {entry.totalRevenue.toFixed(2)} | Compras: R$ {totalPurchases.toFixed(2)} | Compra no caixa: R$ {cashExpenses.toFixed(2)} | Lucro: R$ {totalProfit.toFixed(2)} | Caixa estimado: R$ {closingEstimate.toFixed(2)}
                         </div>
                       </div>
                     );
@@ -2053,7 +2106,9 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
             <div className="qb-archive-month-grid grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-6">
               {Object.keys(archives).map(month => {
                 const monthSales = Object.values(archives[month]).flat() as Sale[];
-                const monthFinance = buildConsolidatedArchiveFinance(monthSales);
+                const monthFinance = buildConsolidatedArchiveFinance(monthSales, {
+                  ignoreStockCosts,
+                });
                 const monthAppSummary = buildAppChannelSummary(monthSales);
                 return (
                 <div key={month} className="relative group">
@@ -2086,7 +2141,9 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <div className="qb-archive-day-grid grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-4">
                 {Object.keys(archives[selectedArchiveMonth]).map(day => {
                   const daySales = archives[selectedArchiveMonth][day] as Sale[];
-                  const dayFinance = buildConsolidatedArchiveFinance(daySales);
+                  const dayFinance = buildConsolidatedArchiveFinance(daySales, {
+                    ignoreStockCosts,
+                  });
                   const dayAppSummary = buildAppChannelSummary(daySales);
                   return (
                   <div key={day} className="relative group">
@@ -2131,7 +2188,9 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       <p className="text-2xl sm:text-4xl font-black text-slate-900">{selectedArchiveDay}</p>
                       {(() => {
                         const selectedSales = archives[selectedArchiveMonth!][selectedArchiveDay] as Sale[];
-                        const selectedFinance = buildConsolidatedArchiveFinance(selectedSales);
+                        const selectedFinance = buildConsolidatedArchiveFinance(selectedSales, {
+                          ignoreStockCosts,
+                        });
                         return (
                           <>
                             <p className="text-2xl sm:text-3xl font-black text-green-600">R$ {selectedFinance.profit.toFixed(2)}</p>
@@ -2144,7 +2203,9 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 <div className="qb-archive-detail-grid grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
                    {(() => {
                      const selectedSales = archives[selectedArchiveMonth!][selectedArchiveDay] as Sale[];
-                     const selectedFinance = buildConsolidatedArchiveFinance(selectedSales);
+                     const selectedFinance = buildConsolidatedArchiveFinance(selectedSales, {
+                       ignoreStockCosts,
+                     });
                      const selectedAppSummary = buildAppChannelSummary(selectedSales);
                      return (
                        <>
@@ -2613,7 +2674,9 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                       const quantityLabel = material
                                         ? formatStockQuantityByUnit(material.unit, Math.abs(entry.quantity))
                                         : formatStockQuantityByUnit('', Math.abs(entry.quantity));
-                                      const totalCost = Math.abs(entry.quantity) * (entry.unitCost ?? 0);
+                                      const totalCost = ignoreStockCosts
+                                        ? 0
+                                        : Math.abs(entry.quantity) * (entry.unitCost ?? 0);
                                       return (
                                         <tr key={entry.id}>
                                           <td className="px-4 py-3 text-xs font-bold text-slate-500">{entry.timestamp.toLocaleTimeString()}</td>

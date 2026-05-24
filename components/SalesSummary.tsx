@@ -804,6 +804,24 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
       totalRevenue,
     ]
   );
+  const resolveReportPurchases = useCallback(
+    (report: DailySalesHistoryEntry): number => {
+      if (ignoreStockCosts) return 0;
+      const purchases = Number(report.totalPurchases);
+      return Number.isFinite(purchases) ? roundMoney(purchases) : 0;
+    },
+    [ignoreStockCosts]
+  );
+  const resolveReportProfit = useCallback(
+    (report: DailySalesHistoryEntry): number => {
+      const revenue = roundMoney(Number(report.totalRevenue) || 0);
+      if (ignoreStockCosts) return revenue;
+      const storedProfit = Number(report.totalProfit);
+      if (Number.isFinite(storedProfit)) return roundMoney(storedProfit);
+      return roundMoney(revenue - resolveReportPurchases(report));
+    },
+    [ignoreStockCosts, resolveReportPurchases]
+  );
 
   const archiveSalesByDay = useMemo(() => {
     const map = new Map<string, Sale[]>();
@@ -996,9 +1014,11 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
       const center = (value: string) => withLeftInsetRaw(centerThermalText(value, contentColumns));
       const wrap = (value: string) => wrapThermalText(value, contentColumns).map(withLeftInset);
       const closedAt = toDate(report.closedAt);
+      const reportPurchases = resolveReportPurchases(report);
+      const reportProfit = resolveReportProfit(report);
       const cashExpenses = roundMoney(Math.max(0, Number(report.cashExpenses) || 0));
       const cashExpenseDetails = normalizeCashExpenseDetails(report.cashExpenseDetails);
-      const estimatedCash = roundMoney(report.openingCash + report.totalRevenue - report.totalPurchases - cashExpenses);
+      const estimatedCash = roundMoney(report.openingCash + report.totalRevenue - reportPurchases - cashExpenses);
       const orderedSales = [...reportSales].sort(
         (a, b) => toDate(a.timestamp).getTime() - toDate(b.timestamp).getTime()
       );
@@ -1084,9 +1104,9 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
         reportLines.push(thermalSeparator);
         reportLines.push(align('Caixa inicial:', formatThermalCurrency(report.openingCash)));
         reportLines.push(align('Faturamento bruto:', formatThermalCurrency(report.totalRevenue)));
-        reportLines.push(align('Compras (insumos):', formatThermalCurrency(report.totalPurchases)));
+        reportLines.push(align('Compras (insumos):', formatThermalCurrency(reportPurchases)));
         reportLines.push(align('Saida de caixa:', formatThermalCurrency(cashExpenses)));
-        reportLines.push(align('Resultado operacional:', formatThermalCurrency(report.totalProfit)));
+        reportLines.push(align('Resultado operacional:', formatThermalCurrency(reportProfit)));
         reportLines.push(align('Caixa estimado:', formatThermalCurrency(estimatedCash)));
         reportLines.push(align('Total de pedidos:', String(reportOrderCount)));
         appendCashExpenseDetailsSection();
@@ -1123,8 +1143,8 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
         reportLines.push(thermalSeparator);
         reportLines.push(align('Caixa Inicial:', formatThermalCurrency(report.openingCash)));
         reportLines.push(align('Faturamento:', formatThermalCurrency(report.totalRevenue)));
-        reportLines.push(align('Compras (Insumos):', formatThermalCurrency(report.totalPurchases)));
-        reportLines.push(align('Lucro:', formatThermalCurrency(report.totalProfit)));
+        reportLines.push(align('Compras (Insumos):', formatThermalCurrency(reportPurchases)));
+        reportLines.push(align('Lucro:', formatThermalCurrency(reportProfit)));
         reportLines.push(align('Pedidos:', String(reportOrderCount)));
         reportLines.push(align('Saida de Caixa:', formatThermalCurrency(cashExpenses)));
         reportLines.push(align('Caixa Estimado:', formatThermalCurrency(estimatedCash)));
@@ -1327,7 +1347,13 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
       }, 120);
       return true;
     },
-    [resolveSaleCost, selectedCashPrintPreset, selectedHistoryPrintPreset]
+    [
+      resolveReportProfit,
+      resolveReportPurchases,
+      resolveSaleCost,
+      selectedCashPrintPreset,
+      selectedHistoryPrintPreset,
+    ]
   );
 
   const handleSaleClick = (e: React.MouseEvent<HTMLButtonElement>, saleId: string) => {
@@ -1619,10 +1645,12 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
                 orderedHistory.map(({ entry, sales: historySales, inferred }) => {
                   const entryDate = toDate(entry.closedAt);
                   const entryBusinessDateLabel = formatBusinessDayLabel(getHistoryBusinessDayKey(entry));
+                  const entryPurchases = resolveReportPurchases(entry);
+                  const entryProfit = resolveReportProfit(entry);
                   const entryCashExpenses = roundMoney(Math.max(0, Number(entry.cashExpenses) || 0));
                   const entryCashExpenseDetails = normalizeCashExpenseDetails(entry.cashExpenseDetails);
                   const entryEstimatedCash =
-                    entry.openingCash + entry.totalRevenue - entry.totalPurchases - entryCashExpenses;
+                    entry.openingCash + entry.totalRevenue - entryPurchases - entryCashExpenses;
                   return (
                     <div
                       key={entry.id}
@@ -1641,7 +1669,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
                           </p>
                         )}
                         <p className="text-[11px] font-bold text-slate-700">
-                          Faturamento: {formatCurrency(entry.totalRevenue)} | Compras: {formatCurrency(entry.totalPurchases)} | Caixa: {formatCurrency(entryEstimatedCash)}
+                          Faturamento: {formatCurrency(entry.totalRevenue)} | Compras: {formatCurrency(entryPurchases)} | Lucro: {formatCurrency(entryProfit)} | Caixa: {formatCurrency(entryEstimatedCash)}
                         </p>
                         {entryCashExpenses > 0 && (
                           <p className="text-[11px] font-black text-amber-700 uppercase tracking-widest">
