@@ -1776,7 +1776,11 @@ const normalizeRecipeOverride = (value: unknown): RecipeItem[] | undefined => {
 const validateDraftItemRecipe = (
   product: Product | null,
   recipeValue: unknown,
-  availableIngredientIds: Set<string>
+  availableIngredientIds: Set<string>,
+  options: {
+    skipIngredientAvailabilityCheck?: boolean;
+    allowEmptyRecipe?: boolean;
+  } = {}
 ): { ok: true; recipe: RecipeItem[] } | { ok: false; message: string } => {
   if (!product) {
     return {
@@ -1787,20 +1791,28 @@ const validateDraftItemRecipe = (
 
   const normalizedRecipe = normalizeRecipeOverride(recipeValue ?? product.recipe);
   if (!normalizedRecipe || normalizedRecipe.length === 0) {
+    if (options.allowEmptyRecipe) {
+      return {
+        ok: true,
+        recipe: [],
+      };
+    }
     return {
       ok: false,
       message: `${product.name} está sem receita válida e não pode ser vendido.`,
     };
   }
 
-  const missingIngredientIds = normalizedRecipe
-    .map((entry) => entry.ingredientId)
-    .filter((ingredientId) => !availableIngredientIds.has(ingredientId));
-  if (missingIngredientIds.length > 0) {
-    return {
-      ok: false,
-      message: `${product.name} possui insumo ausente (${missingIngredientIds.join(', ')}).`,
-    };
+  if (!options.skipIngredientAvailabilityCheck) {
+    const missingIngredientIds = normalizedRecipe
+      .map((entry) => entry.ingredientId)
+      .filter((ingredientId) => !availableIngredientIds.has(ingredientId));
+    if (missingIngredientIds.length > 0) {
+      return {
+        ok: false,
+        message: `${product.name} possui insumo ausente (${missingIngredientIds.join(', ')}).`,
+      };
+    }
   }
 
   return {
@@ -6817,13 +6829,17 @@ const App: React.FC = () => {
         return false;
       }
 
-      const ingredientIdSet = new Set<string>(
-        ingredientsForSale.map((ingredient) => ingredient.id)
-      );
+      const ingredientIdSet = infiniteStockEnabled
+        ? new Set<string>()
+        : new Set<string>(ingredientsForSale.map((ingredient) => ingredient.id));
       const recipeValidation = validateDraftItemRecipe(
         product,
         recipeOverride ?? product.recipe,
-        ingredientIdSet
+        ingredientIdSet,
+        {
+          skipIngredientAvailabilityCheck: infiniteStockEnabled,
+          allowEmptyRecipe: infiniteStockEnabled,
+        }
       );
       if (recipeValidation.ok === false) {
         showNotification(recipeValidation.message);
@@ -6887,6 +6903,7 @@ const App: React.FC = () => {
     },
     [
       activatePendingDraftAddsIngressBackpressure,
+      infiniteStockEnabled,
       ingredientsForSale,
       notifyDraftItemStockIssue,
       resolveDraftItemStockIssue,
@@ -8019,7 +8036,9 @@ const App: React.FC = () => {
       const productById = new Map<string, Product>(
         products.map((entry): [string, Product] => [entry.id, entry])
       );
-      const ingredientIdSet = new Set<string>(ingredients.map((ingredient) => ingredient.id));
+      const ingredientIdSet = infiniteStockEnabled
+        ? new Set<string>()
+        : new Set<string>(ingredients.map((ingredient) => ingredient.id));
       options.onPhaseTiming?.('snapshot_prepare', performance.now() - snapshotPrepareStartedAt);
       try {
         const hasServerDraft = saleDraftsRef.current.some((draft) => draft.id === draftId);
@@ -8174,7 +8193,11 @@ const App: React.FC = () => {
         const recipeValidation = validateDraftItemRecipe(
           product,
           current.recipeOverride ?? product?.recipe,
-          ingredientIdSet
+          ingredientIdSet,
+          {
+            skipIngredientAvailabilityCheck: infiniteStockEnabled,
+            allowEmptyRecipe: infiniteStockEnabled,
+          }
         );
         options.onPhaseTiming?.('snapshot_prepare', performance.now() - recipePrepareStartedAt);
         if (recipeValidation.ok === false) {
@@ -8351,6 +8374,7 @@ const App: React.FC = () => {
     [
       findServerDraftItemMatchingPendingIntent,
       hydratePendingDraftAdds,
+      infiniteStockEnabled,
       ingredients,
       isDraftLifecycleLocked,
       products,

@@ -130,6 +130,7 @@ const InventoryManager: React.FC<InventoryManagerProps> = ({
   };
 
   const formatCardStockValue = (ingredient: Ingredient): string => {
+    if (infiniteStockEnabled) return '∞';
     const value = ingredient.currentStock;
     if (!Number.isFinite(value)) return '0';
     const isInteger = Math.abs(value - Math.trunc(value)) < Number.EPSILON;
@@ -210,13 +211,16 @@ const InventoryManager: React.FC<InventoryManagerProps> = ({
         </div>
 
         {filteredIngredients.map((ing) => {
-          const isCritical = ing.currentStock <= ing.minStock * 0.5;
-          const isLow = ing.currentStock <= ing.minStock;
+          const isCritical = !infiniteStockEnabled && ing.currentStock <= ing.minStock * 0.5;
+          const isLow = !infiniteStockEnabled && ing.currentStock <= ing.minStock;
           const inputValue = replenishValues[ing.id] || '';
           const parsedValue = parseStockMoveAmount(inputValue, ing);
           const canReplenish = parsedValue !== null;
           const canConsume =
             parsedValue !== null && ing.currentStock + Number.EPSILON >= parsedValue;
+          const stockBarWidth = infiniteStockEnabled
+            ? 100
+            : Math.min((ing.currentStock / (ing.minStock * 4)) * 100, 100);
           const inputUnitLabel = ing.unit;
 
           return (
@@ -296,7 +300,7 @@ const InventoryManager: React.FC<InventoryManagerProps> = ({
               <div className="w-full bg-slate-200 h-2 rounded-full mb-6 overflow-hidden">
                 <div 
                   className={`h-full rounded-full transition-all duration-500 ${isCritical ? 'bg-red-600' : isLow ? 'bg-yellow-500' : 'bg-green-500'}`}
-                  style={{ width: `${Math.min((ing.currentStock / (ing.minStock * 4)) * 100, 100)}%` }}
+                  style={{ width: `${stockBarWidth}%` }}
                 ></div>
               </div>
 

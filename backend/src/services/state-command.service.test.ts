@@ -126,6 +126,82 @@ test('sale register is idempotent when clientSaleId is retried', () => {
   assert.equal(retried.ingredients.find((entry) => entry.id === 'i-sauce')?.currentStock, 180);
 });
 
+test('sale register in infinite stock mode skips recipe/stock costs and keeps inventory untouched', () => {
+  const base = createBaseState();
+  const state: FrontAppState = {
+    ...base,
+    products: base.products.map((product) =>
+      product.id === 'p-burger' ? { ...product, recipe: [] } : product
+    ),
+    businessSettings: {
+      infiniteStockEnabled: true,
+      ignoreStockCosts: false,
+    },
+  };
+
+  const sold = applyStateCommand(state, {
+    type: 'SALE_REGISTER',
+    productId: 'p-burger',
+  });
+
+  assert.equal(sold.sales.length, 1);
+  assert.equal(sold.globalSales.length, 1);
+  assert.equal(sold.stockEntries.length, 0);
+  assert.equal(sold.globalStockEntries.length, 0);
+  assert.equal(sold.sales[0]?.totalCost, 0);
+  assert.equal(sold.sales[0]?.baseCost, 0);
+  assert.deepEqual(sold.sales[0]?.stockDebited, []);
+  assert.equal(sold.ingredients.find((entry) => entry.id === 'i-bread')?.currentStock, 50);
+  assert.equal(sold.ingredients.find((entry) => entry.id === 'i-meat')?.currentStock, 40);
+  assert.equal(sold.ingredients.find((entry) => entry.id === 'i-sauce')?.currentStock, 200);
+});
+
+test('draft add/finalize in infinite stock mode accepts missing ingredient recipe and does not debit stock', () => {
+  const base = createBaseState();
+  const state: FrontAppState = {
+    ...base,
+    products: base.products.map((product) =>
+      product.id === 'p-burger'
+        ? {
+            ...product,
+            recipe: [{ ingredientId: 'i-missing', quantity: 1 }],
+          }
+        : product
+    ),
+    businessSettings: {
+      infiniteStockEnabled: true,
+      ignoreStockCosts: false,
+    },
+  };
+
+  const withDraft = applyStateCommand(state, {
+    type: 'SALE_DRAFT_CREATE',
+    draftId: 'draft-inf-001',
+  });
+  const withItem = applyStateCommand(withDraft, {
+    type: 'SALE_DRAFT_ADD_ITEM',
+    draftId: 'draft-inf-001',
+    productId: 'p-burger',
+  });
+  const paid = applyStateCommand(withItem, {
+    type: 'SALE_DRAFT_FINALIZE_AND_CONFIRM_PAID',
+    draftId: 'draft-inf-001',
+    paymentMethod: 'PIX',
+  });
+
+  assert.equal(paid.saleDrafts?.[0]?.status, 'PAID');
+  assert.equal(paid.saleDrafts?.[0]?.stockDebited, true);
+  assert.equal(paid.sales.length, 1);
+  assert.equal(paid.stockEntries.length, 0);
+  assert.equal(paid.globalStockEntries.length, 0);
+  assert.equal(paid.sales[0]?.totalCost, 0);
+  assert.equal(paid.sales[0]?.baseCost, 0);
+  assert.deepEqual(paid.sales[0]?.stockDebited, []);
+  assert.equal(paid.ingredients.find((entry) => entry.id === 'i-bread')?.currentStock, 50);
+  assert.equal(paid.ingredients.find((entry) => entry.id === 'i-meat')?.currentStock, 40);
+  assert.equal(paid.ingredients.find((entry) => entry.id === 'i-sauce')?.currentStock, 200);
+});
+
 test('draft flow keeps stock unchanged until payment confirmation', () => {
   const base = createBaseState();
   const withDraft = applyStateCommand(base, {

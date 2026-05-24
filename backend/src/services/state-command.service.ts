@@ -948,15 +948,18 @@ const applySaleDraftAddItem = (
 
   const quantity = command.quantity ?? 1;
   const normalizedRecipe = normalizeRecipeItems(command.recipeOverride || product.recipe);
-  if (normalizedRecipe.length === 0) {
+  const infiniteStockMode = isInfiniteStockEnabled(state);
+  if (!infiniteStockMode && normalizedRecipe.length === 0) {
     throw new HttpError(422, 'Receita inválida para item do carrinho.');
   }
 
-  const recipeCost = calculateRecipeCost(state.ingredients, normalizedRecipe);
-  if (recipeCost.missingIngredientIds.length > 0) {
-    throw new HttpError(422, 'Receita com insumos ausentes para o carrinho.', {
-      missingIngredientIds: recipeCost.missingIngredientIds,
-    });
+  if (!infiniteStockMode) {
+    const recipeCost = calculateRecipeCost(state.ingredients, normalizedRecipe);
+    if (recipeCost.missingIngredientIds.length > 0) {
+      throw new HttpError(422, 'Receita com insumos ausentes para o carrinho.', {
+        missingIngredientIds: recipeCost.missingIngredientIds,
+      });
+    }
   }
 
   const unitPriceSnapshot = command.priceOverride ?? product.price;
@@ -1212,11 +1215,21 @@ const applySaleDraftConfirmPaid = (
   draft.items.forEach((item) => {
     const quantity = Math.max(1, item.qty);
     const saleRecipe = scaleRecipe(item.recipe, quantity);
-    const saleCost = calculateRecipeCost(state.ingredients, saleRecipe);
-    if (saleCost.missingIngredientIds.length > 0) {
-      throw new HttpError(422, 'Receita com insumos ausentes ao confirmar pagamento.', {
-        missingIngredientIds: saleCost.missingIngredientIds,
-      });
+    let saleTotals: Record<string, number> = {};
+    let saleTotalCost = 0;
+
+    if (!infiniteStockMode) {
+      const saleCost = calculateRecipeCost(state.ingredients, saleRecipe);
+      if (Object.keys(saleCost.totals).length === 0) {
+        throw new HttpError(422, 'Receita inválida ao confirmar pagamento.');
+      }
+      if (saleCost.missingIngredientIds.length > 0) {
+        throw new HttpError(422, 'Receita com insumos ausentes ao confirmar pagamento.', {
+          missingIngredientIds: saleCost.missingIngredientIds,
+        });
+      }
+      saleTotals = saleCost.totals;
+      saleTotalCost = roundMoney(saleCost.totalCost);
     }
 
     const product = state.products.find((entry) => entry.id === item.productId);
@@ -1224,16 +1237,19 @@ const applySaleDraftConfirmPaid = (
     const unitFinalPrice = item.unitPriceSnapshot ?? unitBasePrice;
     const total = roundMoney(unitFinalPrice * quantity);
     const basePrice = roundMoney(unitBasePrice * quantity);
-    const baseCostInfo = product ? calculateRecipeCost(state.ingredients, scaleRecipe(product.recipe, quantity)) : null;
+    const baseCostInfo =
+      ignoreStockCostsMode || infiniteStockMode || !product
+        ? null
+        : calculateRecipeCost(state.ingredients, scaleRecipe(product.recipe, quantity));
     const baseCost =
-      ignoreStockCostsMode
+      ignoreStockCostsMode || infiniteStockMode
         ? 0
         : baseCostInfo && baseCostInfo.missingIngredientIds.length === 0
         ? roundMoney(baseCostInfo.totalCost)
         : undefined;
 
     if (!infiniteStockMode) {
-      Object.entries(saleCost.totals).forEach(([ingredientId, recipeQuantity]) => {
+      Object.entries(saleTotals).forEach(([ingredientId, recipeQuantity]) => {
         const ingredient = requireIngredient(state, ingredientId);
         const stockQuantity = toStockQuantity(ingredient, recipeQuantity);
         const current = consumptionByIngredient.get(ingredientId) || 0;
@@ -1246,9 +1262,9 @@ const applySaleDraftConfirmPaid = (
       productId: item.productId,
       productName: item.nameSnapshot || product?.name || item.productId,
       saleRecipe,
-      stockTotals: saleCost.totals,
+      stockTotals: saleTotals,
       total,
-      totalCost: ignoreStockCostsMode ? 0 : roundMoney(saleCost.totalCost),
+      totalCost: ignoreStockCostsMode || infiniteStockMode ? 0 : saleTotalCost,
       basePrice,
       priceAdjustment: roundMoney(total - basePrice),
       baseCost,
@@ -1401,13 +1417,21 @@ const applySaleRegister = (state: FrontAppState, command: Extract<StateCommandIn
   const recipeToUse = normalizeRecipeItems(command.recipeOverride || product.recipe);
   const infiniteStockMode = isInfiniteStockEnabled(state);
   const ignoreStockCostsMode = shouldIgnoreStockCosts(state);
+  let totalCost = 0;
+  let totals: Record<string, number> = {};
 
-  const { totalCost, missingIngredientIds, totals } = calculateRecipeCost(state.ingredients, recipeToUse);
-  if (Object.keys(totals).length === 0) {
-    throw new HttpError(422, 'Receita inválida. Verifique os ingredientes.');
-  }
-  if (missingIngredientIds.length > 0) {
-    throw new HttpError(422, 'Receita com insumos ausentes.', { missingIngredientIds });
+  if (!infiniteStockMode) {
+    const calculatedRecipeCost = calculateRecipeCost(state.ingredients, recipeToUse);
+    if (Object.keys(calculatedRecipeCost.totals).length === 0) {
+      throw new HttpError(422, 'Receita inválida. Verifique os ingredientes.');
+    }
+    if (calculatedRecipeCost.missingIngredientIds.length > 0) {
+      throw new HttpError(422, 'Receita com insumos ausentes.', {
+        missingIngredientIds: calculatedRecipeCost.missingIngredientIds,
+      });
+    }
+    totalCost = calculatedRecipeCost.totalCost;
+    totals = calculatedRecipeCost.totals;
   }
 
   if (!infiniteStockMode) {
@@ -1427,11 +1451,14 @@ const applySaleRegister = (state: FrontAppState, command: Extract<StateCommandIn
   const timestamp = toTimestampIso();
   const saleId = command.clientSaleId || createId('s');
   const finalPrice = command.priceOverride !== undefined ? command.priceOverride : product.price;
-  const baseCostInfo = calculateRecipeCost(state.ingredients, product.recipe);
+  const baseCostInfo =
+    ignoreStockCostsMode || infiniteStockMode
+      ? null
+      : calculateRecipeCost(state.ingredients, product.recipe);
   const baseCost =
-    ignoreStockCostsMode
+    ignoreStockCostsMode || infiniteStockMode
       ? 0
-      : baseCostInfo.missingIngredientIds.length > 0
+      : !baseCostInfo || baseCostInfo.missingIngredientIds.length > 0
       ? undefined
       : baseCostInfo.totalCost;
   const stockDebited = infiniteStockMode
@@ -1447,7 +1474,7 @@ const applySaleRegister = (state: FrontAppState, command: Extract<StateCommandIn
     productName: product.name,
     timestamp,
     total: finalPrice,
-    totalCost: ignoreStockCostsMode ? 0 : totalCost,
+    totalCost: ignoreStockCostsMode || infiniteStockMode ? 0 : totalCost,
     recipe: recipeToUse,
     stockDebited,
     basePrice: product.price,
