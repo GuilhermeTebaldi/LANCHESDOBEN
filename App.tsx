@@ -14664,7 +14664,8 @@ const App: React.FC = () => {
       <AddIngredientModal 
         isOpen={isAddIngredientModalOpen} 
         onClose={() => setIsAddIngredientModalOpen(false)} 
-        onAdd={handleAddIngredient} 
+        onAdd={handleAddIngredient}
+        infiniteStockEnabled={infiniteStockEnabled}
       />
 
       <EditIngredientModal
@@ -14672,6 +14673,7 @@ const App: React.FC = () => {
         ingredient={ingredientToEdit}
         onClose={() => setIngredientToEdit(null)}
         onSave={handleSaveIngredient}
+        infiniteStockEnabled={infiniteStockEnabled}
       />
 
       <EditProductModal

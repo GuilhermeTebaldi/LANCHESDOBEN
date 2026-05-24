@@ -7,9 +7,15 @@ interface AddIngredientModalProps {
   isOpen: boolean;
   onClose: () => void;
   onAdd: (ingredient: Ingredient) => void;
+  infiniteStockEnabled?: boolean;
 }
 
-const AddIngredientModal: React.FC<AddIngredientModalProps> = ({ isOpen, onClose, onAdd }) => {
+const AddIngredientModal: React.FC<AddIngredientModalProps> = ({
+  isOpen,
+  onClose,
+  onAdd,
+  infiniteStockEnabled = false,
+}) => {
   const [name, setName] = useState('');
   const [unit, setUnit] = useState('un');
   const [minStock, setMinStock] = useState('');
@@ -46,41 +52,50 @@ const AddIngredientModal: React.FC<AddIngredientModalProps> = ({ isOpen, onClose
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     const normalizedName = name.trim();
+    if (!normalizedName) {
+      alert('Informe o nome do ingrediente.');
+      return;
+    }
+
     const normalizedMinStockRaw = minStock.trim().replace(',', '.');
     const normalizedCostRaw = cost.trim().replace(',', '.');
     const normalizedAddonRaw = addonPrice.trim().replace(',', '.');
-    const parsedMinStock = Number(normalizedMinStockRaw);
-    const parsedCost = Number(normalizedCostRaw);
-
-    if (!normalizedName || !normalizedMinStockRaw || !normalizedCostRaw) {
-      alert("Por favor, preencha todos os campos!");
-      return;
-    }
-    if (!Number.isFinite(parsedMinStock) || parsedMinStock < 0) {
-      alert('Estoque mínimo inválido. Informe um número maior ou igual a zero.');
-      return;
-    }
-    if (!Number.isFinite(parsedCost) || parsedCost < 0) {
-      alert('Preço de custo inválido. Informe um número maior ou igual a zero.');
-      return;
-    }
-
+    const parsedMinStock = infiniteStockEnabled ? 0 : Number(normalizedMinStockRaw);
+    const parsedCost = infiniteStockEnabled ? 0 : Number(normalizedCostRaw);
     let parsedAddonPrice: number | undefined;
-    if (normalizedAddonRaw) {
-      const addonCandidate = Number(normalizedAddonRaw);
-      if (!Number.isFinite(addonCandidate) || addonCandidate < 0) {
-        alert('Preço adicional inválido. Informe um número maior ou igual a zero.');
+
+    if (!infiniteStockEnabled) {
+      if (!normalizedMinStockRaw || !normalizedCostRaw) {
+        alert("Por favor, preencha todos os campos!");
         return;
       }
-      parsedAddonPrice = addonCandidate;
+      if (!Number.isFinite(parsedMinStock) || parsedMinStock < 0) {
+        alert('Estoque mínimo inválido. Informe um número maior ou igual a zero.');
+        return;
+      }
+      if (!Number.isFinite(parsedCost) || parsedCost < 0) {
+        alert('Preço de custo inválido. Informe um número maior ou igual a zero.');
+        return;
+      }
+
+      if (normalizedAddonRaw) {
+        const addonCandidate = Number(normalizedAddonRaw);
+        if (!Number.isFinite(addonCandidate) || addonCandidate < 0) {
+          alert('Preço adicional inválido. Informe um número maior ou igual a zero.');
+          return;
+        }
+        parsedAddonPrice = addonCandidate;
+      }
     }
+
+    const normalizedUnit = infiniteStockEnabled ? 'un' : unit.trim();
 
     const newIng: Ingredient = {
       id: 'i-' + Math.random().toString(36).substr(2, 9),
       name: normalizedName,
-      unit: unit.trim(),
-      currentStock: normalizeStockQuantityByUnit(unit, 0),
-      minStock: normalizeStockQuantityByUnit(unit, parsedMinStock),
+      unit: normalizedUnit,
+      currentStock: normalizeStockQuantityByUnit(normalizedUnit, 0),
+      minStock: normalizeStockQuantityByUnit(normalizedUnit, parsedMinStock),
       cost: parsedCost,
       addonPrice: parsedAddonPrice,
       imageUrl: imageUrl.trim() ? imageUrl.trim() : undefined,
@@ -131,67 +146,77 @@ const AddIngredientModal: React.FC<AddIngredientModalProps> = ({ isOpen, onClose
             />
           </div>
 
-          <div className="space-y-2">
-            <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Unidade de Medida</label>
-            <select 
-              value={unit}
-              onChange={e => setUnit(e.target.value)}
-              className="w-full bg-slate-100 border-none rounded-2xl px-4 py-3 font-bold text-slate-800 focus:ring-2 focus:ring-red-500 appearance-none cursor-pointer"
-            >
-              <option value="un">Unidade (un)</option>
-              <option value="kg">Quilo (kg)</option>
-              <option value="l">Litro (L)</option>
-              <option value="g">Grama (g)</option>
-              <option value="fatias">Fatias</option>
-              <option value="porções">Porções</option>
-              <option value="lata">Lata</option>
-              <option value="ml">Mililitros (ml)</option>
-            </select>
-          </div>
+          {!infiniteStockEnabled && (
+            <>
+              <div className="space-y-2">
+                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Unidade de Medida</label>
+                <select 
+                  value={unit}
+                  onChange={e => setUnit(e.target.value)}
+                  className="w-full bg-slate-100 border-none rounded-2xl px-4 py-3 font-bold text-slate-800 focus:ring-2 focus:ring-red-500 appearance-none cursor-pointer"
+                >
+                  <option value="un">Unidade (un)</option>
+                  <option value="kg">Quilo (kg)</option>
+                  <option value="l">Litro (L)</option>
+                  <option value="g">Grama (g)</option>
+                  <option value="fatias">Fatias</option>
+                  <option value="porções">Porções</option>
+                  <option value="lata">Lata</option>
+                  <option value="ml">Mililitros (ml)</option>
+                </select>
+              </div>
 
-          <div className="qb-ingredient-grid grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
-                {isBulkUnit ? 'Preço de Custo por kg/litro (R$)' : 'Preço de Custo (R$)'}
-              </label>
-              <input 
-                type="number" 
-                step="0.01"
-                value={cost}
-                onChange={e => setCost(e.target.value)}
-                placeholder="0.00"
-                className="w-full bg-slate-100 border-none rounded-2xl px-4 py-3 font-bold text-slate-800 focus:ring-2 focus:ring-red-500"
-              />
-              {isSmallUnit && (
-                <p className="text-[10px] font-bold uppercase tracking-widest text-amber-700">
-                  Em g/ml, informe custo por grama/ml (ex.: R$ 20/kg = R$ 0.0200/g).
-                </p>
-              )}
-            </div>
-            <div className="space-y-2">
-              <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Estoque Mínimo</label>
-              <input 
-                type="number" 
-                step={stockStep}
-                value={minStock}
-                onChange={e => setMinStock(e.target.value)}
-                placeholder="Ex: 10"
-                className="w-full bg-slate-100 border-none rounded-2xl px-4 py-3 font-bold text-slate-800 focus:ring-2 focus:ring-red-500"
-              />
-            </div>
-          </div>
+              <div className="qb-ingredient-grid grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">
+                    {isBulkUnit ? 'Preço de Custo por kg/litro (R$)' : 'Preço de Custo (R$)'}
+                  </label>
+                  <input 
+                    type="number" 
+                    step="0.01"
+                    value={cost}
+                    onChange={e => setCost(e.target.value)}
+                    placeholder="0.00"
+                    className="w-full bg-slate-100 border-none rounded-2xl px-4 py-3 font-bold text-slate-800 focus:ring-2 focus:ring-red-500"
+                  />
+                  {isSmallUnit && (
+                    <p className="text-[10px] font-bold uppercase tracking-widest text-amber-700">
+                      Em g/ml, informe custo por grama/ml (ex.: R$ 20/kg = R$ 0.0200/g).
+                    </p>
+                  )}
+                </div>
+                <div className="space-y-2">
+                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Estoque Mínimo</label>
+                  <input 
+                    type="number" 
+                    step={stockStep}
+                    value={minStock}
+                    onChange={e => setMinStock(e.target.value)}
+                    placeholder="Ex: 10"
+                    className="w-full bg-slate-100 border-none rounded-2xl px-4 py-3 font-bold text-slate-800 focus:ring-2 focus:ring-red-500"
+                  />
+                </div>
+              </div>
 
-          <div className="space-y-2">
-            <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Preço de Adicional (R$) por Unidade (opcional)</label>
-            <input 
-              type="number" 
-              step="0.01"
-              value={addonPrice}
-              onChange={e => setAddonPrice(e.target.value)}
-              placeholder="Ex: 2.00"
-              className="w-full bg-slate-100 border-none rounded-2xl px-4 py-3 font-bold text-slate-800 focus:ring-2 focus:ring-red-500"
-            />
-          </div>
+              <div className="space-y-2">
+                <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Preço de Adicional (R$) por Unidade (opcional)</label>
+                <input 
+                  type="number" 
+                  step="0.01"
+                  value={addonPrice}
+                  onChange={e => setAddonPrice(e.target.value)}
+                  placeholder="Ex: 2.00"
+                  className="w-full bg-slate-100 border-none rounded-2xl px-4 py-3 font-bold text-slate-800 focus:ring-2 focus:ring-red-500"
+                />
+              </div>
+            </>
+          )}
+
+          {infiniteStockEnabled && (
+            <p className="rounded-2xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-[11px] font-black uppercase tracking-wide text-emerald-700">
+              Estoque infinito ativo: unidade, custo, estoque mínimo e adicional ficam ocultos neste cadastro.
+            </p>
+          )}
 
           <div className="space-y-2">
             <div className="flex items-center justify-between gap-2">
