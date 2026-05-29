@@ -25,6 +25,7 @@ export interface AppState {
   saleDrafts: SaleDraft[];
   cashRegisterAmount: number;
   dailySalesHistory: DailySalesHistoryEntry[];
+  activeBusinessDate: string | null;
   businessSettings: BusinessSettings;
 }
 
@@ -87,6 +88,7 @@ export const DEFAULT_APP_STATE: AppState = {
   saleDrafts: [],
   cashRegisterAmount: 0,
   dailySalesHistory: [],
+  activeBusinessDate: null,
   businessSettings: {
     infiniteStockEnabled: false,
     ignoreStockCosts: false,
@@ -304,6 +306,8 @@ const normalizeStateRecord = (
   dailySalesHistory: reviveDailySalesHistory(
     toArray<DailySalesHistoryEntry>(source.dailySalesHistory, defaults.dailySalesHistory)
   ),
+  activeBusinessDate:
+    normalizeBusinessDate(source.activeBusinessDate) ?? defaults.activeBusinessDate ?? null,
   businessSettings: normalizeBusinessSettings(source.businessSettings, defaults.businessSettings),
 });
 

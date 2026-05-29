@@ -34,6 +34,7 @@ const EMPTY_APP_STATE: FrontAppState = {
   saleDrafts: [],
   cashRegisterAmount: 0,
   dailySalesHistory: [],
+  activeBusinessDate: null,
   businessSettings: {
     infiniteStockEnabled: false,
     ignoreStockCosts: false,
@@ -45,6 +46,15 @@ const toNonNegativeNumber = (value: unknown): number => {
   const parsed = Number(value);
   if (!Number.isFinite(parsed) || parsed < 0) return 0;
   return parsed;
+};
+
+const BUSINESS_DAY_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+const normalizeActiveBusinessDate = (value: unknown): string | null => {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  if (!BUSINESS_DAY_KEY_PATTERN.test(trimmed)) return null;
+  return trimmed;
 };
 
 const normalizeBusinessSettings = (
@@ -86,6 +96,7 @@ const normalizeStatePayload = (value: unknown): FrontAppState => {
     saleDrafts: arrayOrEmpty(payload.saleDrafts),
     cashRegisterAmount: toNonNegativeNumber(payload.cashRegisterAmount),
     dailySalesHistory: arrayOrEmpty(payload.dailySalesHistory),
+    activeBusinessDate: normalizeActiveBusinessDate(payload.activeBusinessDate),
     businessSettings: normalizeBusinessSettings(payload.businessSettings),
   };
 };
@@ -106,6 +117,7 @@ const normalizeStatePayloadSafe = (value: unknown): FrontAppState => {
       saleDrafts: [],
       cashRegisterAmount: 0,
       dailySalesHistory: [],
+      activeBusinessDate: null,
       businessSettings: {
         infiniteStockEnabled: false,
         ignoreStockCosts: false,
@@ -165,6 +177,7 @@ interface HotStatePatch {
   cleaningStockEntries: FrontAppState['cleaningStockEntries'];
   saleDrafts: FrontAppState['saleDrafts'];
   cashRegisterAmount: FrontAppState['cashRegisterAmount'];
+  activeBusinessDate: FrontAppState['activeBusinessDate'];
   businessSettings: FrontAppState['businessSettings'];
 }
 
@@ -193,6 +206,7 @@ const toHotStatePatch = (state: FrontAppState): HotStatePatch => ({
   cleaningStockEntries: state.cleaningStockEntries,
   saleDrafts: state.saleDrafts,
   cashRegisterAmount: state.cashRegisterAmount,
+  activeBusinessDate: state.activeBusinessDate,
   businessSettings: state.businessSettings,
 });
 
@@ -1095,6 +1109,7 @@ export class StateService {
       saleDrafts: [],
       cashRegisterAmount: 0,
       dailySalesHistory: [],
+      activeBusinessDate: null,
     };
   }
 }

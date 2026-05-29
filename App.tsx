@@ -56,6 +56,7 @@ import {
   normalizeStockQuantityByUnit,
   synchronizeComboProductRecipes,
 } from './utils/recipe';
+import { groupSalesByBusinessDay } from './utils/businessDay';
 import {
   consumeReceiptPrintPayload,
   removeReceiptPrintPayload,
@@ -110,6 +111,7 @@ const OPERATIONS_EVENT_LOG_KEY = 'qb_operations_event_log_v1';
 const CASH_HISTORY_LEGACY_MODE_KEY = 'qb_cash_history_legacy_mode_v1';
 const LOCAL_CASH_REGISTER_KEY = 'qb_cash_register_local_v1';
 const LOCAL_DAILY_HISTORY_KEY = 'qb_daily_sales_history_local_v1';
+const LOCAL_ACTIVE_BUSINESS_DAY_KEY = 'qb_active_business_day_local_v1';
 const RECEIPT_PAPER_WIDTH_KEY = 'qb_receipt_paper_width_mm';
 const RECEIPT_PRINT_PRESET_STORAGE_KEY = 'qb_receipt_print_preset_v1';
 const RECEIPT_PRINT_MODE_SETTINGS_STORAGE_KEY = 'qb_receipt_mode_settings_v1';
@@ -631,6 +633,26 @@ const formatBusinessDayLabel = (dayKey: string): string => {
   return `${day}/${month}/${year}`;
 };
 
+const parseBusinessDayKey = (dayKey: string): Date | null => {
+  if (!BUSINESS_DAY_KEY_PATTERN.test(dayKey)) return null;
+  const [yearRaw, monthRaw, dayRaw] = dayKey.split('-');
+  const year = Number(yearRaw);
+  const month = Number(monthRaw);
+  const day = Number(dayRaw);
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) {
+    return null;
+  }
+  const parsed = new Date(year, month - 1, day);
+  if (
+    parsed.getFullYear() !== year ||
+    parsed.getMonth() !== month - 1 ||
+    parsed.getDate() !== day
+  ) {
+    return null;
+  }
+  return parsed;
+};
+
 const normalizeLegacyHistoryCost = (rawCost: number, rawRevenue: number): number => {
   if (!Number.isFinite(rawCost) || rawCost <= 0) return 0;
   const cost = roundMoney(rawCost);
@@ -883,6 +905,31 @@ const writeLocalDailySalesHistory = (history: DailySalesHistoryEntry[]): void =>
   if (typeof window === 'undefined') return;
   try {
     window.localStorage.setItem(LOCAL_DAILY_HISTORY_KEY, JSON.stringify(history));
+  } catch {
+    // ignore storage write failures
+  }
+};
+
+const readLocalActiveBusinessDay = (): string | null => {
+  if (typeof window === 'undefined') return null;
+  try {
+    const raw = window.localStorage.getItem(LOCAL_ACTIVE_BUSINESS_DAY_KEY);
+    const normalized = normalizeBusinessDayKey(raw);
+    return normalized || null;
+  } catch {
+    return null;
+  }
+};
+
+const writeLocalActiveBusinessDay = (dayKey: string | null): void => {
+  if (typeof window === 'undefined') return;
+  try {
+    const normalized = normalizeBusinessDayKey(dayKey);
+    if (normalized) {
+      window.localStorage.setItem(LOCAL_ACTIVE_BUSINESS_DAY_KEY, normalized);
+      return;
+    }
+    window.localStorage.removeItem(LOCAL_ACTIVE_BUSINESS_DAY_KEY);
   } catch {
     // ignore storage write failures
   }
@@ -1210,7 +1257,15 @@ const getSaleDayKey = (timestamp: Date | string): string | null => {
   return toDayKey(saleDate);
 };
 
-const resolveSalesSessionDayKey = (sales: Sale[]): string => {
+const resolveSalesSessionDayKey = (
+  sales: Sale[],
+  activeBusinessDate?: string | null
+): string => {
+  const normalizedBusinessDate = normalizeBusinessDayKey(activeBusinessDate);
+  if (normalizedBusinessDate) {
+    return normalizedBusinessDate;
+  }
+
   let earliestMs = Number.POSITIVE_INFINITY;
   sales.forEach((sale) => {
     const saleDate = toSaleDate(sale.timestamp);
@@ -1224,7 +1279,16 @@ const resolveSalesSessionDayKey = (sales: Sale[]): string => {
   return toDayKey(new Date());
 };
 
-const resolveCloseReportBusinessDayKey = (sales: Sale[], stockEntries: StockEntry[]): string => {
+const resolveCloseReportBusinessDayKey = (
+  sales: Sale[],
+  stockEntries: StockEntry[],
+  activeBusinessDate?: string | null
+): string => {
+  const normalizedBusinessDate = normalizeBusinessDayKey(activeBusinessDate);
+  if (normalizedBusinessDate) {
+    return normalizedBusinessDate;
+  }
+
   let earliestMs = Number.POSITIVE_INFINITY;
   sales.forEach((sale) => {
     const saleDate = toSaleDate(sale.timestamp);
@@ -3134,6 +3198,9 @@ const App: React.FC = () => {
   const [dailySalesHistory, setDailySalesHistory] = useState<DailySalesHistoryEntry[]>(
     DEFAULT_APP_STATE.dailySalesHistory
   );
+  const [activeBusinessDate, setActiveBusinessDate] = useState<string | null>(
+    DEFAULT_APP_STATE.activeBusinessDate
+  );
   const [pendingDraftAddsByDraft, setPendingDraftAddsByDraft] =
     useState<PendingDraftAddsByDraftId>({});
   const [syncingPaidDraftIds, setSyncingPaidDraftIds] = useState<string[]>([]);
@@ -3592,9 +3659,15 @@ const App: React.FC = () => {
 
   const applyCashHistorySnapshot = useCallback(
     (state: AppState) => {
+      const normalizedStateBusinessDate = normalizeBusinessDayKey(state.activeBusinessDate) || null;
+      const localFallbackBusinessDate = readLocalActiveBusinessDay();
+      const resolvedBusinessDate = normalizedStateBusinessDate || localFallbackBusinessDate || null;
+
       if (isCashHistoryLegacyModeRef.current) {
         setCashRegisterAmount(readLocalCashRegisterAmount());
         setDailySalesHistory(readLocalDailySalesHistory());
+        setActiveBusinessDate(resolvedBusinessDate);
+        writeLocalActiveBusinessDay(resolvedBusinessDate);
         return;
       }
 
@@ -3605,8 +3678,10 @@ const App: React.FC = () => {
 
       setCashRegisterAmount(normalizedCashRegisterAmount);
       setDailySalesHistory(normalizedHistory);
+      setActiveBusinessDate(resolvedBusinessDate);
       writeLocalCashRegisterAmount(normalizedCashRegisterAmount);
       writeLocalDailySalesHistory(normalizedHistory);
+      writeLocalActiveBusinessDay(resolvedBusinessDate);
       writeCashHistoryLegacyMode(false);
     },
     []
@@ -7334,6 +7409,12 @@ const App: React.FC = () => {
 
   const handleSale = useCallback((product: Product, recipeOverride?: RecipeItem[], priceOverride?: number) => {
     void (async () => {
+      const currentBusinessDate = normalizeBusinessDayKey(activeBusinessDate);
+      if (!currentBusinessDate) {
+        showNotification('Inicie o dia para liberar as vendas.');
+        return;
+      }
+
       let draftId = resolveEditableDraftId();
       if (!draftId) {
         draftId = createClientId('draft');
@@ -7353,6 +7434,7 @@ const App: React.FC = () => {
       triggerCartEntryEffect(product.name);
     })();
   }, [
+    activeBusinessDate,
     isDraftLifecycleLocked,
     queuePendingDraftAdd,
     resolveEditableDraftId,
@@ -12436,7 +12518,11 @@ const App: React.FC = () => {
       })
       .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
     const closedAt = new Date().toISOString();
-    const businessDate = resolveCloseReportBusinessDayKey(sales, stockEntries);
+    const businessDate = resolveCloseReportBusinessDayKey(
+      sales,
+      stockEntries,
+      activeBusinessDate
+    );
 
     return {
       id: createClientId('day'),
@@ -12450,7 +12536,7 @@ const App: React.FC = () => {
       cashExpenses,
       cashExpenseDetails,
     };
-  }, [cashRegisterAmount, ignoreStockCosts, ingredients, sales, stockEntries]);
+  }, [activeBusinessDate, cashRegisterAmount, ignoreStockCosts, ingredients, sales, stockEntries]);
 
   const persistLocalCloseDayReport = useCallback((report: DailySalesHistoryEntry) => {
     const normalizedReport = normalizeDailyHistoryEntry(report);
@@ -12461,6 +12547,8 @@ const App: React.FC = () => {
     writeLocalCashRegisterAmount(0);
     setDailySalesHistory(nextHistory);
     setCashRegisterAmount(0);
+    setActiveBusinessDate(null);
+    writeLocalActiveBusinessDay(null);
   }, []);
 
   const closeDayWithLegacyFallback = useCallback(
@@ -12523,14 +12611,86 @@ const App: React.FC = () => {
     ]
   );
 
+  const handleStartBusinessDay = useCallback(async (): Promise<boolean> => {
+    const currentBusinessDate = normalizeBusinessDayKey(activeBusinessDate);
+    if (currentBusinessDate) {
+      showNotification(
+        `Dia ${formatBusinessDayLabel(currentBusinessDate)} já está iniciado.`
+      );
+      return true;
+    }
+
+    const nextBusinessDate = toDayKey(new Date());
+    const startResult = await executeSyncedCommand({
+      type: 'START_BUSINESS_DAY',
+      businessDate: nextBusinessDate,
+    });
+
+    if (startResult.ok) {
+      setActiveBusinessDate(nextBusinessDate);
+      writeLocalActiveBusinessDay(nextBusinessDate);
+      showNotification(`Dia iniciado: ${formatBusinessDayLabel(nextBusinessDate)}.`);
+      return true;
+    }
+
+    if (!isUnsupportedCashHistoryCommandError(startResult.error)) {
+      showNotification(getStateSyncErrorMessage(startResult.error));
+      return false;
+    }
+
+    setActiveBusinessDate(nextBusinessDate);
+    writeLocalActiveBusinessDay(nextBusinessDate);
+    showNotification(
+      `Servidor antigo detectado. Dia iniciado localmente: ${formatBusinessDayLabel(nextBusinessDate)}.`
+    );
+    return true;
+  }, [activeBusinessDate, executeSyncedCommand, showNotification]);
+
+  const handleClearActiveBusinessDay = useCallback(async (): Promise<boolean> => {
+    const currentBusinessDate = normalizeBusinessDayKey(activeBusinessDate);
+    if (!currentBusinessDate) {
+      showNotification('Nenhum início de dia ativo para excluir.');
+      return true;
+    }
+
+    const clearResult = await executeSyncedCommand({
+      type: 'CLEAR_ACTIVE_BUSINESS_DAY',
+    });
+
+    if (clearResult.ok) {
+      setActiveBusinessDate(null);
+      writeLocalActiveBusinessDay(null);
+      showNotification('Início do dia removido (modo teste).');
+      return true;
+    }
+
+    if (!isUnsupportedCashHistoryCommandError(clearResult.error)) {
+      showNotification(getStateSyncErrorMessage(clearResult.error));
+      return false;
+    }
+
+    setActiveBusinessDate(null);
+    writeLocalActiveBusinessDay(null);
+    showNotification('Servidor antigo detectado. Início do dia removido localmente.');
+    return true;
+  }, [activeBusinessDate, executeSyncedCommand, showNotification]);
+
   const handleCloseDay = useCallback(async (): Promise<boolean> => {
     if (isCashHistoryLegacyMode) {
       return closeDayWithLegacyFallback();
     }
 
-    const closeResult = await executeSyncedCommand({ type: 'CLOSE_DAY' });
+    const closeResult = await executeSyncedCommand({
+      type: 'CLOSE_DAY',
+      businessDate: resolveCloseReportBusinessDayKey(
+        sales,
+        stockEntries,
+        activeBusinessDate
+      ),
+    });
 
     if (closeResult.ok) {
+      writeLocalActiveBusinessDay(null);
       showNotification('Sessão Reiniciada!');
       return true;
     }
@@ -12548,8 +12708,11 @@ const App: React.FC = () => {
     closeDayWithLegacyFallback,
     enableCashHistoryLegacyMode,
     executeSyncedCommand,
+    activeBusinessDate,
     isCashHistoryLegacyMode,
+    sales,
     showNotification,
+    stockEntries,
   ]);
 
   const handleFactoryReset = async () => {
@@ -12573,9 +12736,45 @@ const App: React.FC = () => {
     );
   };
 
+  const currentSessionSaleIds = useMemo(
+    () => new Set(sales.map((sale) => sale.id)),
+    [sales]
+  );
+  const globalSalesBusinessDayByRef = useMemo(() => {
+    const saleDayByRef = new Map<Sale, string>();
+    const grouped = groupSalesByBusinessDay(globalSales, dailySalesHistory, {
+      activeBusinessDate,
+      currentSessionSaleIds,
+    });
+    grouped.forEach((daySales, dayKey) => {
+      daySales.forEach((sale) => {
+        saleDayByRef.set(sale, dayKey);
+      });
+    });
+    return saleDayByRef;
+  }, [activeBusinessDate, currentSessionSaleIds, dailySalesHistory, globalSales]);
+
+  const resolveGlobalSaleBusinessDay = useCallback(
+    (sale: Sale): string => {
+      const mappedDay = globalSalesBusinessDayByRef.get(sale);
+      if (mappedDay) return mappedDay;
+      const saleDate = toSaleDate(sale.timestamp);
+      if (!saleDate) return toDayKey(new Date());
+      return toDayKey(saleDate);
+    },
+    [globalSalesBusinessDayByRef]
+  );
+
   const handleDeleteArchiveByDate = (dateString: string) => {
+    const normalizedDayKey = normalizeBusinessDayKey(dateString);
     const saleIds = globalSales
-      .filter((sale) => sale.timestamp.toLocaleDateString('pt-BR') === dateString)
+      .filter((sale) => {
+        const businessDay = resolveGlobalSaleBusinessDay(sale);
+        if (normalizedDayKey) {
+          return businessDay === normalizedDayKey;
+        }
+        return sale.timestamp.toLocaleDateString('pt-BR') === dateString;
+      })
       .map((sale) => sale.id);
 
     if (saleIds.length === 0) {
@@ -12583,18 +12782,32 @@ const App: React.FC = () => {
       return;
     }
 
+    const archiveLabel = normalizedDayKey
+      ? formatBusinessDayLabel(normalizedDayKey)
+      : dateString;
+
     void runCommandWithSync(
       { type: 'DELETE_ARCHIVE_SALES', saleIds },
-      `Arquivos de ${dateString} Excluídos!`
+      `Arquivos de ${archiveLabel} Excluídos!`
     );
   };
 
   const handleDeleteArchiveByMonth = (monthString: string) => {
     const saleIds = globalSales
-      .filter(
-        (sale) =>
-          sale.timestamp.toLocaleString('pt-BR', { month: 'long', year: 'numeric' }) === monthString
-      )
+      .filter((sale) => {
+        const businessDay = resolveGlobalSaleBusinessDay(sale);
+        const businessDayDate = parseBusinessDayKey(businessDay);
+        if (businessDayDate) {
+          return (
+            businessDayDate.toLocaleString('pt-BR', { month: 'long', year: 'numeric' }) ===
+            monthString
+          );
+        }
+        return (
+          sale.timestamp.toLocaleString('pt-BR', { month: 'long', year: 'numeric' }) ===
+          monthString
+        );
+      })
       .map((sale) => sale.id);
 
     if (saleIds.length === 0) {
@@ -12610,8 +12823,22 @@ const App: React.FC = () => {
 
   const dailyTotal = useMemo(() => sales.reduce((acc, sale) => acc + sale.total, 0), [sales]);
   const isDailyTotalSyncing = pendingPaidSyncJobs > 0 || syncingPaidDraftIds.length > 0;
-  const todaySaleDayKey = useMemo(() => resolveSalesSessionDayKey(sales), [sales]);
+  const todaySaleDayKey = useMemo(
+    () => resolveSalesSessionDayKey(sales, activeBusinessDate),
+    [activeBusinessDate, sales]
+  );
   const todaySaleDayLabel = useMemo(() => formatBusinessDayLabel(todaySaleDayKey), [todaySaleDayKey]);
+  const activeBusinessDayLabel = useMemo(
+    () => {
+      const normalized = normalizeBusinessDayKey(activeBusinessDate);
+      return normalized ? formatBusinessDayLabel(normalized) : null;
+    },
+    [activeBusinessDate]
+  );
+  const isBusinessDayStarted = useMemo(
+    () => Boolean(normalizeBusinessDayKey(activeBusinessDate)),
+    [activeBusinessDate]
+  );
   const recentSalesForUndo = useMemo(
     () =>
       sales
@@ -13273,6 +13500,18 @@ const App: React.FC = () => {
                   <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="M12 8v4l3 3"/><circle cx="12" cy="12" r="10"/></svg>
                   Histórico do Dia
                 </button>
+                {activeBusinessDayLabel && (
+                  <button
+                    onClick={() => {
+                      void handleClearActiveBusinessDay();
+                    }}
+                    className="qb-btn-touch bg-red-600 text-white px-4 py-3 rounded-2xl font-black text-[10px] uppercase tracking-tighter shadow-sm border border-red-700 hover:bg-red-700 active:scale-95 transition-all whitespace-nowrap flex items-center gap-2"
+                    title="Excluir início do dia (teste)"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="M3 6h18"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/></svg>
+                    Excluir Início (Teste)
+                  </button>
+                )}
 
                 <div className="qb-pos-search relative flex-1 md:w-64">
                   <input 
@@ -13287,30 +13526,47 @@ const App: React.FC = () => {
               </div>
             </div>
 
-            <div className="qb-product-grid grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 sm:gap-6">
-              {filteredProducts.map(product => (
-                <ProductCard 
-                  key={product.id}
-                  product={product} 
-                  onSale={handleSale} 
-                  allIngredients={ingredientsForSale}
-                  allProducts={products}
-                  infiniteStockEnabled={infiniteStockEnabled}
-                  resolvedRecipe={resolvedRecipeByProductId.get(product.id)}
-                  onDelete={handleDeleteProduct}
-                  onEdit={handleEditProduct}
-                />
-              ))}
-              
-              <button 
-                onClick={() => setIsAddProductModalOpen(true)}
-                className="qb-add-product-card qb-btn-touch group bg-white hover:bg-slate-50 border-4 border-dashed border-slate-200 rounded-[40px] flex flex-col items-center justify-center p-6 transition-all hover:scale-95 active:scale-90 aspect-square min-h-[180px]"
-              >
-                <div className="bg-slate-100 p-5 rounded-3xl mb-3 group-hover:bg-red-50 group-hover:scale-110 transition-all">
-                   <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+            <div className="relative">
+              {!isBusinessDayStarted && (
+                <div className="qb-start-day-overlay fixed inset-0 z-[140] flex items-center justify-center pointer-events-none p-4">
+                  <button
+                    onClick={() => {
+                      void handleStartBusinessDay();
+                    }}
+                    className="qb-start-day-floating qb-btn-touch pointer-events-auto bg-emerald-600 text-white border border-emerald-700 rounded-[2rem] px-7 py-5 sm:px-10 sm:py-6 font-black text-sm sm:text-lg uppercase tracking-[0.18em] shadow-2xl hover:bg-emerald-700 active:scale-95 transition-all flex items-center gap-3 qb-iniciar-dia-forward"
+                    title="Iniciar dia de trabalho"
+                  >
+                    <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+                    Iniciar Dia
+                  </button>
                 </div>
-                <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest group-hover:text-red-600">Novo Produto</span>
-              </button>
+              )}
+              <div className={`qb-product-grid grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 sm:gap-6 ${!isBusinessDayStarted ? 'opacity-75' : ''}`}>
+                {filteredProducts.map(product => (
+                  <ProductCard 
+                    key={product.id}
+                    product={product} 
+                    onSale={handleSale} 
+                    allIngredients={ingredientsForSale}
+                    allProducts={products}
+                    infiniteStockEnabled={infiniteStockEnabled}
+                    salesLocked={!isBusinessDayStarted}
+                    resolvedRecipe={resolvedRecipeByProductId.get(product.id)}
+                    onDelete={handleDeleteProduct}
+                    onEdit={handleEditProduct}
+                  />
+                ))}
+                
+                <button 
+                  onClick={() => setIsAddProductModalOpen(true)}
+                  className="qb-add-product-card qb-btn-touch group bg-white hover:bg-slate-50 border-4 border-dashed border-slate-200 rounded-[40px] flex flex-col items-center justify-center p-6 transition-all hover:scale-95 active:scale-90 aspect-square min-h-[180px]"
+                >
+                  <div className="bg-slate-100 p-5 rounded-3xl mb-3 group-hover:bg-red-50 group-hover:scale-110 transition-all">
+                     <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#b91c1c" strokeWidth="4" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14"/><path d="M12 5v14"/></svg>
+                  </div>
+                  <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest group-hover:text-red-600">Novo Produto</span>
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -13332,6 +13588,8 @@ const App: React.FC = () => {
           <ProductReports
             sales={sales}
             archivedSales={globalSales}
+            dailySalesHistory={dailySalesHistory}
+            activeBusinessDate={activeBusinessDate}
           />
         )}
 
@@ -13344,7 +13602,9 @@ const App: React.FC = () => {
             ignoreStockCosts={ignoreStockCosts}
             cashRegisterAmount={cashRegisterAmount}
             dailySalesHistory={dailySalesHistory}
+            activeBusinessDate={activeBusinessDate}
             onSetCashRegister={handleSetCashRegister}
+            onStartBusinessDay={handleStartBusinessDay}
             onCloseDay={handleCloseDay}
             onRegisterCashPurchase={handleRegisterCashPurchase}
             onRegisterCashExpense={handleRegisterCashExpense}
@@ -13369,6 +13629,7 @@ const App: React.FC = () => {
           ) : (
             <AdminDashboard 
               sales={globalSales} 
+              sessionSales={sales}
               cancelledSales={globalCancelledSales} 
               stockEntries={globalStockEntries} 
               sessionStockEntries={stockEntries}
@@ -13385,6 +13646,7 @@ const App: React.FC = () => {
               onDeleteArchiveMonth={handleDeleteArchiveByMonth}
               cashRegisterAmount={cashRegisterAmount}
               dailySalesHistory={dailySalesHistory}
+              activeBusinessDate={activeBusinessDate}
             />
           )
         )}

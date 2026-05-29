@@ -67,6 +67,8 @@ test('commandTouchesArchiveState classifies hot-only commands safely', () => {
   assert.equal(commandTouchesArchiveState('SALE_DRAFT_ADD_ITEM'), false);
   assert.equal(commandTouchesArchiveState('SALE_DRAFT_FINALIZE'), false);
   assert.equal(commandTouchesArchiveState('SET_CASH_REGISTER'), false);
+  assert.equal(commandTouchesArchiveState('START_BUSINESS_DAY'), false);
+  assert.equal(commandTouchesArchiveState('CLEAR_ACTIVE_BUSINESS_DAY'), false);
   assert.equal(commandTouchesArchiveState('CLEAR_HISTORY'), false);
 
   assert.equal(commandTouchesArchiveState('SALE_REGISTER'), true);
@@ -1833,6 +1835,46 @@ test('close day snapshots report in history and resets session sales state', () 
   assert.equal(closed.dailySalesHistory?.[0]?.cashExpenseDetails?.[0]?.ingredientUnit, 'g');
   assert.equal(closed.dailySalesHistory?.[0]?.cashExpenseDetails?.[0]?.quantity, 10);
   assert.equal(closed.dailySalesHistory?.[0]?.cashExpenseDetails?.[0]?.amount, 0.2);
+});
+
+test('start business day anchors close report businessDate and resets after close', () => {
+  let state = createBaseState();
+  state = applyStateCommand(state, {
+    type: 'START_BUSINESS_DAY',
+    businessDate: '2026-03-10',
+  });
+  state = applyStateCommand(state, {
+    type: 'SALE_REGISTER',
+    productId: 'p-burger',
+  });
+
+  const closed = applyStateCommand(state, {
+    type: 'CLOSE_DAY',
+  });
+
+  assert.equal(closed.dailySalesHistory?.length, 1);
+  assert.equal(closed.dailySalesHistory?.[0]?.businessDate, '2026-03-10');
+  assert.equal(closed.activeBusinessDate, null);
+});
+
+test('clear active business day removes only the start-day marker', () => {
+  let state = createBaseState();
+  state = applyStateCommand(state, {
+    type: 'START_BUSINESS_DAY',
+    businessDate: '2026-03-11',
+  });
+  state = applyStateCommand(state, {
+    type: 'SALE_REGISTER',
+    productId: 'p-burger',
+  });
+
+  const cleared = applyStateCommand(state, {
+    type: 'CLEAR_ACTIVE_BUSINESS_DAY',
+  });
+
+  assert.equal(cleared.activeBusinessDate, null);
+  assert.equal(cleared.sales.length, 1);
+  assert.equal(cleared.globalSales.length, 1);
 });
 
 test('stress: repeated mixed operations never produce negative stocks', () => {

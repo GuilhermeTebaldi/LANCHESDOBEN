@@ -18,6 +18,7 @@ interface ProductCardProps {
   allIngredients: Ingredient[];
   allProducts: Product[];
   infiniteStockEnabled?: boolean;
+  salesLocked?: boolean;
   resolvedRecipe?: RecipeItem[];
   onDelete?: (id: string) => void;
   onEdit?: (product: Product) => void;
@@ -29,6 +30,7 @@ const ProductCard: React.FC<ProductCardProps> = ({
   allIngredients,
   allProducts,
   infiniteStockEnabled = false,
+  salesLocked = false,
   resolvedRecipe,
   onDelete,
   onEdit,
@@ -74,6 +76,7 @@ const ProductCard: React.FC<ProductCardProps> = ({
   }, [allIngredients, infiniteStockEnabled, saleBaseRecipe]);
 
   const isAvailable = infiniteStockEnabled || canMakeCount > 0;
+  const isSaleEnabled = isAvailable && !salesLocked;
   const productsById = React.useMemo(
     () => new Map(allProducts.map((entry) => [entry.id, entry])),
     [allProducts]
@@ -98,7 +101,7 @@ const ProductCard: React.FC<ProductCardProps> = ({
         setShowDeleteMenu(false);
         return;
     }
-    if (!isAvailable) return;
+    if (!isSaleEnabled) return;
     setIsAnimating(true);
     onSale(product, saleBaseRecipe);
     setTimeout(() => setIsAnimating(false), 200);
@@ -272,6 +275,7 @@ const ProductCard: React.FC<ProductCardProps> = ({
       return ingredient.currentStock + Number.EPSILON >= requiredStockQuantity;
     });
   }, [customRecipe, infiniteStockEnabled, ingredientsById]);
+  const canSubmitCustomSale = canConfirmCustomSale && !salesLocked;
 
   const customTotals = React.useMemo(() => aggregateRecipe(customRecipe), [customRecipe]);
 
@@ -285,7 +289,7 @@ const ProductCard: React.FC<ProductCardProps> = ({
     <>
       <div
         className={`qb-product-card relative group bg-white rounded-3xl overflow-hidden shadow-md transition-all active:scale-95 flex flex-col items-center justify-center p-3 sm:p-4 text-left border-2 
-          ${isAvailable ? 'border-transparent hover:border-yellow-400' : 'opacity-50 grayscale border-slate-100'}
+          ${isSaleEnabled ? 'border-transparent hover:border-yellow-400' : 'opacity-50 grayscale border-slate-100'}
           ${isAnimating ? 'animate-click' : ''}`}
         onClick={handleQuickSale}
         onContextMenu={handleContextMenu}
@@ -294,7 +298,7 @@ const ProductCard: React.FC<ProductCardProps> = ({
         onMouseLeave={() => setShowDeleteMenu(false)}
       >
         {/* Contador de Disponibilidade (Badge Verde) */}
-        {isAvailable && !showDeleteMenu && (
+        {isSaleEnabled && !showDeleteMenu && (
           <div className="absolute top-2 right-2 z-20 bg-green-500 text-white text-[10px] font-black px-2 py-0.5 rounded-lg shadow-sm border border-green-600 flex items-center gap-1">
             <span className="opacity-70">DISP:</span>
             <span>{infiniteStockEnabled ? '∞' : canMakeCount}</span>
@@ -331,11 +335,17 @@ const ProductCard: React.FC<ProductCardProps> = ({
             alt={product.name}
             className="w-full h-full object-cover transition-transform group-hover:scale-110"
           />
-          {!isAvailable && (
+          {salesLocked ? (
+            <div className="absolute inset-0 bg-slate-900/60 flex items-center justify-center">
+              <span className="bg-amber-500 text-white text-[10px] sm:text-xs font-black px-2 py-1 rounded-full uppercase">
+                Iniciar Dia
+              </span>
+            </div>
+          ) : !isAvailable ? (
             <div className="absolute inset-0 bg-slate-900/60 flex items-center justify-center">
                <span className="bg-red-600 text-white text-[10px] sm:text-xs font-black px-2 py-1 rounded-full uppercase">Indisponível</span>
             </div>
-          )}
+          ) : null}
         </div>
         
         <div className="w-full pointer-events-none">
@@ -453,10 +463,14 @@ const ProductCard: React.FC<ProductCardProps> = ({
             <div className="qb-sale-customizer-footer p-6 bg-white border-t">
               <button 
                 onClick={handleConfirmCustomSale}
-                disabled={!canConfirmCustomSale}
+                disabled={!canSubmitCustomSale}
                 className="qb-btn-touch w-full bg-green-600 hover:bg-green-700 disabled:bg-slate-300 disabled:text-slate-500 text-white py-5 rounded-3xl font-black uppercase text-lg shadow-lg active:scale-95 flex items-center justify-center gap-3"
               >
-                {canConfirmCustomSale ? 'ADICIONAR AO CARRINHO' : 'ESTOQUE INSUFICIENTE'}
+                {salesLocked
+                  ? 'INICIE O DIA'
+                  : canConfirmCustomSale
+                    ? 'ADICIONAR AO CARRINHO'
+                    : 'ESTOQUE INSUFICIENTE'}
               </button>
             </div>
           </div>

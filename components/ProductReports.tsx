@@ -1,31 +1,29 @@
 import React, { useMemo, useState } from 'react';
-import { Sale } from '../types';
+import { DailySalesHistoryEntry, Sale } from '../types';
+import {
+  groupSalesByBusinessDay,
+  normalizeBusinessDayKey,
+  resolveSessionBusinessDayKey,
+} from '../utils/businessDay';
 
 interface ProductReportsProps {
   sales: Sale[];
   archivedSales?: Sale[];
+  dailySalesHistory?: DailySalesHistoryEntry[];
+  activeBusinessDate?: string | null;
 }
 
-const toDate = (value: Date | string): Date => {
-  const parsed = value instanceof Date ? value : new Date(value);
-  if (Number.isNaN(parsed.getTime())) return new Date();
-  return parsed;
-};
-
-const toInputDate = (date: Date): string => {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
-};
-
-const toDayKey = (value: Date | string): string => {
-  const date = toDate(value);
-  return toInputDate(date);
-};
-
-const ProductReports: React.FC<ProductReportsProps> = ({ sales, archivedSales = [] }) => {
-  const [selectedDate, setSelectedDate] = useState<string>(() => toInputDate(new Date()));
+const ProductReports: React.FC<ProductReportsProps> = ({
+  sales,
+  archivedSales = [],
+  dailySalesHistory = [],
+  activeBusinessDate = null,
+}) => {
+  const [selectedDate, setSelectedDate] = useState<string>(() => {
+    const normalizedBusinessDate = normalizeBusinessDayKey(activeBusinessDate);
+    if (normalizedBusinessDate) return normalizedBusinessDate;
+    return resolveSessionBusinessDayKey(sales, [], activeBusinessDate);
+  });
 
   const mergedSales = useMemo(() => {
     const byId = new Map<string, Sale>();
@@ -38,10 +36,16 @@ const ProductReports: React.FC<ProductReportsProps> = ({ sales, archivedSales = 
     return [...byId.values()];
   }, [archivedSales, sales]);
 
-  const daySales = useMemo(
-    () => mergedSales.filter((sale) => toDayKey(sale.timestamp) === selectedDate),
-    [mergedSales, selectedDate]
+  const businessDaySalesMap = useMemo(
+    () =>
+      groupSalesByBusinessDay(mergedSales, dailySalesHistory, {
+        activeBusinessDate,
+        currentSessionSaleIds: new Set(sales.map((sale) => sale.id)),
+      }),
+    [activeBusinessDate, dailySalesHistory, mergedSales, sales]
   );
+
+  const daySales = useMemo(() => businessDaySalesMap.get(selectedDate) || [], [businessDaySalesMap, selectedDate]);
 
   const productRows = useMemo(() => {
     const grouped = new Map<
@@ -85,7 +89,14 @@ const ProductReports: React.FC<ProductReportsProps> = ({ sales, archivedSales = 
             </label>
             <button
               type="button"
-              onClick={() => setSelectedDate(toInputDate(new Date()))}
+              onClick={() => {
+                const normalizedBusinessDate = normalizeBusinessDayKey(activeBusinessDate);
+                if (normalizedBusinessDate) {
+                  setSelectedDate(normalizedBusinessDate);
+                  return;
+                }
+                setSelectedDate(resolveSessionBusinessDayKey(sales, [], activeBusinessDate));
+              }}
               className="qb-btn-touch h-11 rounded-xl bg-slate-900 px-4 text-[11px] font-black uppercase tracking-widest text-white hover:bg-black transition-colors"
             >
               Hoje

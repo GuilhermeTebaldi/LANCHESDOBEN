@@ -13,6 +13,7 @@ import { APP_ORIGINS, AppOrigin, buildAppChannelSummary } from '../utils/appChan
 import { buildSalesReportPrintRoutePath } from '../utils/printRoutes';
 import { getReceiptPaperWidthMm } from '../utils/receiptPaper';
 import { formatStockQuantityByUnit, getRecipeQuantityUnitLabel } from '../utils/recipe';
+import { groupSalesByBusinessDay } from '../utils/businessDay';
 import {
   buildSalesReportPrintHashPayload,
   removeSalesReportPrintPayload,
@@ -28,7 +29,9 @@ interface SalesSummaryProps {
   ignoreStockCosts?: boolean;
   cashRegisterAmount: number;
   dailySalesHistory: DailySalesHistoryEntry[];
+  activeBusinessDate?: string | null;
   onSetCashRegister?: (amount: number) => Promise<boolean> | boolean;
+  onStartBusinessDay?: () => Promise<boolean> | boolean;
   onCloseDay?: () => Promise<boolean> | boolean;
   onRegisterCashPurchase?: (
     ingredientId: string,
@@ -261,7 +264,14 @@ const getDayKey = (value: Date | string): string => toDayKey(toDate(value));
 const getHistoryBusinessDayKey = (entry: DailySalesHistoryEntry): string =>
   normalizeBusinessDayKey(entry.businessDate) || getDayKey(entry.closedAt);
 
-const resolveSessionBusinessDayKey = (sales: Sale[], stockEntries: StockEntry[]): string => {
+const resolveSessionBusinessDayKey = (
+  sales: Sale[],
+  stockEntries: StockEntry[],
+  activeBusinessDate?: string | null
+): string => {
+  const normalizedBusinessDate = normalizeBusinessDayKey(activeBusinessDate);
+  if (normalizedBusinessDate) return normalizedBusinessDate;
+
   let earliestMs = Number.POSITIVE_INFINITY;
   sales.forEach((sale) => {
     const saleMs = toDate(sale.timestamp).getTime();
@@ -584,7 +594,9 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
   ignoreStockCosts = false,
   cashRegisterAmount,
   dailySalesHistory,
+  activeBusinessDate,
   onSetCashRegister,
+  onStartBusinessDay,
   onCloseDay,
   onRegisterCashPurchase,
   onRegisterCashExpense,
@@ -646,6 +658,11 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
     () => getCashPrintPresetById(cashPrintPresetId),
     [cashPrintPresetId]
   );
+  const activeBusinessDayLabel = useMemo(() => {
+    const normalized = normalizeBusinessDayKey(activeBusinessDate);
+    return normalized ? formatBusinessDayLabel(normalized) : null;
+  }, [activeBusinessDate]);
+  const hasActiveBusinessDay = Boolean(normalizeBusinessDayKey(activeBusinessDate));
 
   const productSalesMap = useMemo(
     () =>
@@ -782,7 +799,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
       return {
         id: 'current-day',
         closedAt,
-        businessDate: resolveSessionBusinessDayKey(sales, stockEntries),
+        businessDate: resolveSessionBusinessDayKey(sales, stockEntries, activeBusinessDate),
         openingCash: cashRegisterAmount,
         totalRevenue,
         totalPurchases: totalCost,
@@ -793,6 +810,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
       };
     },
     [
+      activeBusinessDate,
       cashRegisterAmount,
       cashRegisterExpenseDetails,
       cashRegisterExpenses,
@@ -824,18 +842,14 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
   );
 
   const archiveSalesByDay = useMemo(() => {
-    const map = new Map<string, Sale[]>();
-    archivedSales.forEach((sale) => {
-      const dayKey = getDayKey(sale.timestamp);
-      const current = map.get(dayKey);
-      if (current) {
-        current.push(sale);
-        return;
-      }
-      map.set(dayKey, [sale]);
+    const normalizedHistory = dailySalesHistory
+      .map((entry) => normalizeDailyHistoryEntry(entry))
+      .filter((entry): entry is DailySalesHistoryEntry => entry !== null);
+    return groupSalesByBusinessDay(archivedSales, normalizedHistory, {
+      activeBusinessDate,
+      currentSessionSaleIds: new Set(sales.map((sale) => sale.id)),
     });
-    return map;
-  }, [archivedSales]);
+  }, [activeBusinessDate, archivedSales, dailySalesHistory, sales]);
 
   const mergedDailySalesHistory = useMemo<DailySalesHistoryEntry[]>(() => {
     const normalizedPropEntries = dailySalesHistory
@@ -922,7 +936,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
     const consumedSaleIds = new Set(
       explicitEntries.flatMap((item) => item.sales.map((sale) => sale.id))
     );
-    const todayKey = resolveSessionBusinessDayKey(sales, stockEntries);
+    const todayKey = resolveSessionBusinessDayKey(sales, stockEntries, activeBusinessDate);
     const inferredEntries: HistoryDrawerEntry[] = [];
 
     archiveSalesByDay.forEach((daySales, dayKey) => {
@@ -968,7 +982,15 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
     return [...explicitEntries, ...inferredEntries].sort(
       (a, b) => toDate(b.entry.closedAt).getTime() - toDate(a.entry.closedAt).getTime()
     );
-  }, [archiveSalesByDay, archivedSales, mergedDailySalesHistory, resolveSaleCost, sales, stockEntries]);
+  }, [
+    activeBusinessDate,
+    archiveSalesByDay,
+    archivedSales,
+    mergedDailySalesHistory,
+    resolveSaleCost,
+    sales,
+    stockEntries,
+  ]);
 
   const printReport = useCallback(
     (
@@ -1445,6 +1467,11 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
     [onRevertCashExpense, revertingEntryId]
   );
 
+  const handleStartDay = useCallback(async () => {
+    if (!onStartBusinessDay) return;
+    await onStartBusinessDay();
+  }, [onStartBusinessDay]);
+
   const handleRestart = async () => {
     if (isClosing) return;
     if (!confirm('Deseja realmente encerrar o dia? O caixa será zerado para uma nova sessão.')) return;
@@ -1514,6 +1541,24 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
         </div>
         <div className="flex flex-wrap gap-2">
           <button
+            onClick={() => {
+              void handleStartDay();
+            }}
+            disabled={!onStartBusinessDay || Boolean(activeBusinessDayLabel) || isClosing}
+            className={`qb-btn-touch px-5 py-3 rounded-2xl font-black text-xs uppercase tracking-widest transition-all active:scale-95 ${
+              activeBusinessDayLabel
+                ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                : 'bg-emerald-600 text-white shadow-lg shadow-emerald-200 hover:bg-emerald-700'
+            } disabled:opacity-50`}
+            title={
+              activeBusinessDayLabel
+                ? `Dia já iniciado: ${activeBusinessDayLabel}`
+                : 'Iniciar dia de trabalho'
+            }
+          >
+            {activeBusinessDayLabel ? `Dia em andamento: ${activeBusinessDayLabel}` : 'Iniciar Dia'}
+          </button>
+          <button
             onClick={() => setHistoryVisible((current) => !current)}
             className="qb-btn-touch bg-white text-slate-800 px-5 py-3 rounded-2xl font-black text-xs uppercase tracking-widest shadow-sm border border-slate-200 hover:border-red-400 hover:text-red-600 transition-all active:scale-95"
           >
@@ -1521,9 +1566,11 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
           </button>
           <button
             onClick={handleRestart}
-            disabled={isClosing}
-            className={`qb-btn-touch qb-sales-restart bg-slate-900 text-yellow-400 px-6 py-3 rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl transition-all active:scale-95 flex items-center gap-2 group ${
-              isClosing ? 'opacity-50' : 'hover:bg-black'
+            disabled={isClosing || !hasActiveBusinessDay}
+            className={`qb-btn-touch qb-sales-restart px-6 py-3 rounded-2xl font-black text-xs uppercase tracking-widest transition-all active:scale-95 flex items-center gap-2 group ${
+              isClosing || !hasActiveBusinessDay
+                ? 'opacity-60 cursor-not-allowed bg-white text-slate-400 border border-slate-200 shadow-sm'
+                : 'bg-slate-900 text-yellow-400 shadow-xl hover:bg-black'
             }`}
           >
             <svg
@@ -1712,7 +1759,8 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
       )}
 
       {activeTab === 'CASH' && (
-        <div className="bg-white border-2 border-slate-100 rounded-3xl shadow-sm p-6 space-y-5">
+        hasActiveBusinessDay ? (
+          <div className="bg-white border-2 border-slate-100 rounded-3xl shadow-sm p-6 space-y-5">
           <div className="space-y-1">
             <h3 className="text-lg font-black uppercase tracking-tight text-slate-800">Aba Caixa</h3>
             <p className="text-xs font-bold text-slate-500 uppercase tracking-widest">
@@ -1918,11 +1966,15 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
               </div>
             </div>
           )}
-        </div>
+          </div>
+        ) : (
+          <div className="bg-white border-2 border-slate-100 rounded-3xl shadow-sm p-6 min-h-[420px]" />
+        )
       )}
 
       {activeTab === 'REPORT' && (
-        <>
+        hasActiveBusinessDay ? (
+          <>
           <div className="qb-sales-stats flex flex-nowrap gap-4 overflow-x-auto pb-1">
             <div className="qb-sales-stat-card bg-red-600 text-white p-6 rounded-3xl shadow-lg">
               <p className="text-[10px] font-bold uppercase tracking-widest opacity-80 mb-1">Faturamento (sem Apps)</p>
@@ -2186,7 +2238,10 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
               )}
             </div>
           )}
-        </>
+          </>
+        ) : (
+          <div className="bg-white border-2 border-slate-100 rounded-3xl shadow-sm p-6 min-h-[420px]" />
+        )
       )}
     </div>
   );

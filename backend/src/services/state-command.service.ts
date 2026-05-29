@@ -69,9 +69,12 @@ const toTimestampMs = (value: Date | string | null | undefined): number | null =
 };
 
 const resolveSessionBusinessDate = (
-  state: Pick<FrontAppState, 'sales' | 'stockEntries'>,
+  state: Pick<FrontAppState, 'sales' | 'stockEntries' | 'activeBusinessDate'>,
   fallback?: Date | string
 ): string => {
+  const activeBusinessDate = normalizeBusinessDate(state.activeBusinessDate);
+  if (activeBusinessDate) return activeBusinessDate;
+
   let earliestMs = Number.POSITIVE_INFINITY;
 
   state.sales.forEach((sale) => {
@@ -97,6 +100,16 @@ const resolveSessionBusinessDate = (
 
 const resolveHistoryBusinessDate = (closedAt: Date | string, businessDate?: string): string =>
   normalizeBusinessDate(businessDate) || toDayKey(new Date(toTimestampIso(closedAt)));
+
+const resolveCloseCommandBusinessDate = (
+  state: Pick<FrontAppState, 'sales' | 'stockEntries' | 'activeBusinessDate'>,
+  fallback: Date | string,
+  commandBusinessDate?: string
+): string => {
+  const explicitBusinessDate = normalizeBusinessDate(commandBusinessDate);
+  if (explicitBusinessDate) return explicitBusinessDate;
+  return resolveSessionBusinessDate(state, fallback);
+};
 
 const aggregateRecipe = (recipe: FrontRecipeItem[] = []): Record<string, number> => {
   return recipe.reduce<Record<string, number>>((acc, item) => {
@@ -587,6 +600,7 @@ const cloneState = (state: FrontAppState): FrontAppState => ({
         Boolean(entry && typeof entry === 'object' && !Array.isArray(entry))
     )
     .map(cloneDailySalesHistoryEntry),
+  activeBusinessDate: normalizeBusinessDate(state.activeBusinessDate) || null,
   businessSettings: normalizeBusinessSettings(state.businessSettings),
 });
 
@@ -604,6 +618,7 @@ const emptyAppState = (): FrontAppState => ({
   saleDrafts: [],
   cashRegisterAmount: 0,
   dailySalesHistory: [],
+  activeBusinessDate: null,
   businessSettings: { ...DEFAULT_BUSINESS_SETTINGS },
 });
 
@@ -1955,6 +1970,19 @@ const applySetCashRegister = (
   state.cashRegisterAmount = toNonNegativeMoney(command.amount);
 };
 
+const applyStartBusinessDay = (
+  state: FrontAppState,
+  command: Extract<StateCommandInput, { type: 'START_BUSINESS_DAY' }>
+) => {
+  const resolvedBusinessDate =
+    normalizeBusinessDate(command.businessDate) || toDayKey(new Date(toTimestampIso()));
+  state.activeBusinessDate = resolvedBusinessDate;
+};
+
+const applyClearActiveBusinessDay = (state: FrontAppState) => {
+  state.activeBusinessDate = null;
+};
+
 const applySetBusinessSettings = (
   state: FrontAppState,
   command: Extract<StateCommandInput, { type: 'SET_BUSINESS_SETTINGS' }>
@@ -1966,7 +1994,10 @@ const applySetBusinessSettings = (
   state.businessSettings = normalized;
 };
 
-const applyCloseDay = (state: FrontAppState) => {
+const applyCloseDay = (
+  state: FrontAppState,
+  command?: Extract<StateCommandInput, { type: 'CLOSE_DAY' }>
+) => {
   const totalRevenue = roundMoney(
     state.sales.reduce((sum, sale) => sum + (Number.isFinite(sale.total) ? sale.total : 0), 0)
   );
@@ -2022,7 +2053,7 @@ const applyCloseDay = (state: FrontAppState) => {
   const report: FrontDailySalesHistoryEntry = {
     id: createId('day'),
     closedAt,
-    businessDate: resolveSessionBusinessDate(state, closedAt),
+    businessDate: resolveCloseCommandBusinessDate(state, closedAt, command?.businessDate),
     openingCash,
     totalRevenue,
     totalPurchases,
@@ -2039,6 +2070,7 @@ const applyCloseDay = (state: FrontAppState) => {
   state.stockEntries = [];
   state.saleDrafts = [];
   state.cashRegisterAmount = 0;
+  state.activeBusinessDate = null;
 };
 
 const ensureUniqueId = (
@@ -2192,14 +2224,21 @@ export const applyStateCommand = (
     case 'SET_CASH_REGISTER':
       applySetCashRegister(state, command);
       return state;
+    case 'START_BUSINESS_DAY':
+      applyStartBusinessDay(state, command);
+      return state;
+    case 'CLEAR_ACTIVE_BUSINESS_DAY':
+      applyClearActiveBusinessDay(state);
+      return state;
     case 'CLOSE_DAY':
-      applyCloseDay(state);
+      applyCloseDay(state, command);
       return state;
     case 'CLEAR_HISTORY':
       state.sales = [];
       state.stockEntries = [];
       state.saleDrafts = [];
       state.cashRegisterAmount = 0;
+      state.activeBusinessDate = null;
       return state;
     case 'FACTORY_RESET':
       return emptyAppState();
@@ -2214,6 +2253,7 @@ export const applyStateCommand = (
       state.saleDrafts = [];
       state.cashRegisterAmount = 0;
       state.dailySalesHistory = [];
+      state.activeBusinessDate = null;
       return state;
     case 'CLEAR_ONLY_STOCK':
       state.ingredients = state.ingredients.map((ingredient) => ({ ...ingredient, currentStock: 0 }));

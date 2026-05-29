@@ -248,8 +248,23 @@ const setCashRegisterCommandSchema = baseCommandSchema.extend({
   amount: z.coerce.number().finite().min(0),
 });
 
+const businessDayKeySchema = z
+  .string()
+  .trim()
+  .regex(/^\d{4}-\d{2}-\d{2}$/, 'businessDate deve estar no formato YYYY-MM-DD');
+
+const startBusinessDayCommandSchema = baseCommandSchema.extend({
+  type: z.literal('START_BUSINESS_DAY'),
+  businessDate: businessDayKeySchema.optional(),
+});
+
+const clearActiveBusinessDayCommandSchema = baseCommandSchema.extend({
+  type: z.literal('CLEAR_ACTIVE_BUSINESS_DAY'),
+});
+
 const closeDayCommandSchema = baseCommandSchema.extend({
   type: z.literal('CLOSE_DAY'),
+  businessDate: businessDayKeySchema.optional(),
 });
 
 const clearHistoryCommandSchema = baseCommandSchema.extend({
@@ -302,6 +317,8 @@ export const stateCommandSchema = z.discriminatedUnion('type', [
   cleaningMaterialDeleteCommandSchema,
   cleaningStockMoveCommandSchema,
   setCashRegisterCommandSchema,
+  startBusinessDayCommandSchema,
+  clearActiveBusinessDayCommandSchema,
   closeDayCommandSchema,
   clearHistoryCommandSchema,
   factoryResetCommandSchema,

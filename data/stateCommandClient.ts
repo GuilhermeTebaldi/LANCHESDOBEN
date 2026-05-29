@@ -189,7 +189,9 @@ export type StateCommand =
   | (BaseCommand & { type: 'CLEANING_MATERIAL_DELETE'; materialId: string })
   | (BaseCommand & { type: 'CLEANING_STOCK_MOVE'; materialId: string; amount: number })
   | (BaseCommand & { type: 'SET_CASH_REGISTER'; amount: number })
-  | (BaseCommand & { type: 'CLOSE_DAY' })
+  | (BaseCommand & { type: 'START_BUSINESS_DAY'; businessDate?: string })
+  | (BaseCommand & { type: 'CLEAR_ACTIVE_BUSINESS_DAY' })
+  | (BaseCommand & { type: 'CLOSE_DAY'; businessDate?: string })
   | (BaseCommand & { type: 'CLEAR_HISTORY' })
   | (BaseCommand & { type: 'FACTORY_RESET' })
   | (BaseCommand & { type: 'CLEAR_OPERATIONAL_DATA' })
@@ -711,6 +713,10 @@ const normalizeAppState = (payload: unknown): AppState => {
     dailySalesHistory: reviveDailySalesHistory(
       toArray<DailySalesHistoryEntry>(source.dailySalesHistory, DEFAULT_APP_STATE.dailySalesHistory)
     ),
+    activeBusinessDate:
+      normalizeBusinessDate(source.activeBusinessDate) ??
+      DEFAULT_APP_STATE.activeBusinessDate ??
+      null,
     businessSettings: normalizeBusinessSettings(
       source.businessSettings,
       DEFAULT_APP_STATE.businessSettings

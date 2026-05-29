@@ -27,12 +27,14 @@ import {
   StockEntry,
 } from '../types';
 import { APP_ORIGINS, buildAppChannelSummary } from '../utils/appChannelSummary';
+import { groupSalesByBusinessDay } from '../utils/businessDay';
 import { DASHBOARD_CHART_COLORS, DASHBOARD_TOOLTIP_STYLE } from '../utils/chartTheme';
 import { calculateRecipeCost, formatIngredientStockQuantity, formatStockQuantityByUnit } from '../utils/recipe';
 import AdminSalesAnalyticsTab from './AdminSalesAnalyticsTab';
 
 interface AdminDashboardProps {
   sales: Sale[];
+  sessionSales: Sale[];
   cancelledSales: Sale[];
   stockEntries: StockEntry[];
   sessionStockEntries: StockEntry[];
@@ -49,6 +51,7 @@ interface AdminDashboardProps {
   onDeleteArchiveMonth: (month: string) => void;
   cashRegisterAmount: number;
   dailySalesHistory: DailySalesHistoryEntry[];
+  activeBusinessDate?: string | null;
 }
 
 const paymentMethodLabels: Record<SalePaymentMethod, string> = {
@@ -312,6 +315,42 @@ const isTimestampWithinRange = (value: Date | string, range: AdminPeriodRange | 
   return timestampMs >= range.startMs && timestampMs <= range.endMs;
 };
 
+const isBusinessDayWithinRange = (dayKey: string, range: AdminPeriodRange | null): boolean => {
+  if (!range) return true;
+  const dayDate = parseInputDate(dayKey);
+  if (!dayDate) return false;
+  const dayStartMs = startOfLocalDayMs(dayDate);
+  return dayStartMs >= range.startMs && dayStartMs <= range.endMs;
+};
+
+const groupSalesByMonthAndBusinessDay = (
+  sales: Sale[],
+  dailySalesHistory: DailySalesHistoryEntry[],
+  options: {
+    activeBusinessDate?: string | null;
+    currentSessionSaleIds?: Set<string>;
+  } = {}
+): Record<string, Record<string, Sale[]>> => {
+  const groups: Record<string, Record<string, Sale[]>> = {};
+  const byBusinessDay = groupSalesByBusinessDay(sales, dailySalesHistory, {
+    activeBusinessDate: options.activeBusinessDate,
+    currentSessionSaleIds: options.currentSessionSaleIds,
+  });
+
+  byBusinessDay.forEach((daySales, dayKey) => {
+    const dayDate = parseInputDate(dayKey);
+    const fallbackDate = toDate(daySales[0]?.timestamp || new Date());
+    const monthDate = dayDate || fallbackDate;
+    const monthLabel = monthDate.toLocaleString('pt-BR', { month: 'long', year: 'numeric' });
+    if (!groups[monthLabel]) groups[monthLabel] = {};
+    groups[monthLabel][dayKey] = [...daySales].sort(
+      (a, b) => toDate(a.timestamp).getTime() - toDate(b.timestamp).getTime()
+    );
+  });
+
+  return groups;
+};
+
 const normalizeUnit = (value: string): string => value.trim().toLowerCase();
 
 const hasToken = (unit: string, token: string): boolean =>
@@ -469,6 +508,7 @@ const buildConsolidatedArchiveFinance = (
 
 const AdminDashboard: React.FC<AdminDashboardProps> = ({
   sales: rawSales,
+  sessionSales: rawSessionSales,
   cancelledSales: rawCancelledSales,
   stockEntries: rawStockEntries,
   sessionStockEntries: rawSessionStockEntries,
@@ -485,6 +525,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onDeleteArchiveMonth,
   cashRegisterAmount,
   dailySalesHistory: rawDailySalesHistory,
+  activeBusinessDate,
 }) => {
   const [activeTab, setActiveTab] = useState<
     'geral' | 'analytics' | 'vendas' | 'estornos' | 'estoque' | 'materiais' | 'arquivos' | 'configuracao'
@@ -521,6 +562,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
     };
 
     rawSales.forEach((sale) => collectYear(sale.timestamp));
+    rawSessionSales.forEach((sale) => collectYear(sale.timestamp));
     rawCancelledSales.forEach((sale) => collectYear(sale.timestamp));
     rawStockEntries.forEach((entry) => collectYear(entry.timestamp));
     rawSessionStockEntries.forEach((entry) => collectYear(entry.timestamp));
@@ -534,12 +576,50 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
     return [...years].sort((a, b) => Number(b) - Number(a));
   }, [
     rawSales,
+    rawSessionSales,
     rawCancelledSales,
     rawStockEntries,
     rawSessionStockEntries,
     rawCleaningStockEntries,
     rawDailySalesHistory,
   ]);
+  const sessionSaleIds = useMemo(
+    () => new Set(rawSessionSales.map((sale) => sale.id)),
+    [rawSessionSales]
+  );
+  const rawSalesByBusinessDay = useMemo(
+    () =>
+      groupSalesByBusinessDay(rawSales, rawDailySalesHistory, {
+        activeBusinessDate,
+        currentSessionSaleIds: sessionSaleIds,
+      }),
+    [activeBusinessDate, rawDailySalesHistory, rawSales, sessionSaleIds]
+  );
+  const rawSalesBusinessDayByRef = useMemo(() => {
+    const map = new Map<Sale, string>();
+    rawSalesByBusinessDay.forEach((daySales, dayKey) => {
+      daySales.forEach((sale) => {
+        map.set(sale, dayKey);
+      });
+    });
+    return map;
+  }, [rawSalesByBusinessDay]);
+  const rawCancelledSalesByBusinessDay = useMemo(
+    () =>
+      groupSalesByBusinessDay(rawCancelledSales, rawDailySalesHistory, {
+        activeBusinessDate,
+      }),
+    [activeBusinessDate, rawCancelledSales, rawDailySalesHistory]
+  );
+  const rawCancelledSalesBusinessDayByRef = useMemo(() => {
+    const map = new Map<Sale, string>();
+    rawCancelledSalesByBusinessDay.forEach((daySales, dayKey) => {
+      daySales.forEach((sale) => {
+        map.set(sale, dayKey);
+      });
+    });
+    return map;
+  }, [rawCancelledSalesByBusinessDay]);
   const activePeriodRange = useMemo(
     () =>
       buildAdminPeriodRange(adminPeriodMode, {
@@ -560,13 +640,21 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   );
   const activePeriodLabel = activePeriodRange ? activePeriodRange.label : 'Todos os dados';
   const sales = useMemo(
-    () => rawSales.filter((sale) => isTimestampWithinRange(sale.timestamp, activePeriodRange)),
-    [rawSales, activePeriodRange]
+    () =>
+      rawSales.filter((sale) => {
+        const dayKey = rawSalesBusinessDayByRef.get(sale) || toDayKey(toDate(sale.timestamp));
+        return isBusinessDayWithinRange(dayKey, activePeriodRange);
+      }),
+    [activePeriodRange, rawSales, rawSalesBusinessDayByRef]
   );
   const cancelledSales = useMemo(
     () =>
-      rawCancelledSales.filter((sale) => isTimestampWithinRange(sale.timestamp, activePeriodRange)),
-    [rawCancelledSales, activePeriodRange]
+      rawCancelledSales.filter((sale) => {
+        const dayKey =
+          rawCancelledSalesBusinessDayByRef.get(sale) || toDayKey(toDate(sale.timestamp));
+        return isBusinessDayWithinRange(dayKey, activePeriodRange);
+      }),
+    [activePeriodRange, rawCancelledSales, rawCancelledSalesBusinessDayByRef]
   );
   const stockEntries = useMemo(
     () => rawStockEntries.filter((entry) => isTimestampWithinRange(entry.timestamp, activePeriodRange)),
@@ -589,7 +677,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const dailySalesHistory = useMemo(
     () =>
       rawDailySalesHistory.filter((entry) =>
-        isTimestampWithinRange(entry.closedAt, activePeriodRange)
+        isBusinessDayWithinRange(getHistoryBusinessDayKey(entry), activePeriodRange)
       ),
     [rawDailySalesHistory, activePeriodRange]
   );
@@ -920,8 +1008,12 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
     sales.forEach((sale) => {
       const date = toDate(sale.timestamp);
-      const dayKey = toDayKey(date);
-      const day = ensureDay(dayKey, new Date(date.getFullYear(), date.getMonth(), date.getDate()));
+      const dayKey = rawSalesBusinessDayByRef.get(sale) || toDayKey(date);
+      const businessDayDate = parseInputDate(dayKey);
+      const day = ensureDay(
+        dayKey,
+        businessDayDate || new Date(date.getFullYear(), date.getMonth(), date.getDate())
+      );
       day.revenue = roundMoney(day.revenue + (Number(sale.total) || 0));
       if (!ignoreStockCosts) {
         day.salesCost = roundMoney(
@@ -941,7 +1033,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
           profit: roundMoney(entry.revenue - cost),
         };
       });
-  }, [ignoreStockCosts, sales]);
+  }, [ignoreStockCosts, rawSalesBusinessDayByRef, sales]);
   const resolveDailyHistoryPurchases = useCallback(
     (entry: DailySalesHistoryEntry): number =>
       ignoreStockCosts ? 0 : roundMoney(Number(entry.totalPurchases) || 0),
@@ -1054,17 +1146,20 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
     [cleaningMaterials]
   );
 
-  const archives = useMemo(() => {
-    const groups: Record<string, Record<string, Sale[]>> = {};
-    sales.forEach(sale => {
-      const month = sale.timestamp.toLocaleString('pt-BR', { month: 'long', year: 'numeric' });
-      const day = sale.timestamp.toLocaleDateString('pt-BR');
-      if (!groups[month]) groups[month] = {};
-      if (!groups[month][day]) groups[month][day] = [];
-      groups[month][day].push(sale);
+  const salesByBusinessMonthDay = useMemo(() => {
+    return groupSalesByMonthAndBusinessDay(sales, dailySalesHistory, {
+      activeBusinessDate,
+      currentSessionSaleIds: sessionSaleIds,
     });
-    return groups;
-  }, [sales]);
+  }, [activeBusinessDate, dailySalesHistory, sales, sessionSaleIds]);
+  const cancelledSalesByBusinessMonthDay = useMemo(
+    () =>
+      groupSalesByMonthAndBusinessDay(cancelledSales, dailySalesHistory, {
+        activeBusinessDate,
+      }),
+    [activeBusinessDate, cancelledSales, dailySalesHistory]
+  );
+  const archives = salesByBusinessMonthDay;
   useEffect(() => {
     if (!selectedArchiveMonth) return;
     const monthGroup = archives[selectedArchiveMonth];
@@ -1991,14 +2086,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
           </div>
           {cancelledSales.length === 0 ? <div className="py-24 text-center opacity-30 font-black uppercase text-xs">Sem estornos.</div> : (
             (() => {
-              const estornoGroups: Record<string, Record<string, typeof cancelledSales>> = {};
-              cancelledSales.forEach(sale => {
-                const month = sale.timestamp.toLocaleString('pt-BR', { month: 'long', year: 'numeric' });
-                const day = sale.timestamp.toLocaleDateString('pt-BR');
-                if (!estornoGroups[month]) estornoGroups[month] = {};
-                if (!estornoGroups[month][day]) estornoGroups[month][day] = [];
-                estornoGroups[month][day].push(sale);
-              });
+              const estornoGroups = cancelledSalesByBusinessMonthDay;
               
               // Extrair anos disponíveis
               const yearsSet = new Set<string>();
@@ -2046,16 +2134,16 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                       </button>
                       {expandedMonths[`estorno_${month}`] && (
                         <div className="px-6 pb-6 border-t border-slate-100 space-y-4">
-                          {Object.keys(estornoGroups[month]).reverse().map(day => (
-                            <div key={day} className="bg-slate-50 rounded-2xl overflow-hidden border border-slate-200">
+                          {Object.keys(estornoGroups[month]).sort((a, b) => b.localeCompare(a)).map(dayKey => (
+                            <div key={dayKey} className="bg-slate-50 rounded-2xl overflow-hidden border border-slate-200">
                               <button 
                                 className="qb-admin-day-toggle qb-btn-touch w-full p-4 flex items-center justify-between hover:bg-slate-100 transition-colors"
-                                onClick={() => setExpandedDays({...expandedDays, [`estorno_${day}`]: !expandedDays[`estorno_${day}`]})}
+                                onClick={() => setExpandedDays({...expandedDays, [`estorno_${dayKey}`]: !expandedDays[`estorno_${dayKey}`]})}
                               >
-                                <span className="font-black text-slate-700 text-xs sm:text-sm uppercase">{day}</span>
-                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" className={`transition-transform ${expandedDays[`estorno_${day}`] ? 'rotate-180' : ''}`}><polyline points="6 9 12 15 18 9"/></svg>
+                                <span className="font-black text-slate-700 text-xs sm:text-sm uppercase">{formatBusinessDayLabel(dayKey)}</span>
+                                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" className={`transition-transform ${expandedDays[`estorno_${dayKey}`] ? 'rotate-180' : ''}`}><polyline points="6 9 12 15 18 9"/></svg>
                               </button>
-                              {expandedDays[`estorno_${day}`] && (
+                              {expandedDays[`estorno_${dayKey}`] && (
                                 <div className="overflow-x-auto">
                                   <table className="w-full text-left bg-white">
                                     <thead>
@@ -2066,7 +2154,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                       </tr>
                                     </thead>
                                     <tbody className="divide-y divide-slate-50">
-                                      {estornoGroups[month][day].slice().reverse().map((sale, i) => (
+                                      {estornoGroups[month][dayKey].slice().reverse().map((sale, i) => (
                                         <tr key={sale.id + i}>
                                           <td className="px-4 py-3 text-xs font-bold text-slate-500">{sale.timestamp.toLocaleTimeString()}</td>
                                           <td className="px-4 py-3 font-black text-slate-800 uppercase text-xs">{sale.productName}</td>
@@ -2139,27 +2227,27 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                  <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="m15 18-6-6 6-6"/></svg> Voltar
               </button>
               <div className="qb-archive-day-grid grid grid-cols-2 md:grid-cols-4 lg:grid-cols-5 gap-4">
-                {Object.keys(archives[selectedArchiveMonth]).map(day => {
-                  const daySales = archives[selectedArchiveMonth][day] as Sale[];
+                {Object.keys(archives[selectedArchiveMonth]).sort((a, b) => b.localeCompare(a)).map(dayKey => {
+                  const daySales = archives[selectedArchiveMonth][dayKey] as Sale[];
                   const dayFinance = buildConsolidatedArchiveFinance(daySales, {
                     ignoreStockCosts,
                   });
                   const dayAppSummary = buildAppChannelSummary(daySales);
                   return (
-                  <div key={day} className="relative group">
+                  <div key={dayKey} className="relative group">
                     <button 
-                      onClick={() => setSelectedArchiveDay(day)}
+                      onClick={() => setSelectedArchiveDay(dayKey)}
                       className="qb-archive-tile qb-btn-touch w-full flex flex-col items-center p-6 bg-white rounded-3xl border border-slate-200 hover:border-blue-500 transition-all shadow-sm"
                     >
                       <svg xmlns="http://www.w3.org/2000/svg" width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="#94a3b8" strokeWidth="2" className="mb-2"><path d="M14.5 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7.5L14.5 2z"/><polyline points="14 2 14 8 20 8"/></svg>
-                      <span className="font-black text-xs text-slate-800 mb-2">{day}</span>
+                      <span className="font-black text-xs text-slate-800 mb-2">{formatBusinessDayLabel(dayKey)}</span>
                       <span className="font-black text-sm text-green-600">R$ {dayFinance.profit.toFixed(2)}</span>
                       <span className="text-[9px] font-black uppercase tracking-widest text-amber-700 mt-2">
                         Apps: {dayAppSummary.totalOrders} • R$ {dayAppSummary.totalRevenue.toFixed(2)}
                       </span>
                     </button>
                     <button 
-                      onClick={(e) => handleDeleteDay(e, day)}
+                      onClick={(e) => handleDeleteDay(e, dayKey)}
                       className="qb-btn-touch absolute top-2 right-2 bg-red-100 text-red-600 p-1.5 rounded-xl opacity-0 group-hover:opacity-100 transition-all hover:bg-red-600 hover:text-white"
                     >
                       <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/></svg>
@@ -2183,9 +2271,9 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </button>
                 <div className="flex items-center justify-between mb-8">
                   <div>
-                    <h4 className="text-xl sm:text-2xl font-black text-slate-800 uppercase mb-4 sm:mb-8">Fechamento: {selectedArchiveDay}</h4>
+                    <h4 className="text-xl sm:text-2xl font-black text-slate-800 uppercase mb-4 sm:mb-8">Fechamento: {formatBusinessDayLabel(selectedArchiveDay)}</h4>
                     <div className="flex flex-col gap-2">
-                      <p className="text-2xl sm:text-4xl font-black text-slate-900">{selectedArchiveDay}</p>
+                      <p className="text-2xl sm:text-4xl font-black text-slate-900">{formatBusinessDayLabel(selectedArchiveDay)}</p>
                       {(() => {
                         const selectedSales = archives[selectedArchiveMonth!][selectedArchiveDay] as Sale[];
                         const selectedFinance = buildConsolidatedArchiveFinance(selectedSales, {
@@ -2253,7 +2341,9 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     <p className="text-lg font-black text-slate-900">
                       {pendingDelete.type === 'month'
                         ? `Excluir todos os arquivos de ${pendingDelete.label}?`
-                        : `Excluir permanentemente os registros de ${pendingDelete.label}?`}
+                        : `Excluir permanentemente os registros de ${formatBusinessDayLabel(
+                            pendingDelete.label
+                          )}?`}
                     </p>
                   </div>
                 </div>
@@ -2372,14 +2462,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
           </div>
 
           {(() => {
-            const vendaGroups: Record<string, Record<string, typeof sales>> = {};
-            sales.forEach(sale => {
-              const month = sale.timestamp.toLocaleString('pt-BR', { month: 'long', year: 'numeric' });
-              const day = sale.timestamp.toLocaleDateString('pt-BR');
-              if (!vendaGroups[month]) vendaGroups[month] = {};
-              if (!vendaGroups[month][day]) vendaGroups[month][day] = [];
-              vendaGroups[month][day].push(sale);
-            });
+            const vendaGroups = salesByBusinessMonthDay;
             
             // Extrair anos disponíveis
             const yearsSet = new Set<string>();
@@ -2471,26 +2554,26 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     </button>
                     {expandedMonths[month] && (
                       <div className="px-6 pb-6 border-t border-slate-100 space-y-4">
-                        {Object.keys(vendaGroups[month]).reverse().map(day => (
-                          <div key={day} className="bg-slate-50 rounded-2xl overflow-hidden border border-slate-200">
+                        {Object.keys(vendaGroups[month]).sort((a, b) => b.localeCompare(a)).map(dayKey => (
+                          <div key={dayKey} className="bg-slate-50 rounded-2xl overflow-hidden border border-slate-200">
                             {(() => {
-                              const daySales = vendaGroups[month][day] as Sale[];
+                              const daySales = vendaGroups[month][dayKey] as Sale[];
                               const dayAppSummary = buildAppChannelSummary(daySales);
                               return (
                                 <>
                             <button 
                               className="qb-admin-day-toggle qb-btn-touch w-full p-4 flex items-center justify-between hover:bg-slate-100 transition-colors"
-                              onClick={() => setExpandedDays({...expandedDays, [`vendas_${day}`]: !expandedDays[`vendas_${day}`]})}
+                              onClick={() => setExpandedDays({...expandedDays, [`vendas_${dayKey}`]: !expandedDays[`vendas_${dayKey}`]})}
                             >
                               <div className="text-left">
-                                <span className="font-black text-slate-700 text-xs sm:text-sm uppercase block">{day}</span>
+                                <span className="font-black text-slate-700 text-xs sm:text-sm uppercase block">{formatBusinessDayLabel(dayKey)}</span>
                                 <span className="text-[10px] font-black uppercase tracking-widest text-amber-700">
                                   Apps: {dayAppSummary.totalOrders} pedidos • R$ {dayAppSummary.totalRevenue.toFixed(2)}
                                 </span>
                               </div>
-                              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" className={`transition-transform ${expandedDays[`vendas_${day}`] ? 'rotate-180' : ''}`}><polyline points="6 9 12 15 18 9"/></svg>
+                              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" className={`transition-transform ${expandedDays[`vendas_${dayKey}`] ? 'rotate-180' : ''}`}><polyline points="6 9 12 15 18 9"/></svg>
                             </button>
-                            {expandedDays[`vendas_${day}`] && (
+                            {expandedDays[`vendas_${dayKey}`] && (
                               <div className="overflow-x-auto">
                                 <table className="w-full text-left bg-white">
                                   <thead>
@@ -2504,7 +2587,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                       </tr>
                                     </thead>
                                     <tbody className="divide-y divide-slate-50">
-                                    {vendaGroups[month][day].slice().reverse().map(sale => (
+                                    {vendaGroups[month][dayKey].slice().reverse().map(sale => (
                                       <tr key={sale.id}>
                                         <td className="px-4 py-3 text-xs font-bold text-slate-500">{sale.timestamp.toLocaleTimeString()}</td>
                                         <td className="px-4 py-3 font-black text-slate-800 uppercase text-xs">{sale.productName}</td>

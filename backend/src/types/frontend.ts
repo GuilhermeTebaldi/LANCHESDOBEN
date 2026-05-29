@@ -180,5 +180,6 @@ export interface FrontAppState {
   saleDrafts?: FrontSaleDraft[];
   cashRegisterAmount?: number;
   dailySalesHistory?: FrontDailySalesHistoryEntry[];
+  activeBusinessDate?: string | null;
   businessSettings?: FrontBusinessSettings;
 }
