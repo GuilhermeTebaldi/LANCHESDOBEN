@@ -50,6 +50,7 @@ const toTimestampIso = (value?: Date | string): string => {
 };
 
 const BUSINESS_DAY_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+const BUSINESS_DAY_REOPEN_WINDOW_MS = 90 * 60 * 1000;
 const pad2 = (value: number): string => value.toString().padStart(2, '0');
 const toDayKey = (date: Date): string =>
   `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
@@ -109,6 +110,36 @@ const resolveCloseCommandBusinessDate = (
   const explicitBusinessDate = normalizeBusinessDate(commandBusinessDate);
   if (explicitBusinessDate) return explicitBusinessDate;
   return resolveSessionBusinessDate(state, fallback);
+};
+
+const resolveSmartStartBusinessDate = (
+  state: Pick<FrontAppState, 'dailySalesHistory'>,
+  fallback?: Date | string
+): string => {
+  const nowDate = fallback ? new Date(fallback) : new Date();
+  if (Number.isNaN(nowDate.getTime())) return toDayKey(new Date());
+  const nowDayKey = toDayKey(nowDate);
+  const history = Array.isArray(state.dailySalesHistory) ? state.dailySalesHistory : [];
+  if (history.length === 0) return nowDayKey;
+
+  let latestEntry: FrontDailySalesHistoryEntry | null = null;
+  let latestClosedAtMs = Number.NEGATIVE_INFINITY;
+
+  for (const entry of history) {
+    const closedAtMs = toTimestampMs(entry.closedAt);
+    if (closedAtMs === null) continue;
+    if (closedAtMs > latestClosedAtMs) {
+      latestClosedAtMs = closedAtMs;
+      latestEntry = entry;
+    }
+  }
+
+  if (!latestEntry || !Number.isFinite(latestClosedAtMs)) return nowDayKey;
+  const reopenGapMs = nowDate.getTime() - latestClosedAtMs;
+  if (reopenGapMs < 0 || reopenGapMs > BUSINESS_DAY_REOPEN_WINDOW_MS) {
+    return nowDayKey;
+  }
+  return resolveHistoryBusinessDate(latestEntry.closedAt, latestEntry.businessDate);
 };
 
 const aggregateRecipe = (recipe: FrontRecipeItem[] = []): Record<string, number> => {
@@ -1974,8 +2005,8 @@ const applyStartBusinessDay = (
   state: FrontAppState,
   command: Extract<StateCommandInput, { type: 'START_BUSINESS_DAY' }>
 ) => {
-  const resolvedBusinessDate =
-    normalizeBusinessDate(command.businessDate) || toDayKey(new Date(toTimestampIso()));
+  const explicitBusinessDate = normalizeBusinessDate(command.businessDate);
+  const resolvedBusinessDate = explicitBusinessDate || resolveSmartStartBusinessDate(state);
   state.activeBusinessDate = resolvedBusinessDate;
 };
 

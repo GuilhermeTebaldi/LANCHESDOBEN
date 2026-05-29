@@ -608,6 +608,7 @@ const LEGACY_COST_RATIO_MAX = 3.5;
 const LEGACY_COST_RATIO_TARGET = 0.45;
 const LEGACY_COST_DIVISORS = [1, 10, 100, 1000] as const;
 const BUSINESS_DAY_KEY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+const BUSINESS_DAY_REOPEN_WINDOW_MS = 90 * 60 * 1000;
 
 const pad2 = (value: number): string => value.toString().padStart(2, '0');
 const toDayKey = (date: Date): string =>
@@ -900,6 +901,44 @@ const normalizeDailyHistoryList = (
   history
     .map((entry) => normalizeDailyHistoryEntry(entry))
     .filter((entry): entry is DailySalesHistoryEntry => entry !== null);
+
+const resolveHistoryEntryBusinessDayKey = (entry: DailySalesHistoryEntry): string => {
+  const normalized = normalizeBusinessDayKey(entry.businessDate);
+  if (normalized) return normalized;
+  return toDayKey(toValidDate(entry.closedAt) || new Date());
+};
+
+const resolveSmartStartBusinessDayKey = (
+  history: DailySalesHistoryEntry[],
+  now: Date = new Date()
+): string => {
+  const nowMs = now.getTime();
+  if (!Number.isFinite(nowMs)) return toDayKey(new Date());
+  const nowDayKey = toDayKey(now);
+  const normalizedHistory = normalizeDailyHistoryList(history);
+  if (normalizedHistory.length === 0) return nowDayKey;
+
+  let latestEntry: DailySalesHistoryEntry | null = null;
+  let latestClosedAtMs = Number.NEGATIVE_INFINITY;
+
+  normalizedHistory.forEach((entry) => {
+    const closedAt = toValidDate(entry.closedAt);
+    if (!closedAt) return;
+    const closedAtMs = closedAt.getTime();
+    if (!Number.isFinite(closedAtMs)) return;
+    if (closedAtMs > latestClosedAtMs) {
+      latestClosedAtMs = closedAtMs;
+      latestEntry = entry;
+    }
+  });
+
+  if (!latestEntry || !Number.isFinite(latestClosedAtMs)) return nowDayKey;
+  const reopenGapMs = nowMs - latestClosedAtMs;
+  if (reopenGapMs < 0 || reopenGapMs > BUSINESS_DAY_REOPEN_WINDOW_MS) {
+    return nowDayKey;
+  }
+  return resolveHistoryEntryBusinessDayKey(latestEntry);
+};
 
 const writeLocalDailySalesHistory = (history: DailySalesHistoryEntry[]): void => {
   if (typeof window === 'undefined') return;
@@ -12620,7 +12659,7 @@ const App: React.FC = () => {
       return true;
     }
 
-    const nextBusinessDate = toDayKey(new Date());
+    const nextBusinessDate = resolveSmartStartBusinessDayKey(dailySalesHistory);
     const startResult = await executeSyncedCommand({
       type: 'START_BUSINESS_DAY',
       businessDate: nextBusinessDate,
@@ -12644,7 +12683,7 @@ const App: React.FC = () => {
       `Servidor antigo detectado. Dia iniciado localmente: ${formatBusinessDayLabel(nextBusinessDate)}.`
     );
     return true;
-  }, [activeBusinessDate, executeSyncedCommand, showNotification]);
+  }, [activeBusinessDate, dailySalesHistory, executeSyncedCommand, showNotification]);
 
   const handleClearActiveBusinessDay = useCallback(async (): Promise<boolean> => {
     const currentBusinessDate = normalizeBusinessDayKey(activeBusinessDate);

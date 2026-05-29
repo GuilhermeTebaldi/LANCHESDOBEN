@@ -5,6 +5,10 @@ import type { FrontAppState } from '../types/frontend.js';
 import { HttpError } from '../utils/http-error.js';
 import { applyStateCommand, commandTouchesArchiveState } from './state-command.service.js';
 
+const pad2 = (value: number): string => String(value).padStart(2, '0');
+const toDayKey = (date: Date): string =>
+  `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+
 const createBaseState = (): FrontAppState => ({
   ingredients: [
     { id: 'i-bread', name: 'Pao', unit: 'un', currentStock: 50, minStock: 10, cost: 1.5 },
@@ -1855,6 +1859,60 @@ test('start business day anchors close report businessDate and resets after clos
   assert.equal(closed.dailySalesHistory?.length, 1);
   assert.equal(closed.dailySalesHistory?.[0]?.businessDate, '2026-03-10');
   assert.equal(closed.activeBusinessDate, null);
+});
+
+test('start business day reuses previous businessDate when reopening within 90 minutes', () => {
+  const closedAt = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+  const state: FrontAppState = {
+    ...createBaseState(),
+    dailySalesHistory: [
+      {
+        id: 'day-reopen-window',
+        closedAt,
+        businessDate: '2026-03-10',
+        openingCash: 0,
+        totalRevenue: 0,
+        totalPurchases: 0,
+        totalProfit: 0,
+        saleCount: 0,
+        cashExpenses: 0,
+        cashExpenseDetails: [],
+      },
+    ],
+  };
+
+  const started = applyStateCommand(state, {
+    type: 'START_BUSINESS_DAY',
+  });
+
+  assert.equal(started.activeBusinessDate, '2026-03-10');
+});
+
+test('start business day opens calendar day when last close is older than 90 minutes', () => {
+  const closedAt = new Date(Date.now() - 3 * 60 * 60 * 1000).toISOString();
+  const state: FrontAppState = {
+    ...createBaseState(),
+    dailySalesHistory: [
+      {
+        id: 'day-reopen-expired',
+        closedAt,
+        businessDate: '2026-03-10',
+        openingCash: 0,
+        totalRevenue: 0,
+        totalPurchases: 0,
+        totalProfit: 0,
+        saleCount: 0,
+        cashExpenses: 0,
+        cashExpenseDetails: [],
+      },
+    ],
+  };
+
+  const started = applyStateCommand(state, {
+    type: 'START_BUSINESS_DAY',
+  });
+
+  assert.equal(started.activeBusinessDate, toDayKey(new Date()));
 });
 
 test('clear active business day removes only the start-day marker', () => {
