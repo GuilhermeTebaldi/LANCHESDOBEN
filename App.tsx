@@ -3241,6 +3241,7 @@ const App: React.FC = () => {
     DEFAULT_APP_STATE.activeBusinessDate
   );
   const [isStartingBusinessDay, setIsStartingBusinessDay] = useState(false);
+  const [isClearingBusinessDay, setIsClearingBusinessDay] = useState(false);
   const [pendingDraftAddsByDraft, setPendingDraftAddsByDraft] =
     useState<PendingDraftAddsByDraftId>({});
   const [syncingPaidDraftIds, setSyncingPaidDraftIds] = useState<string[]>([]);
@@ -12696,33 +12697,42 @@ const App: React.FC = () => {
   }, [activeBusinessDate, dailySalesHistory, executeSyncedCommand, isStartingBusinessDay, showNotification]);
 
   const handleClearActiveBusinessDay = useCallback(async (): Promise<boolean> => {
+    if (isClearingBusinessDay) {
+      return false;
+    }
+
     const currentBusinessDate = normalizeBusinessDayKey(activeBusinessDate);
     if (!currentBusinessDate) {
       showNotification('Nenhum início de dia ativo para excluir.');
       return true;
     }
 
-    const clearResult = await executeSyncedCommand({
-      type: 'CLEAR_ACTIVE_BUSINESS_DAY',
-    });
+    setIsClearingBusinessDay(true);
+    try {
+      const clearResult = await executeSyncedCommand({
+        type: 'CLEAR_ACTIVE_BUSINESS_DAY',
+      });
 
-    if (clearResult.ok) {
+      if (clearResult.ok) {
+        setActiveBusinessDate(null);
+        writeLocalActiveBusinessDay(null);
+        showNotification('Início do dia removido (modo teste).');
+        return true;
+      }
+
+      if (!isUnsupportedCashHistoryCommandError(clearResult.error)) {
+        showNotification(getStateSyncErrorMessage(clearResult.error));
+        return false;
+      }
+
       setActiveBusinessDate(null);
       writeLocalActiveBusinessDay(null);
-      showNotification('Início do dia removido (modo teste).');
+      showNotification('Servidor antigo detectado. Início do dia removido localmente.');
       return true;
+    } finally {
+      setIsClearingBusinessDay(false);
     }
-
-    if (!isUnsupportedCashHistoryCommandError(clearResult.error)) {
-      showNotification(getStateSyncErrorMessage(clearResult.error));
-      return false;
-    }
-
-    setActiveBusinessDate(null);
-    writeLocalActiveBusinessDay(null);
-    showNotification('Servidor antigo detectado. Início do dia removido localmente.');
-    return true;
-  }, [activeBusinessDate, executeSyncedCommand, showNotification]);
+  }, [activeBusinessDate, executeSyncedCommand, isClearingBusinessDay, showNotification]);
 
   const handleCloseDay = useCallback(async (): Promise<boolean> => {
     if (isCashHistoryLegacyMode) {
@@ -13554,11 +13564,20 @@ const App: React.FC = () => {
                     onClick={() => {
                       void handleClearActiveBusinessDay();
                     }}
-                    className="qb-btn-touch bg-red-600 text-white px-4 py-3 rounded-2xl font-black text-[10px] uppercase tracking-tighter shadow-sm border border-red-700 hover:bg-red-700 active:scale-95 transition-all whitespace-nowrap flex items-center gap-2"
+                    disabled={isClearingBusinessDay}
+                    className={`qb-btn-touch bg-red-600 text-white px-4 py-3 rounded-2xl font-black text-[10px] uppercase tracking-tighter shadow-sm border border-red-700 transition-all whitespace-nowrap flex items-center gap-2 ${
+                      isClearingBusinessDay
+                        ? 'opacity-70 cursor-not-allowed'
+                        : 'hover:bg-red-700 active:scale-95'
+                    }`}
                     title="Excluir início do dia (teste)"
                   >
-                    <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="M3 6h18"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/></svg>
-                    Excluir Início (Teste)
+                    {isClearingBusinessDay ? (
+                      <div className="w-3.5 h-3.5 rounded-full border-2 border-white/70 border-t-white animate-spin" />
+                    ) : (
+                      <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="M3 6h18"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/></svg>
+                    )}
+                    {isClearingBusinessDay ? 'Cancelando...' : 'Excluir Início (Teste)'}
                   </button>
                 )}
 
@@ -13576,6 +13595,16 @@ const App: React.FC = () => {
             </div>
 
             <div className="relative">
+              {isClearingBusinessDay && (
+                <div className="fixed inset-0 z-[145] flex items-center justify-center p-4 bg-white/35 backdrop-blur-[1px]">
+                  <div className="pointer-events-none bg-white/95 border border-red-200 rounded-[2rem] px-8 py-8 shadow-2xl flex flex-col items-center gap-4 min-w-[250px]">
+                    <div className="w-14 h-14 rounded-full border-[5px] border-red-200 border-t-red-600 animate-spin" />
+                    <p className="text-xs sm:text-sm font-black uppercase tracking-[0.14em] text-red-700 text-center">
+                      Cancelando Início...
+                    </p>
+                  </div>
+                </div>
+              )}
               {!isBusinessDayStarted && (
                 <div className="qb-start-day-overlay fixed inset-0 z-[140] flex items-center justify-center pointer-events-none p-4">
                   {isStartingBusinessDay ? (

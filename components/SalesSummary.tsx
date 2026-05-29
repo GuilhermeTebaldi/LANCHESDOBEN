@@ -611,6 +611,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
   const [cashPrintSettingsOpen, setCashPrintSettingsOpen] = useState(false);
   const [cashPrintPresetId, setCashPrintPresetId] = useState<string>(() => readCashPrintPresetId());
   const [activeTab, setActiveTab] = useState<SummaryTab>('REPORT');
+  const [isStartingDay, setIsStartingDay] = useState(false);
   const [cashInput, setCashInput] = useState(cashRegisterAmount.toFixed(2));
   const [cashPurchaseType, setCashPurchaseType] = useState<CashPurchaseType>('INGREDIENT');
   const [cashPurchaseIngredientId, setCashPurchaseIngredientId] = useState('');
@@ -1469,8 +1470,15 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
 
   const handleStartDay = useCallback(async () => {
     if (!onStartBusinessDay) return;
-    await onStartBusinessDay();
-  }, [onStartBusinessDay]);
+    if (isStartingDay) return;
+
+    setIsStartingDay(true);
+    try {
+      await onStartBusinessDay();
+    } finally {
+      setIsStartingDay(false);
+    }
+  }, [isStartingDay, onStartBusinessDay]);
 
   const handleRestart = async () => {
     if (isClosing) return;
@@ -1544,7 +1552,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
             onClick={() => {
               void handleStartDay();
             }}
-            disabled={!onStartBusinessDay || Boolean(activeBusinessDayLabel) || isClosing}
+            disabled={!onStartBusinessDay || Boolean(activeBusinessDayLabel) || isClosing || isStartingDay}
             className={`qb-btn-touch px-5 py-3 rounded-2xl font-black text-xs uppercase tracking-widest transition-all active:scale-95 ${
               activeBusinessDayLabel
                 ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
@@ -1556,7 +1564,14 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
                 : 'Iniciar dia de trabalho'
             }
           >
-            {activeBusinessDayLabel ? `Dia em andamento: ${activeBusinessDayLabel}` : 'Iniciar Dia'}
+            {isStartingDay && (
+              <span className="inline-block w-3.5 h-3.5 rounded-full border-2 border-white/70 border-t-white animate-spin mr-2 align-middle" />
+            )}
+            {isStartingDay
+              ? 'INICIANDO...'
+              : activeBusinessDayLabel
+                ? `Dia em andamento: ${activeBusinessDayLabel}`
+                : 'Iniciar Dia'}
           </button>
           <button
             onClick={() => setHistoryVisible((current) => !current)}
