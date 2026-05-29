@@ -3240,6 +3240,7 @@ const App: React.FC = () => {
   const [activeBusinessDate, setActiveBusinessDate] = useState<string | null>(
     DEFAULT_APP_STATE.activeBusinessDate
   );
+  const [isStartingBusinessDay, setIsStartingBusinessDay] = useState(false);
   const [pendingDraftAddsByDraft, setPendingDraftAddsByDraft] =
     useState<PendingDraftAddsByDraftId>({});
   const [syncingPaidDraftIds, setSyncingPaidDraftIds] = useState<string[]>([]);
@@ -12651,6 +12652,10 @@ const App: React.FC = () => {
   );
 
   const handleStartBusinessDay = useCallback(async (): Promise<boolean> => {
+    if (isStartingBusinessDay) {
+      return false;
+    }
+
     const currentBusinessDate = normalizeBusinessDayKey(activeBusinessDate);
     if (currentBusinessDate) {
       showNotification(
@@ -12659,31 +12664,36 @@ const App: React.FC = () => {
       return true;
     }
 
-    const nextBusinessDate = resolveSmartStartBusinessDayKey(dailySalesHistory);
-    const startResult = await executeSyncedCommand({
-      type: 'START_BUSINESS_DAY',
-      businessDate: nextBusinessDate,
-    });
+    setIsStartingBusinessDay(true);
+    try {
+      const nextBusinessDate = resolveSmartStartBusinessDayKey(dailySalesHistory);
+      const startResult = await executeSyncedCommand({
+        type: 'START_BUSINESS_DAY',
+        businessDate: nextBusinessDate,
+      });
 
-    if (startResult.ok) {
+      if (startResult.ok) {
+        setActiveBusinessDate(nextBusinessDate);
+        writeLocalActiveBusinessDay(nextBusinessDate);
+        showNotification(`Dia iniciado: ${formatBusinessDayLabel(nextBusinessDate)}.`);
+        return true;
+      }
+
+      if (!isUnsupportedCashHistoryCommandError(startResult.error)) {
+        showNotification(getStateSyncErrorMessage(startResult.error));
+        return false;
+      }
+
       setActiveBusinessDate(nextBusinessDate);
       writeLocalActiveBusinessDay(nextBusinessDate);
-      showNotification(`Dia iniciado: ${formatBusinessDayLabel(nextBusinessDate)}.`);
+      showNotification(
+        `Servidor antigo detectado. Dia iniciado localmente: ${formatBusinessDayLabel(nextBusinessDate)}.`
+      );
       return true;
+    } finally {
+      setIsStartingBusinessDay(false);
     }
-
-    if (!isUnsupportedCashHistoryCommandError(startResult.error)) {
-      showNotification(getStateSyncErrorMessage(startResult.error));
-      return false;
-    }
-
-    setActiveBusinessDate(nextBusinessDate);
-    writeLocalActiveBusinessDay(nextBusinessDate);
-    showNotification(
-      `Servidor antigo detectado. Dia iniciado localmente: ${formatBusinessDayLabel(nextBusinessDate)}.`
-    );
-    return true;
-  }, [activeBusinessDate, dailySalesHistory, executeSyncedCommand, showNotification]);
+  }, [activeBusinessDate, dailySalesHistory, executeSyncedCommand, isStartingBusinessDay, showNotification]);
 
   const handleClearActiveBusinessDay = useCallback(async (): Promise<boolean> => {
     const currentBusinessDate = normalizeBusinessDayKey(activeBusinessDate);
@@ -13568,16 +13578,25 @@ const App: React.FC = () => {
             <div className="relative">
               {!isBusinessDayStarted && (
                 <div className="qb-start-day-overlay fixed inset-0 z-[140] flex items-center justify-center pointer-events-none p-4">
-                  <button
-                    onClick={() => {
-                      void handleStartBusinessDay();
-                    }}
-                    className="qb-start-day-floating qb-btn-touch pointer-events-auto bg-emerald-600 text-white border border-emerald-700 rounded-[2rem] px-7 py-5 sm:px-10 sm:py-6 font-black text-sm sm:text-lg uppercase tracking-[0.18em] shadow-2xl hover:bg-emerald-700 active:scale-95 transition-all flex items-center gap-3 qb-iniciar-dia-forward"
-                    title="Iniciar dia de trabalho"
-                  >
-                    <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
-                    Iniciar Dia
-                  </button>
+                  {isStartingBusinessDay ? (
+                    <div className="qb-start-day-loading pointer-events-none bg-white/95 border border-emerald-200 rounded-[2rem] px-8 py-8 shadow-2xl flex flex-col items-center gap-4 min-w-[250px]">
+                      <div className="w-14 h-14 rounded-full border-[5px] border-emerald-200 border-t-emerald-600 animate-spin" />
+                      <p className="text-xs sm:text-sm font-black uppercase tracking-[0.14em] text-emerald-700 text-center">
+                        Iniciando Dia...
+                      </p>
+                    </div>
+                  ) : (
+                    <button
+                      onClick={() => {
+                        void handleStartBusinessDay();
+                      }}
+                      className="qb-start-day-floating qb-btn-touch pointer-events-auto bg-emerald-600 text-white border border-emerald-700 rounded-[2rem] px-7 py-5 sm:px-10 sm:py-6 font-black text-sm sm:text-lg uppercase tracking-[0.18em] shadow-2xl hover:bg-emerald-700 active:scale-95 transition-all flex items-center gap-3 qb-iniciar-dia-forward"
+                      title="Iniciar dia de trabalho"
+                    >
+                      <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="M12 5v14"/><path d="M5 12h14"/></svg>
+                      Iniciar Dia
+                    </button>
+                  )}
                 </div>
               )}
               <div className={`qb-product-grid grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4 sm:gap-6 ${!isBusinessDayStarted ? 'opacity-75' : ''}`}>
