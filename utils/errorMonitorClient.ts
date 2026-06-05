@@ -8,7 +8,7 @@ const MONITOR_INSTALL_KEY = '__xburger_error_monitor_installed__';
 const OPERATIONAL_EVENT_SOURCE_PREFIX = 'sistema:ops:event';
 const OPERATIONAL_EVENTS_ENDPOINT_PATH = '/api/v1/errors/ops/events';
 
-type ErrorMonitorLevel = 'error' | 'warn' | 'info';
+type ErrorMonitorLevel = 'error' | 'warn' | 'info' | 'debug';
 
 interface ErrorMonitorEventPayload {
   source: string;
@@ -107,8 +107,20 @@ const shouldSkipRepeatedEvent = (payload: ErrorMonitorEventPayload): boolean => 
   return !!previousTimestamp && now - previousTimestamp < RECENT_EVENT_WINDOW_MS;
 };
 
+const shouldSkipProductionTelemetry = (payload: ErrorMonitorEventPayload): boolean => {
+  if (!import.meta.env.PROD) return false;
+  const level = payload.level || 'error';
+  const message = payload.message || '';
+  if (level === 'info' || level === 'debug') return true;
+  if (message.includes('Snapshot operacional')) return true;
+  if (message.includes('Fila atualizada')) return true;
+  if (level !== 'error' && message.includes('Fail-safe de backend liberado')) return true;
+  return false;
+};
+
 const postEvent = (payload: ErrorMonitorEventPayload): void => {
   if (typeof window === 'undefined') return;
+  if (shouldSkipProductionTelemetry(payload)) return;
   if (shouldSkipRepeatedEvent(payload)) return;
 
   const url = resolveErrorMonitorEndpoint();

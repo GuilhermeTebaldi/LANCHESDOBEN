@@ -34,7 +34,7 @@ const operationalEventSchema = z.object({
 
 const errorMonitorEventSchema = z.object({
   source: z.string().trim().min(1).max(120).default('frontend'),
-  level: z.enum(['error', 'warn', 'info']).default('error'),
+  level: z.enum(['error', 'warn', 'info', 'debug']).default('error'),
   message: z.string().trim().min(1).max(4000),
   statusCode: z.coerce.number().int().min(100).max(599).optional(),
   requestId: z.string().trim().max(120).optional(),
@@ -61,6 +61,18 @@ const normalizeString = (value: unknown, maxLength: number): string | null => {
     return normalized.slice(0, maxLength);
   }
   return normalized;
+};
+
+const shouldIgnoreFrontendErrorReport = (
+  payload: z.infer<typeof errorMonitorEventSchema>
+): boolean => {
+  if (payload.level === 'info' || payload.level === 'debug') return true;
+  if (payload.message.includes('Snapshot operacional')) return true;
+  if (payload.message.includes('Fila atualizada')) return true;
+  if (payload.level !== 'error' && payload.message.includes('Fail-safe de backend liberado')) {
+    return true;
+  }
+  return false;
 };
 
 const parseOperationalEventFromMetadata = (
@@ -115,6 +127,13 @@ const isReportRateLimited = (ipAddress: string): boolean => {
 
 export const errorMonitorController = {
   report: async (req: Request, res: Response) => {
+    const payload = errorMonitorEventSchema.parse(req.body);
+
+    if (shouldIgnoreFrontendErrorReport(payload)) {
+      res.status(202).json({ ok: true, skipped: true });
+      return;
+    }
+
     const requestIp =
       req.context?.ipAddress?.trim() ||
       req.ip?.trim() ||
@@ -123,8 +142,6 @@ export const errorMonitorController = {
     if (isReportRateLimited(requestIp)) {
       throw new HttpError(429, 'Muitos eventos de erro enviados. Aguarde alguns segundos.');
     }
-
-    const payload = errorMonitorEventSchema.parse(req.body);
 
     await new AuditService(prisma).log(
       {
