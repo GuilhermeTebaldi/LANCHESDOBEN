@@ -540,22 +540,6 @@ const clearLegacyStorage = () => {
 
 export const loadAppState = async (defaults: AppState = DEFAULT_APP_STATE): Promise<AppState> => {
   const remoteState = await tryLoadRemoteStateWithRetry(defaults);
-  const localMirror = loadLocalMirrorState(defaults);
-
-  if (remoteState && localMirror) {
-    const remoteVersionMs = remoteStateVersion ? Date.parse(remoteStateVersion) : Number.NaN;
-    const shouldPreferLocal =
-      Number.isFinite(localMirror.savedAtMs) &&
-      Number.isFinite(remoteVersionMs) &&
-      localMirror.savedAtMs > remoteVersionMs;
-
-    if (shouldPreferLocal) {
-      hasRemoteHydratedState = true;
-      isDefaultFallbackBootstrap = false;
-      saveLocalMirrorState(localMirror.state);
-      return localMirror.state;
-    }
-  }
 
   if (remoteState) {
     hasRemoteHydratedState = true;
@@ -563,6 +547,8 @@ export const loadAppState = async (defaults: AppState = DEFAULT_APP_STATE): Prom
     saveLocalMirrorState(remoteState);
     return remoteState;
   }
+
+  const localMirror = loadLocalMirrorState(defaults);
 
   if (localMirror) {
     hasRemoteHydratedState = false;

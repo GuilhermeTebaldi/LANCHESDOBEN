@@ -49,6 +49,7 @@ interface AdminDashboardProps {
   onClearOnlyStock: () => void;
   onDeleteArchiveDate: (date: string) => void;
   onDeleteArchiveMonth: (month: string) => void;
+  onDeleteArchiveSale: (saleId: string, saleLabel: string) => void;
   cashRegisterAmount: number;
   dailySalesHistory: DailySalesHistoryEntry[];
   activeBusinessDate?: string | null;
@@ -523,6 +524,7 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onClearOnlyStock,
   onDeleteArchiveDate,
   onDeleteArchiveMonth,
+  onDeleteArchiveSale,
   cashRegisterAmount,
   dailySalesHistory: rawDailySalesHistory,
   activeBusinessDate,
@@ -532,7 +534,11 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
   >('geral');
   const [selectedArchiveDay, setSelectedArchiveDay] = useState<string | null>(null);
   const [selectedArchiveMonth, setSelectedArchiveMonth] = useState<string | null>(null);
-  const [pendingDelete, setPendingDelete] = useState<{ type: 'month' | 'day'; label: string } | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<
+    | { type: 'month' | 'day'; label: string }
+    | { type: 'sale'; saleId: string; label: string; dayLabel: string }
+    | null
+  >(null);
   const [configPass, setConfigPass] = useState('');
   const [showConfigPass, setShowConfigPass] = useState(false);
   const [showDangerZone, setShowDangerZone] = useState(false);
@@ -1312,6 +1318,20 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
     setPendingDelete({ type: 'day', label: day });
   };
 
+  const handleDeleteSale = (e: React.MouseEvent, sale: Sale, day: string) => {
+    e.stopPropagation();
+    const saleTime = toDate(sale.timestamp).toLocaleTimeString('pt-BR', {
+      hour: '2-digit',
+      minute: '2-digit',
+    });
+    setPendingDelete({
+      type: 'sale',
+      saleId: sale.id,
+      label: `${sale.productName || 'Produto'} - ${saleTime}`,
+      dayLabel: formatBusinessDayLabel(day),
+    });
+  };
+
   const handleConfirmDelete = () => {
     if (!pendingDelete) return;
     if (pendingDelete.type === 'month') {
@@ -1320,6 +1340,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
         setSelectedArchiveMonth(null);
         setSelectedArchiveDay(null);
       }
+    } else if (pendingDelete.type === 'sale') {
+      onDeleteArchiveSale(pendingDelete.saleId, pendingDelete.label);
     } else {
       onDeleteArchiveDate(pendingDelete.label);
       setSelectedArchiveDay(null);
@@ -2312,15 +2334,22 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 </div>
                 <div className="space-y-2 max-h-[300px] overflow-y-auto pr-2">
                    {archives[selectedArchiveMonth!][selectedArchiveDay].map((s, i) => (
-                     <div key={s.id + i} className="flex justify-between p-3 border-b border-slate-50 text-xs">
-                        <span className="font-bold text-slate-500">{s.timestamp.toLocaleTimeString()}</span>
-                        <span className="font-black text-slate-800 uppercase">
-                          {s.productName}
-                          <span className="ml-2 text-[9px] text-slate-500">
+                     <div key={s.id + i} className="grid grid-cols-[auto_minmax(0,1fr)_auto_auto] items-center gap-3 p-3 border-b border-slate-50 text-xs">
+                        <span className="font-bold text-slate-500">{toDate(s.timestamp).toLocaleTimeString('pt-BR')}</span>
+                        <span className="min-w-0 font-black text-slate-800 uppercase">
+                          <span className="block truncate">{s.productName}</span>
+                          <span className="text-[9px] text-slate-500">
                             {saleOriginLabels[s.saleOrigin || 'LOCAL']}
                           </span>
                         </span>
                         <span className="font-black text-slate-900">R$ {s.total.toFixed(2)}</span>
+                        <button
+                          onClick={(e) => handleDeleteSale(e, s, selectedArchiveDay)}
+                          className="qb-btn-touch bg-red-50 text-red-600 px-3 py-2 rounded-xl font-black text-[9px] uppercase hover:bg-red-600 hover:text-white transition-all"
+                          title={`Excluir ${s.productName}`}
+                        >
+                          Excluir
+                        </button>
                      </div>
                    ))}
                 </div>
@@ -2341,6 +2370,8 @@ const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     <p className="text-lg font-black text-slate-900">
                       {pendingDelete.type === 'month'
                         ? `Excluir todos os arquivos de ${pendingDelete.label}?`
+                        : pendingDelete.type === 'sale'
+                        ? `Excluir somente ${pendingDelete.label} de ${pendingDelete.dayLabel}?`
                         : `Excluir permanentemente os registros de ${formatBusinessDayLabel(
                             pendingDelete.label
                           )}?`}

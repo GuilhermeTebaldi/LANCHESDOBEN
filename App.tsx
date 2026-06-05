@@ -13219,6 +13219,19 @@ const App: React.FC = () => {
     );
   };
 
+  const handleDeleteArchiveSale = (saleId: string, saleLabel: string) => {
+    const saleExists = globalSales.some((sale) => sale.id === saleId);
+    if (!saleExists) {
+      showNotification('Produto não encontrado no arquivo selecionado.');
+      return;
+    }
+
+    void runCommandWithSync(
+      { type: 'DELETE_ARCHIVE_SALES', saleIds: [saleId] },
+      `${saleLabel} excluído dos arquivos!`
+    );
+  };
+
   const dailyTotal = useMemo(() => sales.reduce((acc, sale) => acc + sale.total, 0), [sales]);
   const isDailyTotalSyncing = pendingPaidSyncJobs > 0 || syncingPaidDraftIds.length > 0;
   const todaySaleDayKey = useMemo(
@@ -13238,12 +13251,13 @@ const App: React.FC = () => {
     [activeBusinessDate]
   );
   const recentSalesForUndo = useMemo(
-    () =>
-      sales
-        .filter((sale) => getSaleDayKey(sale.timestamp) === todaySaleDayKey)
-        .slice()
-        .reverse(),
-    [sales, todaySaleDayKey]
+    () => {
+      const sessionSales = isBusinessDayStarted
+        ? sales
+        : sales.filter((sale) => getSaleDayKey(sale.timestamp) === todaySaleDayKey);
+      return sessionSales.slice().reverse();
+    },
+    [isBusinessDayStarted, sales, todaySaleDayKey]
   );
   const recentUndoGroups = useMemo<UndoSaleGroup[]>(() => {
     const groupOrder: UndoSaleGroup[] = [];
@@ -14080,6 +14094,7 @@ const App: React.FC = () => {
               onClearOnlyStock={handleClearOnlyStock}
               onDeleteArchiveDate={handleDeleteArchiveByDate}
               onDeleteArchiveMonth={handleDeleteArchiveByMonth}
+              onDeleteArchiveSale={handleDeleteArchiveSale}
               cashRegisterAmount={cashRegisterAmount}
               dailySalesHistory={dailySalesHistory}
               activeBusinessDate={activeBusinessDate}
@@ -14805,7 +14820,7 @@ const App: React.FC = () => {
                   {`Histórico de Vendas ${todaySaleDayLabel}`}
                 </h3>
                 <p className="text-[10px] uppercase tracking-widest text-slate-300">
-                  Apenas vendas do dia atual (até Fechar Dia / Reiniciar)
+                  Vendas do dia iniciado (até Fechar Dia / Reiniciar)
                 </p>
                 <p className="text-[10px] uppercase tracking-widest text-slate-300">
                   Modelo do cupom: {selectedReceiptPrintPreset.label}
