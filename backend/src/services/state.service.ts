@@ -231,6 +231,18 @@ export interface AppStateSnapshot {
   };
 }
 
+export interface SaleDraftLightStatus {
+  draftId: string;
+  exists: boolean;
+  status: string | null;
+  lifecycle: string | null;
+  itemsCount: number | null;
+  updatedAt: string | null;
+  version: string;
+  paid: boolean;
+  terminal: boolean;
+}
+
 export interface DailyBackupResult {
   backupDay: string;
   created: boolean;
@@ -283,6 +295,67 @@ export class StateService {
     const rebuilt = await this.buildStateFromDomain();
     const persisted = await this.persistSnapshot(rebuilt, 'APP_STATE_BOOTSTRAPPED');
     return persisted.version;
+  }
+
+  async getSaleDraftLightStatus(draftId: string): Promise<SaleDraftLightStatus> {
+    const normalizedDraftId = draftId.trim();
+    if (!normalizedDraftId) {
+      throw new HttpError(400, 'draftId inválido.');
+    }
+
+    const rows = await prisma.$queryRaw<
+      Array<{ draft_json: Prisma.JsonValue | null; updated_at: Date }>
+    >(
+      Prisma.sql`
+        SELECT
+          (
+            SELECT draft_entry
+            FROM jsonb_array_elements(COALESCE(state_json->'saleDrafts', '[]'::jsonb)) AS draft_entry
+            WHERE draft_entry->>'id' = ${normalizedDraftId}
+            LIMIT 1
+          ) AS draft_json,
+          updated_at
+        FROM app_state
+        WHERE id = 1
+      `
+    );
+
+    const row = rows[0];
+    if (!row) {
+      await this.bootstrapAppStateTables();
+      const version = await this.getAppStateVersion();
+      return {
+        draftId: normalizedDraftId,
+        exists: false,
+        status: null,
+        lifecycle: null,
+        itemsCount: null,
+        updatedAt: null,
+        version,
+        paid: false,
+        terminal: false,
+      };
+    }
+
+    const version = toVersionTag(row.updated_at);
+    const draft =
+      row.draft_json && typeof row.draft_json === 'object' && !Array.isArray(row.draft_json)
+        ? (row.draft_json as Record<string, unknown>)
+        : null;
+    const status = typeof draft?.status === 'string' ? draft.status : null;
+    const items = Array.isArray(draft?.items) ? draft.items : null;
+
+    return {
+      draftId: normalizedDraftId,
+      exists: Boolean(draft),
+      status,
+      lifecycle: null,
+      itemsCount: items ? items.length : draft ? 0 : null,
+      updatedAt: typeof draft?.updatedAt === 'string' ? draft.updatedAt : null,
+      version,
+      paid: status === 'PAID',
+      terminal: status === 'PAID' || status === 'CANCELLED',
+    };
   }
 
   async saveAppState(

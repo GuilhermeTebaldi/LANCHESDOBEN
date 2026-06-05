@@ -37,6 +37,7 @@ import {
 import { DEFAULT_APP_STATE, loadAppState, type AppState } from './data/appStorage';
 import {
   enqueueStateCommandAsync,
+  fetchSaleDraftLightStatus,
   fetchStateSnapshot,
   getStateCommandAsyncJob,
   runStateCommand,
@@ -45,6 +46,7 @@ import {
   type StateCommandAsyncJob,
   type StateCommandAsyncJobStatus,
   type StateCommand,
+  type SaleDraftLightStatus,
 } from './data/stateCommandClient';
 import { buildReceiptPrintRoutePath } from './utils/printRoutes';
 import { clampReceiptPaperWidthMm } from './utils/receiptPaper';
@@ -342,6 +344,10 @@ interface PaymentFlowTelemetryEntry {
   stateRefreshRequestMs: number;
   stateRefreshApplyMs: number;
   snapshotBytesEstimated: number;
+  srLightRequestMs: number;
+  srLightUsed: number;
+  srLightFallback: number;
+  srLightReason: string;
   confirmCommandInvokeMs: number;
   confirmDraftLockWaitMs: number;
   confirmGlobalQueueWaitMs: number;
@@ -405,6 +411,10 @@ interface PaymentFlowTelemetryRecord {
   stateRefreshRequestMs: number | null;
   stateRefreshApplyMs: number | null;
   snapshotBytesEstimated: number | null;
+  srLightRequestMs: number | null;
+  srLightUsed: number | null;
+  srLightFallback: number | null;
+  srLightReason: string | null;
   confirmCommandInvokeMs: number | null;
   confirmDraftLockWaitMs: number | null;
   confirmGlobalQueueWaitMs: number | null;
@@ -2364,6 +2374,13 @@ const normalizePaymentFlowTelemetryRecord = (
   const stateRefreshRequestRaw = Number(source.stateRefreshRequestMs);
   const stateRefreshApplyRaw = Number(source.stateRefreshApplyMs);
   const snapshotBytesEstimatedRaw = Number(source.snapshotBytesEstimated);
+  const srLightRequestRaw = Number(source.srLightRequestMs);
+  const srLightUsedRaw = Number(source.srLightUsed);
+  const srLightFallbackRaw = Number(source.srLightFallback);
+  const srLightReason =
+    typeof source.srLightReason === 'string' && source.srLightReason.trim()
+      ? source.srLightReason.trim().slice(0, 80)
+      : null;
   const confirmCommandInvokeRaw = Number(source.confirmCommandInvokeMs);
   const confirmDraftLockWaitRaw = Number(source.confirmDraftLockWaitMs);
   const confirmGlobalQueueWaitRaw = Number(source.confirmGlobalQueueWaitMs);
@@ -2521,6 +2538,17 @@ const normalizePaymentFlowTelemetryRecord = (
       Number.isFinite(snapshotBytesEstimatedRaw) && snapshotBytesEstimatedRaw >= 0
         ? Math.floor(snapshotBytesEstimatedRaw)
         : null,
+    srLightRequestMs:
+      Number.isFinite(srLightRequestRaw) && srLightRequestRaw >= 0
+        ? Math.floor(srLightRequestRaw)
+        : null,
+    srLightUsed:
+      Number.isFinite(srLightUsedRaw) && srLightUsedRaw >= 0 ? Math.floor(srLightUsedRaw) : null,
+    srLightFallback:
+      Number.isFinite(srLightFallbackRaw) && srLightFallbackRaw >= 0
+        ? Math.floor(srLightFallbackRaw)
+        : null,
+    srLightReason,
     confirmCommandInvokeMs:
       Number.isFinite(confirmCommandInvokeRaw) && confirmCommandInvokeRaw >= 0
         ? Math.floor(confirmCommandInvokeRaw)
@@ -4238,6 +4266,10 @@ const App: React.FC = () => {
         stateRefreshRequestMs: 0,
         stateRefreshApplyMs: 0,
         snapshotBytesEstimated: 0,
+        srLightRequestMs: 0,
+        srLightUsed: 0,
+        srLightFallback: 0,
+        srLightReason: '',
         confirmCommandInvokeMs: 0,
         confirmDraftLockWaitMs: 0,
         confirmGlobalQueueWaitMs: 0,
@@ -4338,6 +4370,9 @@ const App: React.FC = () => {
         | 'stateRefreshRequestMs'
         | 'stateRefreshApplyMs'
         | 'snapshotBytesEstimated'
+        | 'srLightRequestMs'
+        | 'srLightUsed'
+        | 'srLightFallback'
         | 'confirmCommandInvokeMs'
         | 'confirmDraftLockWaitMs'
         | 'confirmGlobalQueueWaitMs'
@@ -4368,6 +4403,25 @@ const App: React.FC = () => {
       paymentFlowTelemetryByDraftRef.current.set(normalizedDraftId, {
         ...current,
         [stage]: Math.max(0, current[stage]) + Math.max(0, Math.round(durationMs)),
+      });
+    },
+    []
+  );
+
+  const markPaymentFlowTelemetryLightRefreshReason = useCallback(
+    (draftId: string, jobId: string, reason: string): void => {
+      const normalizedDraftId = draftId.trim();
+      const normalizedJobId = jobId.trim();
+      const normalizedReason = reason.trim().slice(0, 80);
+      if (!normalizedDraftId || !normalizedJobId || !normalizedReason) return;
+
+      const current = paymentFlowTelemetryByDraftRef.current.get(normalizedDraftId);
+      if (!current) return;
+      if (current.jobId !== normalizedJobId) return;
+
+      paymentFlowTelemetryByDraftRef.current.set(normalizedDraftId, {
+        ...current,
+        srLightReason: normalizedReason,
       });
     },
     []
@@ -4453,6 +4507,9 @@ const App: React.FC = () => {
       const stateRefreshRequestMs = Math.max(0, Math.round(current.stateRefreshRequestMs));
       const stateRefreshApplyMs = Math.max(0, Math.round(current.stateRefreshApplyMs));
       const snapshotBytesEstimated = Math.max(0, Math.round(current.snapshotBytesEstimated));
+      const srLightRequestMs = Math.max(0, Math.round(current.srLightRequestMs));
+      const srLightUsed = Math.max(0, Math.round(current.srLightUsed));
+      const srLightFallback = Math.max(0, Math.round(current.srLightFallback));
       const flushMeasuredMs =
         flushLockWaitMs +
         flushPendingReadMs +
@@ -4554,6 +4611,10 @@ const App: React.FC = () => {
         stateRefreshRequestMs,
         stateRefreshApplyMs,
         snapshotBytesEstimated,
+        srLightRequestMs,
+        srLightUsed,
+        srLightFallback,
+        srLightReason: current.srLightReason || null,
         confirmCommandInvokeMs,
         confirmDraftLockWaitMs,
         confirmGlobalQueueWaitMs,
@@ -4626,6 +4687,10 @@ const App: React.FC = () => {
         sr_request_ms: record.stateRefreshRequestMs,
         sr_apply_ms: record.stateRefreshApplyMs,
         snapshot_bytes_estimated: record.snapshotBytesEstimated,
+        sr_light_request_ms: record.srLightRequestMs,
+        sr_light_used: record.srLightUsed,
+        sr_light_fallback: record.srLightFallback,
+        sr_light_reason: record.srLightReason,
         confirm_command_invoke_ms: record.confirmCommandInvokeMs,
         confirm_draft_lock_wait_ms: record.confirmDraftLockWaitMs,
         confirm_global_queue_wait_ms: record.confirmGlobalQueueWaitMs,
@@ -4697,6 +4762,10 @@ const App: React.FC = () => {
           sr_request_ms: record.stateRefreshRequestMs,
           sr_apply_ms: record.stateRefreshApplyMs,
           snapshot_bytes_estimated: record.snapshotBytesEstimated,
+          sr_light_request_ms: record.srLightRequestMs,
+          sr_light_used: record.srLightUsed,
+          sr_light_fallback: record.srLightFallback,
+          sr_light_reason: record.srLightReason,
           confirm_command_invoke_ms: record.confirmCommandInvokeMs,
           confirm_draft_lock_wait_ms: record.confirmDraftLockWaitMs,
           confirm_global_queue_wait_ms: record.confirmGlobalQueueWaitMs,
@@ -6062,6 +6131,20 @@ const App: React.FC = () => {
           retryCount,
         },
         () => fetchStateSnapshot()
+      );
+    },
+    [runBackendExecution]
+  );
+
+  const fetchSaleDraftLightStatusControlled = useCallback(
+    async (draftId: string, retryCount = 0): Promise<SaleDraftLightStatus> => {
+      return runBackendExecution(
+        {
+          operationType: 'FETCH_SALE_DRAFT_LIGHT_STATUS',
+          draftId,
+          retryCount,
+        },
+        () => fetchSaleDraftLightStatus(draftId)
       );
     },
     [runBackendExecution]
@@ -9858,7 +9941,35 @@ const App: React.FC = () => {
         let currentServerDraft = saleDraftsRef.current.find(
           (draft) => draft.id === currentJob.draftId
         );
+        let currentServerDraftItemsCountOverride: number | null = null;
         let hasSuccessfulStateRefreshAfterFlush = false;
+        const applyLightDraftStatusForCurrentJob = (
+          status: SaleDraftLightStatus
+        ): { ok: true; reason: string } | { ok: false; reason: string } => {
+          if (status.draftId !== currentJob.draftId) {
+            return { ok: false, reason: 'draft_id_mismatch' };
+          }
+          if (!status.exists) {
+            return { ok: false, reason: 'draft_missing' };
+          }
+          if (!status.status || status.itemsCount === null) {
+            return { ok: false, reason: 'draft_ambiguous' };
+          }
+          if (!status.terminal && status.itemsCount <= 0) {
+            return { ok: false, reason: 'draft_empty_fallback' };
+          }
+
+          const previousDraft =
+            saleDraftsRef.current.find((entry) => entry.id === currentJob.draftId) ||
+            currentJob.snapshot.draft;
+          currentServerDraft = {
+            ...previousDraft,
+            status: status.status,
+            updatedAt: status.updatedAt || previousDraft.updatedAt,
+          };
+          currentServerDraftItemsCountOverride = status.itemsCount;
+          return { ok: true, reason: status.terminal ? 'terminal' : 'ready_with_items' };
+        };
         if (
           currentServerDraft &&
           (currentServerDraft.status === 'PAID' || currentServerDraft.status === 'CANCELLED')
@@ -10325,7 +10436,7 @@ const App: React.FC = () => {
                 return;
               }
             }
-            try {
+            const runFullSnapshotRefreshAfterFlush = async (): Promise<void> => {
               const stateRefreshStartedAt = performance.now();
               const refreshedStateAfterFlush = await fetchStateSnapshotControlled(currentJob.draftId);
               const stateRefreshRequestDurationMs = performance.now() - stateRefreshStartedAt;
@@ -10362,11 +10473,90 @@ const App: React.FC = () => {
                 Math.max(0, flushStateRefreshDurationMs - flushApplySnapshotDurationMs)
               );
               recordFlushPhaseDuration('flushApplySnapshotMs', flushApplySnapshotDurationMs);
-            } catch {
-              // best-effort refresh; fallback to local state below
+            };
+            try {
+              const lightRefreshStartedAt = performance.now();
+              const lightStatus = await fetchSaleDraftLightStatusControlled(currentJob.draftId);
+              const lightRequestDurationMs = performance.now() - lightRefreshStartedAt;
+              markPaymentFlowTelemetryStageDuration(
+                currentJob.draftId,
+                currentJob.id,
+                'srLightRequestMs',
+                lightRequestDurationMs
+              );
+              const lightDecision = applyLightDraftStatusForCurrentJob(lightStatus);
+              markPaymentFlowTelemetryLightRefreshReason(
+                currentJob.draftId,
+                currentJob.id,
+                lightDecision.reason
+              );
+              if (lightDecision.ok) {
+                markPaymentFlowTelemetryStageDuration(
+                  currentJob.draftId,
+                  currentJob.id,
+                  'srLightUsed',
+                  1
+                );
+                recordStateRefreshMs(lightRequestDurationMs);
+                recordStateRefreshPhaseDuration('stateRefreshAfterFlushMs', lightRequestDurationMs);
+                hasSuccessfulStateRefreshAfterFlush = true;
+                recordFlushPhaseDuration('flushStateRefreshMs', lightRequestDurationMs);
+              } else {
+                markPaymentFlowTelemetryStageDuration(
+                  currentJob.draftId,
+                  currentJob.id,
+                  'srLightFallback',
+                  1
+                );
+                await runFullSnapshotRefreshAfterFlush();
+              }
+            } catch (error) {
+              markPaymentFlowTelemetryStageDuration(
+                currentJob.draftId,
+                currentJob.id,
+                'srLightFallback',
+                1
+              );
+              const lightError = error as {
+                statusCode?: number;
+                message?: string;
+                endpoint?: string;
+              };
+              const lightErrorMessage =
+                typeof lightError.message === 'string' && lightError.message.trim()
+                  ? lightError.message.trim().replace(/\s+/g, '_').slice(0, 36)
+                  : 'unknown';
+              const lightErrorReason =
+                typeof lightError.statusCode === 'number'
+                  ? `light_http_${lightError.statusCode}_${lightErrorMessage}`
+                  : `light_error_${lightErrorMessage}`;
+              markPaymentFlowTelemetryLightRefreshReason(
+                currentJob.draftId,
+                currentJob.id,
+                lightErrorReason
+              );
+              if (
+                (import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV &&
+                typeof console !== 'undefined'
+              ) {
+                console.warn('[paid-sync] draft light status failed', {
+                  statusCode: lightError.statusCode ?? null,
+                  endpoint: lightError.endpoint ?? null,
+                  message: lightError.message ?? null,
+                });
+              }
+              try {
+                await runFullSnapshotRefreshAfterFlush();
+              } catch {
+                // best-effort refresh; fallback to local state below
+              }
             }
             const flushPostReturnStartedAt = performance.now();
-            currentServerDraft = saleDraftsRef.current.find((entry) => entry.id === currentJob.draftId);
+            if (currentServerDraftItemsCountOverride === null) {
+              currentServerDraft =
+                saleDraftsRef.current.find((entry) => entry.id === currentJob.draftId) ||
+                currentServerDraft;
+            }
             if (
               currentServerDraft &&
               (currentServerDraft.status === 'PAID' || currentServerDraft.status === 'CANCELLED')
@@ -10408,6 +10598,18 @@ const App: React.FC = () => {
             markPaymentFlowTelemetryStageDuration(
               currentJob.draftId,
               currentJob.id,
+              'flushTotalMs',
+              flushDurationMs
+            );
+            markPaymentFlowTelemetryStageDuration(
+              currentJob.draftId,
+              currentJob.id,
+              'flushRunMs',
+              Math.max(0, flushDurationMs - flushWaitLockTotalMs)
+            );
+            markPaymentFlowTelemetryStageDuration(
+              currentJob.draftId,
+              currentJob.id,
               'flushPendingDraftAddsMs',
               flushDurationMs
             );
@@ -10423,7 +10625,13 @@ const App: React.FC = () => {
         // Guard rail: never call FINALIZE while server draft is still empty.
         // If server is lagging/stale, force recovery path instead of producing hard 422 finalize noise.
         if (!currentServerDraft || currentServerDraft.status === 'DRAFT') {
-          if (!currentServerDraft || (currentServerDraft.items || []).length === 0) {
+          const currentServerDraftItemsCount =
+            currentServerDraftItemsCountOverride !== null
+              ? currentServerDraftItemsCountOverride
+              : Array.isArray(currentServerDraft?.items)
+                ? currentServerDraft.items.length
+                : 0;
+          if (!currentServerDraft || currentServerDraftItemsCount === 0) {
             const shouldRunPreFinalizeStateRefresh =
               !hasSuccessfulStateRefreshAfterFlush || !currentServerDraft;
             if (shouldRunPreFinalizeStateRefresh) {
@@ -10445,6 +10653,7 @@ const App: React.FC = () => {
               }
             }
             currentServerDraft = saleDraftsRef.current.find((entry) => entry.id === currentJob.draftId);
+            currentServerDraftItemsCountOverride = null;
           }
 
           if (
@@ -10470,9 +10679,12 @@ const App: React.FC = () => {
             return;
           }
 
-          const serverItemsCount = Array.isArray(currentServerDraft?.items)
-            ? currentServerDraft.items.length
-            : 0;
+          const serverItemsCount =
+            currentServerDraftItemsCountOverride !== null
+              ? currentServerDraftItemsCountOverride
+              : Array.isArray(currentServerDraft?.items)
+                ? currentServerDraft.items.length
+                : 0;
           if (serverItemsCount === 0) {
             await markJobAsFailed('O carrinho está vazio.', {
               message: 'O carrinho está vazio.',
@@ -10798,6 +11010,7 @@ const App: React.FC = () => {
     cleanupDraftOperationalArtifacts,
     enqueueFailedPaidSyncJob,
     enqueueRetryDispatchTask,
+    fetchSaleDraftLightStatusControlled,
     fetchStateSnapshotControlled,
     flushPendingDraftAdds,
     getBackendFailsafeRemainingMs,
@@ -10812,6 +11025,7 @@ const App: React.FC = () => {
     completePaymentFlowTelemetry,
     markPaymentFlowTelemetryProcessingStarted,
     markPaymentFlowTelemetryStageDuration,
+    markPaymentFlowTelemetryLightRefreshReason,
     markPaymentFlowTelemetryProgress,
     resolveDraftLifecycleStage,
     runCommandWithSync,
@@ -13457,6 +13671,11 @@ const App: React.FC = () => {
               )}
               {latestPaymentFlowTelemetry && (
                 <p className="truncate">
+                  sr_light_request_ms:{latestPaymentFlowTelemetry.srLightRequestMs ?? '-'} sr_light_used:{latestPaymentFlowTelemetry.srLightUsed ?? '-'} sr_light_fallback:{latestPaymentFlowTelemetry.srLightFallback ?? '-'} sr_light_reason:{latestPaymentFlowTelemetry.srLightReason ?? '-'}
+                </p>
+              )}
+              {latestPaymentFlowTelemetry && (
+                <p className="truncate">
                   c_cmd:{latestPaymentFlowTelemetry.confirmCommandInvokeMs ?? '-'} c_lock:{latestPaymentFlowTelemetry.confirmDraftLockWaitMs ?? '-'} c_gq:{latestPaymentFlowTelemetry.confirmGlobalQueueWaitMs ?? '-'} c_gqd:{latestPaymentFlowTelemetry.confirmGlobalQueueDepthAtEnqueue ?? '-'} c_sched:{latestPaymentFlowTelemetry.confirmSchedulerWaitMs ?? '-'} c_apply:{latestPaymentFlowTelemetry.confirmPostCommandApplyMs ?? '-'} c_ops:{latestPaymentFlowTelemetry.confirmOpsMs ?? '-'} c_fail:{latestPaymentFlowTelemetry.confirmFailureHandlingMs ?? '-'} c_oth:{latestPaymentFlowTelemetry.confirmOtherMs ?? '-'}
                 </p>
               )}
@@ -13575,7 +13794,7 @@ const App: React.FC = () => {
                   <p key={entry.jobId} className="truncate font-mono text-[9px] text-slate-200">
                     {(() => {
                       const breakdown = getPaymentFlowProcessingBreakdown(entry);
-                      return `${entry.draftId.slice(-8).toUpperCase()} local:${entry.clickToLocalPersistMs ?? '-'}ms w:${entry.waitInQueueMs ?? '-'}ms p:${entry.processingMs ?? '-'}ms conf:${entry.totalConfMs ?? entry.clickToBackendConfirmMs ?? '-'}ms p_flush:${entry.pFlushMs ?? '-'} p_prepare:${entry.pPrepareMs ?? '-'} p_request:${entry.pRequestMs ?? '-'} p_backend:${entry.pBackendMs ?? '-'} p_apply_snapshot:${entry.pApplySnapshotMs ?? '-'} p_reconcile:${entry.pReconcileMs ?? '-'} p_persist:${entry.pPersistMs ?? '-'} p_ops:${entry.pOpsMs ?? '-'} p_finalize:${entry.pFinalizeMs ?? '-'} f:${breakdown?.flushPendingDraftAddsMs ?? '-'} fi:${breakdown?.finalizeMs ?? '-'} cf:${breakdown?.confirmMs ?? '-'} sn:${breakdown?.snapshotApplyMs ?? '-'} sr:${breakdown?.stateRefreshMs ?? '-'} rv:${breakdown?.recoveryMs ?? '-'} rb:${breakdown?.retryBackoffMs ?? '-'} fr:${breakdown?.frontendReconcileMs ?? '-'} oth:${breakdown?.residualMs ?? '-'} c_cmd:${entry.confirmCommandInvokeMs ?? '-'} c_lock:${entry.confirmDraftLockWaitMs ?? '-'} c_gq:${entry.confirmGlobalQueueWaitMs ?? '-'} c_gqd:${entry.confirmGlobalQueueDepthAtEnqueue ?? '-'} c_sched:${entry.confirmSchedulerWaitMs ?? '-'} c_apply:${entry.confirmPostCommandApplyMs ?? '-'} c_ops:${entry.confirmOpsMs ?? '-'} c_fail:${entry.confirmFailureHandlingMs ?? '-'} c_oth:${entry.confirmOtherMs ?? '-'} sr_empty:${entry.stateRefreshEmptyDraftCheckMs ?? '-'} sr_flush:${entry.stateRefreshAfterFlushMs ?? '-'} sr_final:${entry.stateRefreshBeforeFinalizeMs ?? '-'} sr_oth:${entry.stateRefreshOtherMs ?? '-'} f_lock:${entry.flushLockWaitMs ?? '-'} f_read:${entry.flushPendingReadMs ?? '-'} f_snap:${entry.flushSnapshotPrepareMs ?? '-'} f_vis:${entry.flushVisibleRunMs ?? '-'} f_rec:${entry.flushRecoveryRunMs ?? '-'} f_sr:${entry.flushStateRefreshMs ?? '-'} f_sn:${entry.flushApplySnapshotMs ?? '-'} f_ps:${entry.flushOperationalPersistMs ?? '-'} f_cl:${entry.flushTerminalCleanupMs ?? '-'} f_ui:${entry.flushUiReleaseMs ?? '-'} f_post:${entry.flushPostReturnMs ?? '-'} f_oth:${entry.flushOtherMs ?? '-'} f_wait_lock_ms:${entry.flushWaitLockMs ?? '-'} f_run_ms:${entry.flushRunMs ?? '-'} f_total_ms:${entry.flushTotalMs ?? '-'} sr_request_ms:${entry.stateRefreshRequestMs ?? '-'} sr_apply_ms:${entry.stateRefreshApplyMs ?? '-'} snapshot_bytes_estimated:${entry.snapshotBytesEstimated ?? '-'} ops_send:${entry.pOpsBackendSentMs ?? '-'} ops_ack:${entry.pOpsBackendAckMs ?? '-'} ops_ui:${entry.pOpsEventStateMs ?? '-'} ops_ps:${entry.pOpsEventPersistMs ?? '-'} ops_rp:${entry.pOpsEventReportMs ?? '-'} ops_oth:${entry.pOpsOtherMs ?? '-'} r:${entry.retries} rec:${entry.hadRecovery ? '1' : '0'} rc:${entry.hadReconciliation ? '1' : '0'}`;
+                      return `${entry.draftId.slice(-8).toUpperCase()} local:${entry.clickToLocalPersistMs ?? '-'}ms w:${entry.waitInQueueMs ?? '-'}ms p:${entry.processingMs ?? '-'}ms conf:${entry.totalConfMs ?? entry.clickToBackendConfirmMs ?? '-'}ms p_flush:${entry.pFlushMs ?? '-'} p_prepare:${entry.pPrepareMs ?? '-'} p_request:${entry.pRequestMs ?? '-'} p_backend:${entry.pBackendMs ?? '-'} p_apply_snapshot:${entry.pApplySnapshotMs ?? '-'} p_reconcile:${entry.pReconcileMs ?? '-'} p_persist:${entry.pPersistMs ?? '-'} p_ops:${entry.pOpsMs ?? '-'} p_finalize:${entry.pFinalizeMs ?? '-'} f:${breakdown?.flushPendingDraftAddsMs ?? '-'} fi:${breakdown?.finalizeMs ?? '-'} cf:${breakdown?.confirmMs ?? '-'} sn:${breakdown?.snapshotApplyMs ?? '-'} sr:${breakdown?.stateRefreshMs ?? '-'} rv:${breakdown?.recoveryMs ?? '-'} rb:${breakdown?.retryBackoffMs ?? '-'} fr:${breakdown?.frontendReconcileMs ?? '-'} oth:${breakdown?.residualMs ?? '-'} c_cmd:${entry.confirmCommandInvokeMs ?? '-'} c_lock:${entry.confirmDraftLockWaitMs ?? '-'} c_gq:${entry.confirmGlobalQueueWaitMs ?? '-'} c_gqd:${entry.confirmGlobalQueueDepthAtEnqueue ?? '-'} c_sched:${entry.confirmSchedulerWaitMs ?? '-'} c_apply:${entry.confirmPostCommandApplyMs ?? '-'} c_ops:${entry.confirmOpsMs ?? '-'} c_fail:${entry.confirmFailureHandlingMs ?? '-'} c_oth:${entry.confirmOtherMs ?? '-'} sr_empty:${entry.stateRefreshEmptyDraftCheckMs ?? '-'} sr_flush:${entry.stateRefreshAfterFlushMs ?? '-'} sr_final:${entry.stateRefreshBeforeFinalizeMs ?? '-'} sr_oth:${entry.stateRefreshOtherMs ?? '-'} f_lock:${entry.flushLockWaitMs ?? '-'} f_read:${entry.flushPendingReadMs ?? '-'} f_snap:${entry.flushSnapshotPrepareMs ?? '-'} f_vis:${entry.flushVisibleRunMs ?? '-'} f_rec:${entry.flushRecoveryRunMs ?? '-'} f_sr:${entry.flushStateRefreshMs ?? '-'} f_sn:${entry.flushApplySnapshotMs ?? '-'} f_ps:${entry.flushOperationalPersistMs ?? '-'} f_cl:${entry.flushTerminalCleanupMs ?? '-'} f_ui:${entry.flushUiReleaseMs ?? '-'} f_post:${entry.flushPostReturnMs ?? '-'} f_oth:${entry.flushOtherMs ?? '-'} f_wait_lock_ms:${entry.flushWaitLockMs ?? '-'} f_run_ms:${entry.flushRunMs ?? '-'} f_total_ms:${entry.flushTotalMs ?? '-'} sr_request_ms:${entry.stateRefreshRequestMs ?? '-'} sr_apply_ms:${entry.stateRefreshApplyMs ?? '-'} snapshot_bytes_estimated:${entry.snapshotBytesEstimated ?? '-'} sr_light_request_ms:${entry.srLightRequestMs ?? '-'} sr_light_used:${entry.srLightUsed ?? '-'} sr_light_fallback:${entry.srLightFallback ?? '-'} sr_light_reason:${entry.srLightReason ?? '-'} ops_send:${entry.pOpsBackendSentMs ?? '-'} ops_ack:${entry.pOpsBackendAckMs ?? '-'} ops_ui:${entry.pOpsEventStateMs ?? '-'} ops_ps:${entry.pOpsEventPersistMs ?? '-'} ops_rp:${entry.pOpsEventReportMs ?? '-'} ops_oth:${entry.pOpsOtherMs ?? '-'} r:${entry.retries} rec:${entry.hadRecovery ? '1' : '0'} rc:${entry.hadReconciliation ? '1' : '0'}`;
                     })()}
                   </p>
                 ))}

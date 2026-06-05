@@ -38,6 +38,7 @@ interface StateCommandSyncErrorOptions {
   statusCode?: number;
   retryable?: boolean;
   cause?: unknown;
+  endpoint?: string;
 }
 
 interface RunStateCommandOptions {
@@ -49,12 +50,14 @@ interface RunStateCommandOptions {
 export class StateCommandSyncError extends Error {
   readonly statusCode?: number;
   readonly retryable: boolean;
+  readonly endpoint?: string;
 
   constructor(message: string, options: StateCommandSyncErrorOptions = {}) {
     super(message, options.cause ? { cause: options.cause } : undefined);
     this.name = 'StateCommandSyncError';
     this.statusCode = options.statusCode;
     this.retryable = options.retryable ?? false;
+    this.endpoint = options.endpoint;
   }
 }
 
@@ -231,6 +234,8 @@ const getStateCommandsApiUrl = (): string => `${getStateApiUrl()}/commands`;
 const getStateCommandsAsyncApiUrl = (): string => `${getStateCommandsApiUrl()}/async`;
 const getStateCommandJobApiUrl = (jobId: string): string =>
   `${getStateCommandsApiUrl()}/jobs/${encodeURIComponent(jobId)}`;
+const getStateDraftStatusApiUrl = (draftId: string): string =>
+  `${getStateApiUrl()}/drafts/${encodeURIComponent(draftId)}/status`;
 
 export type StateCommandAsyncJobStatus =
   | 'PENDING'
@@ -253,6 +258,18 @@ export interface StateCommandAsyncJob {
   finishedAt: string | null;
   lastError: string | null;
   resultVersion: string | null;
+}
+
+export interface SaleDraftLightStatus {
+  draftId: string;
+  exists: boolean;
+  status: SaleDraft['status'] | null;
+  lifecycle: string | null;
+  itemsCount: number | null;
+  updatedAt: string | null;
+  version: string;
+  paid: boolean;
+  terminal: boolean;
 }
 
 const isRetryableHttpStatus = (statusCode: number): boolean =>
@@ -492,6 +509,46 @@ const normalizeAsyncJobPayload = (payload: unknown): StateCommandAsyncJob => {
     finishedAt: normalizeOptionalIsoDateString(jobRaw.finishedAt),
     lastError: typeof jobRaw.lastError === 'string' ? jobRaw.lastError : null,
     resultVersion: typeof jobRaw.resultVersion === 'string' ? jobRaw.resultVersion : null,
+  };
+};
+
+const normalizeSaleDraftLightStatus = (payload: unknown): SaleDraftLightStatus => {
+  if (!isObjectRecord(payload)) {
+    throw new Error('Resposta inválida ao consultar status leve do draft.');
+  }
+
+  const draftId = typeof payload.draftId === 'string' ? payload.draftId.trim() : '';
+  if (!draftId) {
+    throw new Error('draftId ausente no status leve do draft.');
+  }
+
+  const rawStatus = typeof payload.status === 'string' ? payload.status.trim() : '';
+  const status: SaleDraft['status'] | null =
+    rawStatus === 'DRAFT' ||
+    rawStatus === 'PENDING_PAYMENT' ||
+    rawStatus === 'PAID' ||
+    rawStatus === 'CANCELLED'
+      ? rawStatus
+      : null;
+  const itemsCountRaw = Number(payload.itemsCount);
+  const itemsCount =
+    Number.isFinite(itemsCountRaw) && itemsCountRaw >= 0 ? Math.floor(itemsCountRaw) : null;
+  const updatedAt =
+    typeof payload.updatedAt === 'string' && !Number.isNaN(Date.parse(payload.updatedAt))
+      ? new Date(Date.parse(payload.updatedAt)).toISOString()
+      : null;
+  const version = typeof payload.version === 'string' ? payload.version.trim() : '';
+
+  return {
+    draftId,
+    exists: payload.exists === true,
+    status,
+    lifecycle: typeof payload.lifecycle === 'string' ? payload.lifecycle.trim() || null : null,
+    itemsCount,
+    updatedAt,
+    version,
+    paid: payload.paid === true || status === 'PAID',
+    terminal: payload.terminal === true || status === 'PAID' || status === 'CANCELLED',
   };
 };
 
@@ -1170,6 +1227,104 @@ export const getStateCommandAsyncJob = async (jobId: string): Promise<StateComma
 
   throw new StateCommandSyncError('Não foi possível consultar o job assíncrono.', {
     retryable: true,
+  });
+};
+
+export const fetchSaleDraftLightStatus = async (
+  draftId: string
+): Promise<SaleDraftLightStatus> => {
+  const normalizedDraftId = draftId.trim();
+  if (!normalizedDraftId) {
+    throw new StateCommandSyncError('Draft inválido para consulta leve.', {
+      statusCode: 400,
+      retryable: false,
+    });
+  }
+
+  const startedAtMs = Date.now();
+  const endpoint = getStateDraftStatusApiUrl(normalizedDraftId);
+  for (let attempt = 0; attempt < COMMAND_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      assertApiAvailability();
+    } catch (error) {
+      const syncError = asRetryableNetworkError(error);
+      if (
+        syncError.retryable &&
+        (await waitBeforeRetry(startedAtMs, attempt, getRetryDelayMs(attempt)))
+      ) {
+        continue;
+      }
+      throw syncError;
+    }
+
+    let response: Response;
+    try {
+      response = await fetchWithTimeout(endpoint, {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+        },
+      });
+    } catch (error) {
+      const baseError = asRetryableNetworkError(error);
+      const syncError = new StateCommandSyncError(baseError.message, {
+        statusCode: baseError.statusCode,
+        retryable: baseError.retryable,
+        cause: error,
+        endpoint,
+      });
+      if (
+        syncError.retryable &&
+        (await waitBeforeRetry(startedAtMs, attempt, getRetryDelayMs(attempt)))
+      ) {
+        continue;
+      }
+      throw syncError;
+    }
+
+    if (response.ok) {
+      clearApiUnavailableFailureState();
+      const refreshedContext = tryReadContextFromResponse(response);
+      if (refreshedContext) {
+        writeContext = refreshedContext;
+      }
+      try {
+        const payload = (await response.json()) as unknown;
+        return normalizeSaleDraftLightStatus(payload);
+      } catch (error) {
+        throw new StateCommandSyncError(
+          error instanceof Error ? `Parse status leve: ${error.message}` : 'Parse status leve.',
+          {
+            statusCode: response.status,
+            retryable: false,
+            cause: error,
+            endpoint,
+          }
+        );
+      }
+    }
+
+    const apiError = await toApiError(response);
+    if (response.status === 503 || isDatabaseUnavailableMessage(apiError.message)) {
+      registerApiUnavailableFailure();
+    }
+    if (
+      apiError.retryable &&
+      (await waitBeforeRetry(startedAtMs, attempt, getRetryDelayMs(attempt)))
+    ) {
+      continue;
+    }
+    throw new StateCommandSyncError(apiError.message, {
+      statusCode: apiError.statusCode,
+      retryable: apiError.retryable,
+      cause: apiError,
+      endpoint,
+    });
+  }
+
+  throw new StateCommandSyncError('Não foi possível consultar status leve do draft.', {
+    retryable: true,
+    endpoint,
   });
 };
 

@@ -84,6 +84,16 @@ export const stateController = {
     res.status(200).json(snapshot.state);
   },
 
+  getDraftStatus: async (req: Request, res: Response) => {
+    const draftId = req.params.draftId?.trim() || '';
+    if (!draftId) {
+      throw new HttpError(400, 'draftId inválido.');
+    }
+    const status = await stateService.getSaleDraftLightStatus(draftId);
+    setStateHeaders(req, res, status.version);
+    res.status(200).json(status);
+  },
+
   putState: async (req: Request, res: Response) => {
     const expectedVersion = readIfMatchVersion(req);
     if (req.stateTokenVersion && req.stateTokenVersion !== expectedVersion) {

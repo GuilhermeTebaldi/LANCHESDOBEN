@@ -9,6 +9,7 @@ export const appStateRouter = Router();
 
 appStateRouter.head('/', stateReadAuth, asyncHandler(stateController.headState));
 appStateRouter.get('/', stateReadAuth, asyncHandler(stateController.getState));
+appStateRouter.get('/drafts/:draftId/status', stateReadAuth, asyncHandler(stateController.getDraftStatus));
 appStateRouter.put('/', stateWriteAuth, asyncHandler(stateController.putState));
 appStateRouter.delete('/', stateWriteAuth, asyncHandler(stateController.clearState));
 appStateRouter.post('/commands', stateWriteAuth, asyncHandler(stateController.runCommand));
