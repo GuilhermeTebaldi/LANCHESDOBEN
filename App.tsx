@@ -336,6 +336,12 @@ interface PaymentFlowTelemetryEntry {
   flushOperationalPersistMs: number;
   flushUiReleaseMs: number;
   flushPostReturnMs: number;
+  flushWaitLockMs: number;
+  flushRunMs: number;
+  flushTotalMs: number;
+  stateRefreshRequestMs: number;
+  stateRefreshApplyMs: number;
+  snapshotBytesEstimated: number;
   confirmCommandInvokeMs: number;
   confirmDraftLockWaitMs: number;
   confirmGlobalQueueWaitMs: number;
@@ -393,6 +399,12 @@ interface PaymentFlowTelemetryRecord {
   flushUiReleaseMs: number | null;
   flushPostReturnMs: number | null;
   flushOtherMs: number | null;
+  flushWaitLockMs: number | null;
+  flushRunMs: number | null;
+  flushTotalMs: number | null;
+  stateRefreshRequestMs: number | null;
+  stateRefreshApplyMs: number | null;
+  snapshotBytesEstimated: number | null;
   confirmCommandInvokeMs: number | null;
   confirmDraftLockWaitMs: number | null;
   confirmGlobalQueueWaitMs: number | null;
@@ -2346,6 +2358,12 @@ const normalizePaymentFlowTelemetryRecord = (
   const flushUiReleaseRaw = Number(source.flushUiReleaseMs);
   const flushPostReturnRaw = Number(source.flushPostReturnMs);
   const flushOtherRaw = Number(source.flushOtherMs);
+  const flushWaitLockRaw = Number(source.flushWaitLockMs);
+  const flushRunRaw = Number(source.flushRunMs);
+  const flushTotalRaw = Number(source.flushTotalMs);
+  const stateRefreshRequestRaw = Number(source.stateRefreshRequestMs);
+  const stateRefreshApplyRaw = Number(source.stateRefreshApplyMs);
+  const snapshotBytesEstimatedRaw = Number(source.snapshotBytesEstimated);
   const confirmCommandInvokeRaw = Number(source.confirmCommandInvokeMs);
   const confirmDraftLockWaitRaw = Number(source.confirmDraftLockWaitMs);
   const confirmGlobalQueueWaitRaw = Number(source.confirmGlobalQueueWaitMs);
@@ -2483,6 +2501,26 @@ const normalizePaymentFlowTelemetryRecord = (
         : null,
     flushOtherMs:
       Number.isFinite(flushOtherRaw) && flushOtherRaw >= 0 ? Math.floor(flushOtherRaw) : null,
+    flushWaitLockMs:
+      Number.isFinite(flushWaitLockRaw) && flushWaitLockRaw >= 0
+        ? Math.floor(flushWaitLockRaw)
+        : null,
+    flushRunMs:
+      Number.isFinite(flushRunRaw) && flushRunRaw >= 0 ? Math.floor(flushRunRaw) : null,
+    flushTotalMs:
+      Number.isFinite(flushTotalRaw) && flushTotalRaw >= 0 ? Math.floor(flushTotalRaw) : null,
+    stateRefreshRequestMs:
+      Number.isFinite(stateRefreshRequestRaw) && stateRefreshRequestRaw >= 0
+        ? Math.floor(stateRefreshRequestRaw)
+        : null,
+    stateRefreshApplyMs:
+      Number.isFinite(stateRefreshApplyRaw) && stateRefreshApplyRaw >= 0
+        ? Math.floor(stateRefreshApplyRaw)
+        : null,
+    snapshotBytesEstimated:
+      Number.isFinite(snapshotBytesEstimatedRaw) && snapshotBytesEstimatedRaw >= 0
+        ? Math.floor(snapshotBytesEstimatedRaw)
+        : null,
     confirmCommandInvokeMs:
       Number.isFinite(confirmCommandInvokeRaw) && confirmCommandInvokeRaw >= 0
         ? Math.floor(confirmCommandInvokeRaw)
@@ -2573,6 +2611,23 @@ const normalizePaymentFlowTelemetryHistory = (parsed: unknown): PaymentFlowTelem
     .map((entry) => normalizePaymentFlowTelemetryRecord(entry))
     .filter((entry): entry is PaymentFlowTelemetryRecord => entry !== null)
     .slice(0, 50);
+};
+
+const estimateStateSnapshotBytes = (state: AppState): number => {
+  const estimatedItems =
+    state.ingredients.length * 900 +
+    state.products.length * 1400 +
+    state.sales.length * 1200 +
+    state.stockEntries.length * 700 +
+    state.cleaningMaterials.length * 700 +
+    state.cleaningStockEntries.length * 600 +
+    state.globalSales.length * 1200 +
+    state.globalCancelledSales.length * 1200 +
+    state.globalStockEntries.length * 700 +
+    state.globalCleaningStockEntries.length * 600 +
+    state.saleDrafts.length * 1600 +
+    state.dailySalesHistory.length * 900;
+  return Math.max(0, Math.round(estimatedItems + 4096));
 };
 
 const getPaymentFlowProcessingBreakdown = (
@@ -4177,6 +4232,12 @@ const App: React.FC = () => {
         flushOperationalPersistMs: 0,
         flushUiReleaseMs: 0,
         flushPostReturnMs: 0,
+        flushWaitLockMs: 0,
+        flushRunMs: 0,
+        flushTotalMs: 0,
+        stateRefreshRequestMs: 0,
+        stateRefreshApplyMs: 0,
+        snapshotBytesEstimated: 0,
         confirmCommandInvokeMs: 0,
         confirmDraftLockWaitMs: 0,
         confirmGlobalQueueWaitMs: 0,
@@ -4271,6 +4332,12 @@ const App: React.FC = () => {
         | 'flushOperationalPersistMs'
         | 'flushUiReleaseMs'
         | 'flushPostReturnMs'
+        | 'flushWaitLockMs'
+        | 'flushRunMs'
+        | 'flushTotalMs'
+        | 'stateRefreshRequestMs'
+        | 'stateRefreshApplyMs'
+        | 'snapshotBytesEstimated'
         | 'confirmCommandInvokeMs'
         | 'confirmDraftLockWaitMs'
         | 'confirmGlobalQueueWaitMs'
@@ -4380,6 +4447,12 @@ const App: React.FC = () => {
       const flushOperationalPersistMs = Math.max(0, Math.round(current.flushOperationalPersistMs));
       const flushUiReleaseMs = Math.max(0, Math.round(current.flushUiReleaseMs));
       const flushPostReturnMs = Math.max(0, Math.round(current.flushPostReturnMs));
+      const flushWaitLockMs = Math.max(0, Math.round(current.flushWaitLockMs));
+      const flushRunMs = Math.max(0, Math.round(current.flushRunMs));
+      const flushTotalMs = Math.max(0, Math.round(current.flushTotalMs));
+      const stateRefreshRequestMs = Math.max(0, Math.round(current.stateRefreshRequestMs));
+      const stateRefreshApplyMs = Math.max(0, Math.round(current.stateRefreshApplyMs));
+      const snapshotBytesEstimated = Math.max(0, Math.round(current.snapshotBytesEstimated));
       const flushMeasuredMs =
         flushLockWaitMs +
         flushPendingReadMs +
@@ -4475,6 +4548,12 @@ const App: React.FC = () => {
         flushUiReleaseMs,
         flushPostReturnMs,
         flushOtherMs,
+        flushWaitLockMs,
+        flushRunMs,
+        flushTotalMs,
+        stateRefreshRequestMs,
+        stateRefreshApplyMs,
+        snapshotBytesEstimated,
         confirmCommandInvokeMs,
         confirmDraftLockWaitMs,
         confirmGlobalQueueWaitMs,
@@ -4541,6 +4620,12 @@ const App: React.FC = () => {
         flush_ui_release_ms: record.flushUiReleaseMs,
         flush_post_return_ms: record.flushPostReturnMs,
         flush_other_ms: record.flushOtherMs,
+        f_wait_lock_ms: record.flushWaitLockMs,
+        f_run_ms: record.flushRunMs,
+        f_total_ms: record.flushTotalMs,
+        sr_request_ms: record.stateRefreshRequestMs,
+        sr_apply_ms: record.stateRefreshApplyMs,
+        snapshot_bytes_estimated: record.snapshotBytesEstimated,
         confirm_command_invoke_ms: record.confirmCommandInvokeMs,
         confirm_draft_lock_wait_ms: record.confirmDraftLockWaitMs,
         confirm_global_queue_wait_ms: record.confirmGlobalQueueWaitMs,
@@ -4606,6 +4691,12 @@ const App: React.FC = () => {
           flush_ui_release_ms: record.flushUiReleaseMs,
           flush_post_return_ms: record.flushPostReturnMs,
           flush_other_ms: record.flushOtherMs,
+          f_wait_lock_ms: record.flushWaitLockMs,
+          f_run_ms: record.flushRunMs,
+          f_total_ms: record.flushTotalMs,
+          sr_request_ms: record.stateRefreshRequestMs,
+          sr_apply_ms: record.stateRefreshApplyMs,
+          snapshot_bytes_estimated: record.snapshotBytesEstimated,
           confirm_command_invoke_ms: record.confirmCommandInvokeMs,
           confirm_draft_lock_wait_ms: record.confirmDraftLockWaitMs,
           confirm_global_queue_wait_ms: record.confirmGlobalQueueWaitMs,
@@ -10162,6 +10253,7 @@ const App: React.FC = () => {
           recoveryPendingCount > 0;
         if (shouldFlushDraftAdds) {
           const flushPendingDraftAddsStartedAt = performance.now();
+          let flushWaitLockTotalMs = 0;
           try {
             const shouldFlushVisibleDraftAdds =
               !currentServerDraft || currentServerDraft.status === 'DRAFT' || visiblePendingCount > 0;
@@ -10182,7 +10274,14 @@ const App: React.FC = () => {
                   skipVisibleStateSync: true,
                   skipVisibleQueueHealthLog: true,
                   onLockWaitMs: (durationMs) => {
+                    flushWaitLockTotalMs += Math.max(0, durationMs);
                     recordFlushPhaseDuration('flushLockWaitMs', durationMs);
+                    markPaymentFlowTelemetryStageDuration(
+                      currentJob.draftId,
+                      currentJob.id,
+                      'flushWaitLockMs',
+                      durationMs
+                    );
                   },
                   onPhaseTiming: recordFlushInternalPhase,
                 }
@@ -10208,7 +10307,14 @@ const App: React.FC = () => {
                   skipSnapshotApply: true,
                   suppressOperationalEvents: true,
                   onLockWaitMs: (durationMs) => {
+                    flushWaitLockTotalMs += Math.max(0, durationMs);
                     recordFlushPhaseDuration('flushLockWaitMs', durationMs);
+                    markPaymentFlowTelemetryStageDuration(
+                      currentJob.draftId,
+                      currentJob.id,
+                      'flushWaitLockMs',
+                      durationMs
+                    );
                   },
                   onPhaseTiming: recordFlushInternalPhase,
                 }
@@ -10222,6 +10328,7 @@ const App: React.FC = () => {
             try {
               const stateRefreshStartedAt = performance.now();
               const refreshedStateAfterFlush = await fetchStateSnapshotControlled(currentJob.draftId);
+              const stateRefreshRequestDurationMs = performance.now() - stateRefreshStartedAt;
               const flushApplySnapshotStartedAt = performance.now();
               applySnapshotForCurrentJob(
                 refreshedStateAfterFlush,
@@ -10229,6 +10336,24 @@ const App: React.FC = () => {
               );
               const flushApplySnapshotDurationMs = performance.now() - flushApplySnapshotStartedAt;
               const flushStateRefreshDurationMs = performance.now() - stateRefreshStartedAt;
+              markPaymentFlowTelemetryStageDuration(
+                currentJob.draftId,
+                currentJob.id,
+                'stateRefreshRequestMs',
+                stateRefreshRequestDurationMs
+              );
+              markPaymentFlowTelemetryStageDuration(
+                currentJob.draftId,
+                currentJob.id,
+                'stateRefreshApplyMs',
+                flushApplySnapshotDurationMs
+              );
+              markPaymentFlowTelemetryStageDuration(
+                currentJob.draftId,
+                currentJob.id,
+                'snapshotBytesEstimated',
+                estimateStateSnapshotBytes(refreshedStateAfterFlush)
+              );
               recordStateRefreshMs(flushStateRefreshDurationMs);
               recordStateRefreshPhaseDuration('stateRefreshAfterFlushMs', flushStateRefreshDurationMs);
               hasSuccessfulStateRefreshAfterFlush = true;
@@ -13327,6 +13452,11 @@ const App: React.FC = () => {
               )}
               {latestPaymentFlowTelemetry && (
                 <p className="truncate">
+                  f_wait_lock_ms:{latestPaymentFlowTelemetry.flushWaitLockMs ?? '-'} f_run_ms:{latestPaymentFlowTelemetry.flushRunMs ?? '-'} f_total_ms:{latestPaymentFlowTelemetry.flushTotalMs ?? '-'} sr_request_ms:{latestPaymentFlowTelemetry.stateRefreshRequestMs ?? '-'} sr_apply_ms:{latestPaymentFlowTelemetry.stateRefreshApplyMs ?? '-'} snapshot_bytes_estimated:{latestPaymentFlowTelemetry.snapshotBytesEstimated ?? '-'}
+                </p>
+              )}
+              {latestPaymentFlowTelemetry && (
+                <p className="truncate">
                   c_cmd:{latestPaymentFlowTelemetry.confirmCommandInvokeMs ?? '-'} c_lock:{latestPaymentFlowTelemetry.confirmDraftLockWaitMs ?? '-'} c_gq:{latestPaymentFlowTelemetry.confirmGlobalQueueWaitMs ?? '-'} c_gqd:{latestPaymentFlowTelemetry.confirmGlobalQueueDepthAtEnqueue ?? '-'} c_sched:{latestPaymentFlowTelemetry.confirmSchedulerWaitMs ?? '-'} c_apply:{latestPaymentFlowTelemetry.confirmPostCommandApplyMs ?? '-'} c_ops:{latestPaymentFlowTelemetry.confirmOpsMs ?? '-'} c_fail:{latestPaymentFlowTelemetry.confirmFailureHandlingMs ?? '-'} c_oth:{latestPaymentFlowTelemetry.confirmOtherMs ?? '-'}
                 </p>
               )}
@@ -13445,7 +13575,7 @@ const App: React.FC = () => {
                   <p key={entry.jobId} className="truncate font-mono text-[9px] text-slate-200">
                     {(() => {
                       const breakdown = getPaymentFlowProcessingBreakdown(entry);
-                      return `${entry.draftId.slice(-8).toUpperCase()} local:${entry.clickToLocalPersistMs ?? '-'}ms w:${entry.waitInQueueMs ?? '-'}ms p:${entry.processingMs ?? '-'}ms conf:${entry.totalConfMs ?? entry.clickToBackendConfirmMs ?? '-'}ms p_flush:${entry.pFlushMs ?? '-'} p_prepare:${entry.pPrepareMs ?? '-'} p_request:${entry.pRequestMs ?? '-'} p_backend:${entry.pBackendMs ?? '-'} p_apply_snapshot:${entry.pApplySnapshotMs ?? '-'} p_reconcile:${entry.pReconcileMs ?? '-'} p_persist:${entry.pPersistMs ?? '-'} p_ops:${entry.pOpsMs ?? '-'} p_finalize:${entry.pFinalizeMs ?? '-'} f:${breakdown?.flushPendingDraftAddsMs ?? '-'} fi:${breakdown?.finalizeMs ?? '-'} cf:${breakdown?.confirmMs ?? '-'} sn:${breakdown?.snapshotApplyMs ?? '-'} sr:${breakdown?.stateRefreshMs ?? '-'} rv:${breakdown?.recoveryMs ?? '-'} rb:${breakdown?.retryBackoffMs ?? '-'} fr:${breakdown?.frontendReconcileMs ?? '-'} oth:${breakdown?.residualMs ?? '-'} c_cmd:${entry.confirmCommandInvokeMs ?? '-'} c_lock:${entry.confirmDraftLockWaitMs ?? '-'} c_gq:${entry.confirmGlobalQueueWaitMs ?? '-'} c_gqd:${entry.confirmGlobalQueueDepthAtEnqueue ?? '-'} c_sched:${entry.confirmSchedulerWaitMs ?? '-'} c_apply:${entry.confirmPostCommandApplyMs ?? '-'} c_ops:${entry.confirmOpsMs ?? '-'} c_fail:${entry.confirmFailureHandlingMs ?? '-'} c_oth:${entry.confirmOtherMs ?? '-'} sr_empty:${entry.stateRefreshEmptyDraftCheckMs ?? '-'} sr_flush:${entry.stateRefreshAfterFlushMs ?? '-'} sr_final:${entry.stateRefreshBeforeFinalizeMs ?? '-'} sr_oth:${entry.stateRefreshOtherMs ?? '-'} f_lock:${entry.flushLockWaitMs ?? '-'} f_read:${entry.flushPendingReadMs ?? '-'} f_snap:${entry.flushSnapshotPrepareMs ?? '-'} f_vis:${entry.flushVisibleRunMs ?? '-'} f_rec:${entry.flushRecoveryRunMs ?? '-'} f_sr:${entry.flushStateRefreshMs ?? '-'} f_sn:${entry.flushApplySnapshotMs ?? '-'} f_ps:${entry.flushOperationalPersistMs ?? '-'} f_cl:${entry.flushTerminalCleanupMs ?? '-'} f_ui:${entry.flushUiReleaseMs ?? '-'} f_post:${entry.flushPostReturnMs ?? '-'} f_oth:${entry.flushOtherMs ?? '-'} ops_send:${entry.pOpsBackendSentMs ?? '-'} ops_ack:${entry.pOpsBackendAckMs ?? '-'} ops_ui:${entry.pOpsEventStateMs ?? '-'} ops_ps:${entry.pOpsEventPersistMs ?? '-'} ops_rp:${entry.pOpsEventReportMs ?? '-'} ops_oth:${entry.pOpsOtherMs ?? '-'} r:${entry.retries} rec:${entry.hadRecovery ? '1' : '0'} rc:${entry.hadReconciliation ? '1' : '0'}`;
+                      return `${entry.draftId.slice(-8).toUpperCase()} local:${entry.clickToLocalPersistMs ?? '-'}ms w:${entry.waitInQueueMs ?? '-'}ms p:${entry.processingMs ?? '-'}ms conf:${entry.totalConfMs ?? entry.clickToBackendConfirmMs ?? '-'}ms p_flush:${entry.pFlushMs ?? '-'} p_prepare:${entry.pPrepareMs ?? '-'} p_request:${entry.pRequestMs ?? '-'} p_backend:${entry.pBackendMs ?? '-'} p_apply_snapshot:${entry.pApplySnapshotMs ?? '-'} p_reconcile:${entry.pReconcileMs ?? '-'} p_persist:${entry.pPersistMs ?? '-'} p_ops:${entry.pOpsMs ?? '-'} p_finalize:${entry.pFinalizeMs ?? '-'} f:${breakdown?.flushPendingDraftAddsMs ?? '-'} fi:${breakdown?.finalizeMs ?? '-'} cf:${breakdown?.confirmMs ?? '-'} sn:${breakdown?.snapshotApplyMs ?? '-'} sr:${breakdown?.stateRefreshMs ?? '-'} rv:${breakdown?.recoveryMs ?? '-'} rb:${breakdown?.retryBackoffMs ?? '-'} fr:${breakdown?.frontendReconcileMs ?? '-'} oth:${breakdown?.residualMs ?? '-'} c_cmd:${entry.confirmCommandInvokeMs ?? '-'} c_lock:${entry.confirmDraftLockWaitMs ?? '-'} c_gq:${entry.confirmGlobalQueueWaitMs ?? '-'} c_gqd:${entry.confirmGlobalQueueDepthAtEnqueue ?? '-'} c_sched:${entry.confirmSchedulerWaitMs ?? '-'} c_apply:${entry.confirmPostCommandApplyMs ?? '-'} c_ops:${entry.confirmOpsMs ?? '-'} c_fail:${entry.confirmFailureHandlingMs ?? '-'} c_oth:${entry.confirmOtherMs ?? '-'} sr_empty:${entry.stateRefreshEmptyDraftCheckMs ?? '-'} sr_flush:${entry.stateRefreshAfterFlushMs ?? '-'} sr_final:${entry.stateRefreshBeforeFinalizeMs ?? '-'} sr_oth:${entry.stateRefreshOtherMs ?? '-'} f_lock:${entry.flushLockWaitMs ?? '-'} f_read:${entry.flushPendingReadMs ?? '-'} f_snap:${entry.flushSnapshotPrepareMs ?? '-'} f_vis:${entry.flushVisibleRunMs ?? '-'} f_rec:${entry.flushRecoveryRunMs ?? '-'} f_sr:${entry.flushStateRefreshMs ?? '-'} f_sn:${entry.flushApplySnapshotMs ?? '-'} f_ps:${entry.flushOperationalPersistMs ?? '-'} f_cl:${entry.flushTerminalCleanupMs ?? '-'} f_ui:${entry.flushUiReleaseMs ?? '-'} f_post:${entry.flushPostReturnMs ?? '-'} f_oth:${entry.flushOtherMs ?? '-'} f_wait_lock_ms:${entry.flushWaitLockMs ?? '-'} f_run_ms:${entry.flushRunMs ?? '-'} f_total_ms:${entry.flushTotalMs ?? '-'} sr_request_ms:${entry.stateRefreshRequestMs ?? '-'} sr_apply_ms:${entry.stateRefreshApplyMs ?? '-'} snapshot_bytes_estimated:${entry.snapshotBytesEstimated ?? '-'} ops_send:${entry.pOpsBackendSentMs ?? '-'} ops_ack:${entry.pOpsBackendAckMs ?? '-'} ops_ui:${entry.pOpsEventStateMs ?? '-'} ops_ps:${entry.pOpsEventPersistMs ?? '-'} ops_rp:${entry.pOpsEventReportMs ?? '-'} ops_oth:${entry.pOpsOtherMs ?? '-'} r:${entry.retries} rec:${entry.hadRecovery ? '1' : '0'} rc:${entry.hadReconciliation ? '1' : '0'}`;
                     })()}
                   </p>
                 ))}

@@ -222,6 +222,14 @@ const toConfirmPaidStatePatch = (state: FrontAppState): ConfirmPaidStatePatch =>
 export interface AppStateSnapshot {
   state: FrontAppState;
   version: string;
+  diagnostics?: {
+    commandType: string;
+    readStateMs: number;
+    applyCommandMs: number;
+    persistMs: number;
+    auditMs: number;
+    stateSizeBytes: number;
+  };
 }
 
 export interface DailyBackupResult {
@@ -733,6 +741,16 @@ export class StateService {
         state: nextState,
         version: savedVersion,
         operationNow,
+        diagnostics: shouldTrackPerf
+          ? {
+              commandType: command.type,
+              readStateMs,
+              applyCommandMs,
+              persistMs,
+              auditMs,
+              stateSizeBytes: nextStateSizeBytes,
+            }
+          : undefined,
       };
     });
 
@@ -755,6 +773,7 @@ export class StateService {
     return {
       state: committed.state,
       version: committed.version,
+      diagnostics: committed.diagnostics,
     };
   }
 

@@ -1,7 +1,7 @@
 import type { Request, Response } from 'express';
 
 import { issueStateWriteToken } from '../services/state-auth.service.js';
-import { StateService } from '../services/state.service.js';
+import { AppStateSnapshot, StateService } from '../services/state.service.js';
 import { HttpError, isHttpError } from '../utils/http-error.js';
 import {
   buildStateCommandRequestMeta,
@@ -55,6 +55,20 @@ const shouldReturnHeadersOnly = (req: Request): boolean => {
   if (headerValue === 'headers-only') return true;
   const queryValue = normalizeResponseModeQueryValue(req.query.responseMode);
   return queryValue === 'headers-only';
+};
+
+const setStateCommandDiagnosticHeaders = (
+  res: Response,
+  snapshot: AppStateSnapshot,
+  commandType: string | null
+): void => {
+  const diagnostics = snapshot.diagnostics;
+  res.setHeader('X-State-Read-Ms', String(diagnostics?.readStateMs ?? 0));
+  res.setHeader('X-State-Apply-Ms', String(diagnostics?.applyCommandMs ?? 0));
+  res.setHeader('X-State-Persist-Ms', String(diagnostics?.persistMs ?? 0));
+  res.setHeader('X-State-Audit-Ms', String(diagnostics?.auditMs ?? 0));
+  res.setHeader('X-State-Size-Bytes', String(diagnostics?.stateSizeBytes ?? 0));
+  res.setHeader('X-State-Command-Type', diagnostics?.commandType ?? commandType ?? '');
 };
 
 export const stateController = {
@@ -140,6 +154,7 @@ export const stateController = {
         snapshot = await stateService.applyCommandAgainstLatest(command, req.context);
       }
       setStateHeaders(req, res, snapshot.version);
+      setStateCommandDiagnosticHeaders(res, snapshot, commandIdentifiers.commandType);
       if (shouldReturnHeadersOnly(req)) {
         setBackendProcessingHeader();
         logStateCommandIngressEvent({
