@@ -193,7 +193,6 @@ interface ConfirmPaidStatePatch {
 }
 
 interface PersistedStateRow {
-  stateJson: Prisma.JsonValue;
   updatedAt: Date;
 }
 
@@ -690,6 +689,9 @@ export class StateService {
               data: {
                 stateJson: nextState as unknown as Prisma.InputJsonValue,
               },
+              select: {
+                updatedAt: true,
+              },
             })
             : shouldPersistFinalizeDraftOnly
               ? await this.updateSaleDraftsOnlyTx(tx, nextState.saleDrafts)
@@ -698,6 +700,9 @@ export class StateService {
             data: {
               id: 1,
               stateJson: nextState as unknown as Prisma.InputJsonValue,
+            },
+            select: {
+              updatedAt: true,
             },
           });
       const persistMs = shouldTrackPerf ? Date.now() - persistStartedAt : 0;
@@ -737,7 +742,7 @@ export class StateService {
       }
 
       return {
-        stateJson: saved.stateJson as Prisma.JsonValue,
+        stateJson: nextState as unknown as Prisma.JsonValue,
         state: nextState,
         version: savedVersion,
         operationNow,
@@ -782,13 +787,13 @@ export class StateService {
     state: FrontAppState
   ): Promise<PersistedStateRow> {
     const patch = JSON.stringify(toHotStatePatch(state));
-    const rows = await tx.$queryRaw<Array<{ state_json: Prisma.JsonValue; updated_at: Date }>>(
+    const rows = await tx.$queryRaw<Array<{ updated_at: Date }>>(
       Prisma.sql`
         UPDATE app_state
         SET state_json = state_json || ${patch}::jsonb,
             updated_at = now()
         WHERE id = 1
-        RETURNING state_json, updated_at
+        RETURNING updated_at
       `
     );
 
@@ -798,7 +803,6 @@ export class StateService {
     }
 
     return {
-      stateJson: row.state_json,
       updatedAt: row.updated_at,
     };
   }
@@ -808,13 +812,13 @@ export class StateService {
     state: FrontAppState
   ): Promise<PersistedStateRow> {
     const patch = JSON.stringify(toConfirmPaidStatePatch(state));
-    const rows = await tx.$queryRaw<Array<{ state_json: Prisma.JsonValue; updated_at: Date }>>(
+    const rows = await tx.$queryRaw<Array<{ updated_at: Date }>>(
       Prisma.sql`
         UPDATE app_state
         SET state_json = state_json || ${patch}::jsonb,
             updated_at = now()
         WHERE id = 1
-        RETURNING state_json, updated_at
+        RETURNING updated_at
       `
     );
 
@@ -824,7 +828,6 @@ export class StateService {
     }
 
     return {
-      stateJson: row.state_json,
       updatedAt: row.updated_at,
     };
   }
@@ -834,7 +837,7 @@ export class StateService {
     saleDrafts: FrontAppState['saleDrafts']
   ): Promise<PersistedStateRow> {
     const patch = JSON.stringify(saleDrafts);
-    const rows = await tx.$queryRaw<Array<{ state_json: Prisma.JsonValue; updated_at: Date }>>(
+    const rows = await tx.$queryRaw<Array<{ updated_at: Date }>>(
       Prisma.sql`
         UPDATE app_state
         SET state_json = jsonb_set(
@@ -845,7 +848,7 @@ export class StateService {
             ),
             updated_at = now()
         WHERE id = 1
-        RETURNING state_json, updated_at
+        RETURNING updated_at
       `
     );
 
@@ -855,7 +858,6 @@ export class StateService {
     }
 
     return {
-      stateJson: row.state_json,
       updatedAt: row.updated_at,
     };
   }
