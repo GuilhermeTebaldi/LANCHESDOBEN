@@ -13,6 +13,30 @@ interface ProductReportsProps {
   activeBusinessDate?: string | null;
 }
 
+const toDate = (value: Date | string): Date => {
+  const parsed = value instanceof Date ? value : new Date(value);
+  return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
+};
+
+const formatBusinessDateLabel = (value: string): string => {
+  const [year, month, day] = value.split('-');
+  if (!year || !month || !day) return value;
+  return `${day}/${month}/${year}`;
+};
+
+const formatSaleDayLabel = (value: Date | string): string =>
+  toDate(value).toLocaleDateString('pt-BR', {
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+  });
+
+const formatSaleTimeLabel = (value: Date | string): string =>
+  toDate(value).toLocaleTimeString('pt-BR', {
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+
 const ProductReports: React.FC<ProductReportsProps> = ({
   sales,
   archivedSales = [],
@@ -47,18 +71,38 @@ const ProductReports: React.FC<ProductReportsProps> = ({
 
   const daySales = useMemo(() => businessDaySalesMap.get(selectedDate) || [], [businessDaySalesMap, selectedDate]);
 
+  const orderedDaySales = useMemo(
+    () => [...daySales].sort((a, b) => toDate(a.timestamp).getTime() - toDate(b.timestamp).getTime()),
+    [daySales]
+  );
+
   const productRows = useMemo(() => {
     const grouped = new Map<
       string,
       {
         name: string;
         qty: number;
+        firstTimestamp: Date | string;
+        lastTimestamp: Date | string;
       }
     >();
 
     daySales.forEach((sale) => {
       const name = (sale.productName || 'Sem nome').trim() || 'Sem nome';
-      const current = grouped.get(name) || { name, qty: 0 };
+      const current =
+        grouped.get(name) || {
+          name,
+          qty: 0,
+          firstTimestamp: sale.timestamp,
+          lastTimestamp: sale.timestamp,
+        };
+      const saleMs = toDate(sale.timestamp).getTime();
+      if (saleMs < toDate(current.firstTimestamp).getTime()) {
+        current.firstTimestamp = sale.timestamp;
+      }
+      if (saleMs > toDate(current.lastTimestamp).getTime()) {
+        current.lastTimestamp = sale.timestamp;
+      }
       current.qty += 1;
       grouped.set(name, current);
     });
@@ -68,6 +112,11 @@ const ProductReports: React.FC<ProductReportsProps> = ({
 
   const totalItemsSold = daySales.length;
   const topProduct = productRows[0] || null;
+  const firstSaleTime = orderedDaySales[0] ? formatSaleTimeLabel(orderedDaySales[0].timestamp) : '--:--';
+  const lastSaleTime = orderedDaySales[orderedDaySales.length - 1]
+    ? formatSaleTimeLabel(orderedDaySales[orderedDaySales.length - 1].timestamp)
+    : '--:--';
+  const selectedDayLabel = formatBusinessDateLabel(selectedDate);
 
   return (
     <div className="qb-product-reports p-4 sm:p-6 max-w-6xl mx-auto space-y-6">
@@ -105,7 +154,7 @@ const ProductReports: React.FC<ProductReportsProps> = ({
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <div className="bg-red-600 text-white rounded-3xl p-5 shadow-lg">
           <p className="text-[10px] font-black uppercase tracking-widest opacity-80">Total de itens vendidos</p>
           <p className="mt-1 text-4xl font-black">{totalItemsSold}</p>
@@ -114,13 +163,21 @@ const ProductReports: React.FC<ProductReportsProps> = ({
           <p className="text-[10px] font-black uppercase tracking-widest opacity-80">Produtos diferentes</p>
           <p className="mt-1 text-4xl font-black">{productRows.length}</p>
         </div>
+        <div className="bg-white border-2 border-slate-100 text-slate-900 rounded-3xl p-5 shadow-sm">
+          <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Primeira venda</p>
+          <p className="mt-1 text-3xl font-black">{firstSaleTime}</p>
+        </div>
+        <div className="bg-white border-2 border-slate-100 text-slate-900 rounded-3xl p-5 shadow-sm">
+          <p className="text-[10px] font-black uppercase tracking-widest text-slate-400">Última venda</p>
+          <p className="mt-1 text-3xl font-black">{lastSaleTime}</p>
+        </div>
       </div>
 
       <div className="bg-white border-2 border-slate-100 rounded-3xl p-4 sm:p-6 shadow-sm">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
           <h3 className="text-lg font-black uppercase tracking-tight text-slate-900">Produto mais vendido</h3>
           <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">
-            Dia {selectedDate.split('-').reverse().join('/')}
+            Dia {selectedDayLabel}
           </p>
         </div>
         {topProduct ? (
@@ -152,6 +209,7 @@ const ProductReports: React.FC<ProductReportsProps> = ({
                 <tr className="border-b border-slate-100">
                   <th className="px-2 py-2 text-[10px] font-black uppercase tracking-widest text-slate-400">#</th>
                   <th className="px-2 py-2 text-[10px] font-black uppercase tracking-widest text-slate-400">Produto</th>
+                  <th className="px-2 py-2 text-[10px] font-black uppercase tracking-widest text-slate-400">Horários</th>
                   <th className="px-2 py-2 text-[10px] font-black uppercase tracking-widest text-slate-400 text-right">Qtd</th>
                 </tr>
               </thead>
@@ -160,6 +218,9 @@ const ProductReports: React.FC<ProductReportsProps> = ({
                   <tr key={`${row.name}-${index}`}>
                     <td className="px-2 py-3 text-xs font-black text-slate-500">{index + 1}</td>
                     <td className="px-2 py-3 text-xs font-black uppercase text-slate-800">{row.name}</td>
+                    <td className="px-2 py-3 text-xs font-black text-slate-600">
+                      {formatSaleTimeLabel(row.firstTimestamp)} - {formatSaleTimeLabel(row.lastTimestamp)}
+                    </td>
                     <td className="px-2 py-3 text-xs font-black text-slate-700 text-right">{row.qty}</td>
                   </tr>
                 ))}
@@ -173,6 +234,45 @@ const ProductReports: React.FC<ProductReportsProps> = ({
           </p>
           <p className="text-lg font-black text-slate-900">{totalItemsSold}</p>
         </div>
+      </div>
+
+      <div className="bg-white border-2 border-slate-100 rounded-3xl p-4 sm:p-6 shadow-sm">
+        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2 mb-4">
+          <h3 className="text-lg font-black uppercase tracking-tight text-slate-900">Vendas do dia</h3>
+          <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">
+            Dia operacional {selectedDayLabel}
+          </p>
+        </div>
+        {orderedDaySales.length === 0 ? (
+          <div className="rounded-2xl border border-dashed border-slate-200 p-8 text-center">
+            <p className="text-xs font-black uppercase tracking-widest text-slate-400">
+              Nenhuma venda para listar nesse dia.
+            </p>
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[620px] text-left">
+              <thead>
+                <tr className="border-b border-slate-100">
+                  <th className="px-2 py-2 text-[10px] font-black uppercase tracking-widest text-slate-400">Horário</th>
+                  <th className="px-2 py-2 text-[10px] font-black uppercase tracking-widest text-slate-400">Dia</th>
+                  <th className="px-2 py-2 text-[10px] font-black uppercase tracking-widest text-slate-400">Produto</th>
+                  <th className="px-2 py-2 text-[10px] font-black uppercase tracking-widest text-slate-400 text-right">Total</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-50">
+                {orderedDaySales.map((sale) => (
+                  <tr key={sale.id}>
+                    <td className="px-2 py-3 text-xs font-black text-slate-700">{formatSaleTimeLabel(sale.timestamp)}</td>
+                    <td className="px-2 py-3 text-xs font-black text-slate-500">{formatSaleDayLabel(sale.timestamp)}</td>
+                    <td className="px-2 py-3 text-xs font-black uppercase text-slate-800">{sale.productName}</td>
+                    <td className="px-2 py-3 text-xs font-black text-slate-900 text-right">R$ {sale.total.toFixed(2)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
       </div>
     </div>
   );
