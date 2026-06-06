@@ -55,7 +55,22 @@ test('base env loads backup settings without JWT secret', async () => {
 
       assert.equal(module.env.DATABASE_URL, TEST_DATABASE_URL);
       assert.deepEqual(module.env.corsOrigins, ['https://app.example.com', 'https://admin.example.com']);
+      assert.equal(module.env.FAST_CHECKOUT_V2_ENABLED, false);
       assert.throws(() => module.getAuthEnv(), /auth/i);
+    }
+  );
+});
+
+test('base env parses fast checkout v2 flag explicitly', async () => {
+  await withPatchedEnv(
+    {
+      DATABASE_URL: TEST_DATABASE_URL,
+      FAST_CHECKOUT_V2_ENABLED: 'true',
+    },
+    async () => {
+      const module = await importFreshEnvModule();
+
+      assert.equal(module.env.FAST_CHECKOUT_V2_ENABLED, true);
     }
   );
 });

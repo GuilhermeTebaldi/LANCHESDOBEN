@@ -10,6 +10,7 @@ import { saleRouter } from './sale.routes.js';
 import { reportRouter } from './report.routes.js';
 import { auditRouter } from './audit.routes.js';
 import { errorMonitorRouter } from './error-monitor.routes.js';
+import { checkoutV2Router } from './checkout-v2.routes.js';
 
 export const apiRouter = Router();
 
@@ -23,3 +24,4 @@ apiRouter.use('/sales', saleRouter);
 apiRouter.use('/reports', reportRouter);
 apiRouter.use('/audit', auditRouter);
 apiRouter.use('/errors', errorMonitorRouter);
+apiRouter.use('/checkout', checkoutV2Router);

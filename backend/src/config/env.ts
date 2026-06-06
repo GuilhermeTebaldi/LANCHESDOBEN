@@ -48,6 +48,14 @@ const baseEnvSchema = z.object({
   STATE_COMMAND_QUEUE_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(50).default(10),
   STATE_COMMAND_QUEUE_RETRY_BASE_MS: z.coerce.number().int().min(500).max(600000).default(3000),
   STATE_COMMAND_QUEUE_RETRY_MAX_MS: z.coerce.number().int().min(5000).max(86400000).default(300000),
+  FAST_CHECKOUT_V2_ENABLED: z
+    .string()
+    .optional()
+    .transform((value) => {
+      if (!value) return false;
+      const normalized = value.trim().toLowerCase();
+      return ['1', 'true', 'on', 'yes'].includes(normalized);
+    }),
   ERROR_MONITOR_PASSWORD: z.string().min(4).default('admin1234'),
 });
 
