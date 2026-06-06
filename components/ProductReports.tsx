@@ -13,6 +13,13 @@ interface ProductReportsProps {
   activeBusinessDate?: string | null;
 }
 
+type ProductReportSortMode = 'BEST_SELLING' | 'DAY_TIME';
+
+const productReportSortLabels: Record<ProductReportSortMode, string> = {
+  BEST_SELLING: 'Mais vendidos',
+  DAY_TIME: 'Dia / horário',
+};
+
 const toDate = (value: Date | string): Date => {
   const parsed = value instanceof Date ? value : new Date(value);
   return Number.isNaN(parsed.getTime()) ? new Date() : parsed;
@@ -43,6 +50,8 @@ const ProductReports: React.FC<ProductReportsProps> = ({
   dailySalesHistory = [],
   activeBusinessDate = null,
 }) => {
+  const [isSortMenuOpen, setIsSortMenuOpen] = useState(false);
+  const [productSortMode, setProductSortMode] = useState<ProductReportSortMode>('BEST_SELLING');
   const [selectedDate, setSelectedDate] = useState<string>(() => {
     const normalizedBusinessDate = normalizeBusinessDayKey(activeBusinessDate);
     if (normalizedBusinessDate) return normalizedBusinessDate;
@@ -107,11 +116,19 @@ const ProductReports: React.FC<ProductReportsProps> = ({
       grouped.set(name, current);
     });
 
-    return [...grouped.values()].sort((a, b) => b.qty - a.qty || a.name.localeCompare(b.name));
-  }, [daySales]);
+    return [...grouped.values()].sort((a, b) => {
+      if (productSortMode === 'DAY_TIME') {
+        const firstDelta = toDate(a.firstTimestamp).getTime() - toDate(b.firstTimestamp).getTime();
+        if (firstDelta !== 0) return firstDelta;
+        return a.name.localeCompare(b.name);
+      }
+      return b.qty - a.qty || a.name.localeCompare(b.name);
+    });
+  }, [daySales, productSortMode]);
 
   const totalItemsSold = daySales.length;
-  const topProduct = productRows[0] || null;
+  const topProduct =
+    [...productRows].sort((a, b) => b.qty - a.qty || a.name.localeCompare(b.name))[0] || null;
   const firstSaleTime = orderedDaySales[0] ? formatSaleTimeLabel(orderedDaySales[0].timestamp) : '--:--';
   const lastSaleTime = orderedDaySales[orderedDaySales.length - 1]
     ? formatSaleTimeLabel(orderedDaySales[orderedDaySales.length - 1].timestamp)
@@ -195,7 +212,40 @@ const ProductReports: React.FC<ProductReportsProps> = ({
       </div>
 
       <div className="bg-white border-2 border-slate-100 rounded-3xl p-4 sm:p-6 shadow-sm">
-        <h3 className="text-lg font-black uppercase tracking-tight text-slate-900 mb-4">Ranking de produtos</h3>
+        <div className="mb-4 flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+          <h3 className="text-lg font-black uppercase tracking-tight text-slate-900">Ranking de produtos</h3>
+          <div className="relative self-start sm:self-auto">
+            <button
+              type="button"
+              onClick={() => setIsSortMenuOpen((current) => !current)}
+              className="qb-btn-touch h-9 rounded-xl border border-slate-200 bg-white px-3 text-[10px] font-black uppercase tracking-widest text-slate-700 shadow-sm hover:border-red-300 hover:text-red-600 transition-colors"
+              aria-expanded={isSortMenuOpen}
+            >
+              Ordenar por
+            </button>
+            {isSortMenuOpen && (
+              <div className="absolute right-0 top-11 z-10 w-44 rounded-2xl border border-slate-200 bg-white p-2 shadow-xl">
+                {(['BEST_SELLING', 'DAY_TIME'] as ProductReportSortMode[]).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => {
+                      setProductSortMode(mode);
+                      setIsSortMenuOpen(false);
+                    }}
+                    className={`qb-btn-touch w-full rounded-xl px-3 py-2 text-left text-[10px] font-black uppercase tracking-widest transition-colors ${
+                      productSortMode === mode
+                        ? 'bg-red-600 text-white'
+                        : 'text-slate-600 hover:bg-slate-100'
+                    }`}
+                  >
+                    {productReportSortLabels[mode]}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
         {productRows.length === 0 ? (
           <div className="rounded-2xl border border-dashed border-slate-200 p-8 text-center">
             <p className="text-xs font-black uppercase tracking-widest text-slate-400">

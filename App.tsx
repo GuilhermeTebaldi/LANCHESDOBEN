@@ -60,6 +60,7 @@ import {
 } from './utils/recipe';
 import { groupSalesByBusinessDay } from './utils/businessDay';
 import {
+  buildReceiptPrintHashPayload,
   consumeReceiptPrintPayload,
   removeReceiptPrintPayload,
   saveReceiptPrintPayload,
@@ -11740,17 +11741,25 @@ const App: React.FC = () => {
       receiptId: string,
       options: {
         autoPrint?: boolean;
+        payload?: ReceiptPrintPayload | null;
       } = {}
     ): boolean => {
       if (typeof window === 'undefined') return false;
       const normalizedId = receiptId.trim();
       if (!normalizedId) return false;
+      const routePath = buildReceiptPrintRoutePath(normalizedId, {
+        autoPrint: options.autoPrint,
+      });
+      const hashPayload = options.payload ? buildReceiptPrintHashPayload(options.payload) : '';
+      const targetPath =
+        hashPayload && hashPayload.length <= 16000 ? `${routePath}#${hashPayload}` : routePath;
       const printWindow = window.open(
-        buildReceiptPrintRoutePath(normalizedId, {
-          autoPrint: options.autoPrint,
-        }),
+        targetPath,
         '_blank'
       );
+      if (printWindow && options.payload) {
+        setReceiptPrintPayloadOnWindow(printWindow, options.payload);
+      }
       return Boolean(printWindow);
     },
     []
@@ -11864,14 +11873,21 @@ const App: React.FC = () => {
       receiptId: string,
       options: {
         autoPrint?: boolean;
+        payload?: ReceiptPrintPayload | null;
       } = {}
     ): boolean => {
       const normalizedId = receiptId.trim();
       if (!normalizedId) return false;
-      const targetPath = buildReceiptPrintRoutePath(normalizedId, {
+      const routePath = buildReceiptPrintRoutePath(normalizedId, {
         autoPrint: options.autoPrint,
       });
+      const hashPayload = options.payload ? buildReceiptPrintHashPayload(options.payload) : '';
+      const targetPath =
+        hashPayload && hashPayload.length <= 16000 ? `${routePath}#${hashPayload}` : routePath;
       if (printWindow && !printWindow.closed) {
+        if (options.payload) {
+          setReceiptPrintPayloadOnWindow(printWindow, options.payload);
+        }
         try {
           printWindow.location.href = targetPath;
           return true;
@@ -12218,6 +12234,7 @@ const App: React.FC = () => {
         const openBrowserReceiptPrint = () => {
           const openedPrintWindow = navigatePreparedReceiptWindow(preparedPrintWindow, receiptPrintId, {
             autoPrint: false,
+            payload: receiptPayload,
           });
           if (!openedPrintWindow) {
             if (receiptPayload) {
@@ -12574,8 +12591,10 @@ const App: React.FC = () => {
     }
 
     const normalizedPrintModeSettings = normalizeReceiptPrintModeSettings(receiptPrintModeSettings);
+    let secondCopyPayload: ReceiptPrintPayload | null = null;
     if (normalizedPrintModeSettings.mode === 'WINDOWS_AGENT') {
       const payload = consumeReceiptPrintPayload(receiptId);
+      secondCopyPayload = payload;
       if (payload) {
         const localPrintResult = await printReceiptViaLocalAgent(
           normalizedPrintModeSettings,
@@ -12612,7 +12631,9 @@ const App: React.FC = () => {
     }
 
     armPrintReturnFocusGuard();
-    const opened = openReceiptPrintWindow(receiptId);
+    const opened = openReceiptPrintWindow(receiptId, {
+      payload: secondCopyPayload,
+    });
     if (!opened) {
       showNotification('Não foi possível abrir a tela de impressão. Verifique o bloqueio de pop-up.');
     }

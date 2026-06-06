@@ -1,6 +1,7 @@
 const RECEIPT_PRINT_PAYLOAD_KEY_PREFIX = 'qb_receipt_print_payload_v1:';
 const RECEIPT_PRINT_PAYLOAD_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 const RECEIPT_PRINT_WINDOW_NAME_PREFIX = 'qb_receipt_print_payload_window_v1:';
+const RECEIPT_PRINT_HASH_PARAM = 'rcp';
 
 export interface ReceiptPrintPayloadLine {
   id: string;
@@ -287,6 +288,18 @@ const decodeWindowNamePayload = (windowName: string): ReceiptPrintPayload | null
   }
 };
 
+const encodePayload = (payload: ReceiptPrintPayload): string =>
+  encodeURIComponent(JSON.stringify(payload));
+
+const decodePayload = (encodedPayload: string): ReceiptPrintPayload | null => {
+  if (!encodedPayload) return null;
+  try {
+    return normalizePayload(JSON.parse(decodeURIComponent(encodedPayload)));
+  } catch {
+    return null;
+  }
+};
+
 export const saveReceiptPrintPayload = (
   input: ReceiptPrintPayloadInput
 ): ReceiptPrintPayload | null => {
@@ -333,7 +346,15 @@ export const consumeReceiptPrintPayload = (receiptId: string): ReceiptPrintPaylo
     return fromWindowName;
   }
 
-  return null;
+  const hashRaw = window.location.hash.startsWith('#')
+    ? window.location.hash.slice(1)
+    : window.location.hash;
+  const hashParams = new URLSearchParams(hashRaw);
+  const hashPayloadEncoded = hashParams.get(RECEIPT_PRINT_HASH_PARAM);
+  if (!hashPayloadEncoded) return null;
+  const fromHash = decodePayload(hashPayloadEncoded);
+  if (!fromHash || fromHash.id !== normalizedId) return null;
+  return fromHash;
 };
 
 export const removeReceiptPrintPayload = (receiptId: string): void => {
@@ -359,3 +380,6 @@ export const setReceiptPrintPayloadOnWindow = (
     // ignore window name write failures
   }
 };
+
+export const buildReceiptPrintHashPayload = (payload: ReceiptPrintPayload): string =>
+  `${RECEIPT_PRINT_HASH_PARAM}=${encodePayload(payload)}`;
