@@ -84,6 +84,14 @@ enum AppStateBackupKind {
   @@map("app_state_backup_kind")
 }
 
+enum CheckoutV2ConfirmationStatus {
+  RESERVED
+  CONFIRMED
+  FAILED
+
+  @@map("checkout_v2_confirmation_status")
+}
+
 model User {
   id           String   @id @default(uuid()) @db.Uuid
   email        String   @unique @db.VarChar(255)
@@ -435,4 +443,20 @@ model StateCommandJob {
   @@index([lockedAt], map: "state_command_jobs_locked_at_idx")
   @@index([commandType, createdAt], map: "state_command_jobs_type_created_idx")
   @@map("state_command_jobs")
+}
+
+model CheckoutV2Confirmation {
+  id          String   @id @default(uuid()) @db.Uuid
+  draftId     String   @unique @map("draft_id") @db.VarChar(120)
+  commandId   String?  @unique @map("command_id") @db.VarChar(120)
+  saleId      String?  @map("sale_id") @db.Uuid
+  status      CheckoutV2ConfirmationStatus @default(RESERVED)
+  payloadHash String   @map("payload_hash") @db.VarChar(128)
+  errorCode   String?  @map("error_code") @db.VarChar(120)
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@index([status, createdAt], map: "checkout_v2_confirmations_status_created_idx")
+  @@index([saleId], map: "checkout_v2_confirmations_sale_id_idx")
+  @@map("checkout_v2_confirmations")
 }
