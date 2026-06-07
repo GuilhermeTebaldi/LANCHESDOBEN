@@ -528,6 +528,7 @@ const PrintReceipt: React.FC<PrintReceiptProps> = ({ receiptId }) => {
     printTimerRef.current = window.setTimeout(() => {
       printTimerRef.current = null;
       try {
+        window.focus();
         window.print();
       } catch {
         hasTriggeredPrintRef.current = false;
@@ -843,6 +844,7 @@ const PrintReceipt: React.FC<PrintReceiptProps> = ({ receiptId }) => {
         <button
           type="button"
           onClick={() => {
+            window.focus();
             window.print();
           }}
         >

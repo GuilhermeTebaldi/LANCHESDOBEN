@@ -68,6 +68,7 @@ const PrintSalesReport: React.FC<PrintSalesReportProps> = ({ payloadId }) => {
     if (hasTriggeredPrintRef.current) return;
     hasTriggeredPrintRef.current = true;
     const timer = window.setTimeout(() => {
+      window.focus();
       window.print();
     }, 180);
     return () => {

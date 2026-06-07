@@ -169,6 +169,10 @@ const writeCashPrintPresetId = (presetId: string): void => {
   }
 };
 
+const notifyPrintPopupBlocked = (): void => {
+  window.alert('Não foi possível abrir a impressão. Verifique se o navegador está bloqueando pop-ups.');
+};
+
 const getSaleOriginLabel = (origin: SaleOrigin | null | undefined): string => {
   if (origin === 'IFOOD') return 'iFood';
   if (origin === 'APP99') return '99';
@@ -1502,7 +1506,10 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
         return;
       }
       setSelectedSaleId(null);
-      printReport(reportSnapshot, salesSnapshot, deferredPrintWindow, 'SUMMARY');
+      const printed = printReport(reportSnapshot, salesSnapshot, deferredPrintWindow, 'SUMMARY');
+      if (!printed) {
+        notifyPrintPopupBlocked();
+      }
     } finally {
       setIsClosing(false);
     }
@@ -1758,7 +1765,10 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
                       </div>
                       <button
                         onClick={() => {
-                          printReport(entry, historySales, undefined, 'SUMMARY');
+                          const printed = printReport(entry, historySales, undefined, 'SUMMARY');
+                          if (!printed) {
+                            notifyPrintPopupBlocked();
+                          }
                         }}
                         className="qb-btn-touch bg-slate-900 text-white px-4 py-2 rounded-xl font-black text-[10px] uppercase tracking-widest hover:bg-black transition-colors w-full sm:w-auto sm:self-end"
                       >
@@ -1862,7 +1872,10 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
               )}
               <button
                 onClick={() => {
-                  printReport(currentDayReport, sales);
+                  const printed = printReport(currentDayReport, sales);
+                  if (!printed) {
+                    notifyPrintPopupBlocked();
+                  }
                 }}
                 className="qb-btn-touch mt-3 bg-white text-slate-900 px-4 py-2 rounded-xl font-black text-[10px] uppercase tracking-widest"
               >

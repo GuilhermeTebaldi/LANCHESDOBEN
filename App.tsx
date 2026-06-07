@@ -12233,7 +12233,7 @@ const App: React.FC = () => {
       window.setTimeout(() => {
         const openBrowserReceiptPrint = () => {
           const openedPrintWindow = navigatePreparedReceiptWindow(preparedPrintWindow, receiptPrintId, {
-            autoPrint: false,
+            autoPrint: true,
             payload: receiptPayload,
           });
           if (!openedPrintWindow) {
