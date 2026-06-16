@@ -13,6 +13,7 @@
     "lint": "tsc --noEmit -p tsconfig.json",
     "test": "node --test --import tsx src/**/*.test.ts",
     "backup:run": "tsx src/scripts/run-state-backup.ts",
+    "catalog:sync:app-state": "tsx src/scripts/sync-catalog-from-app-state.ts",
     "prisma:generate": "prisma generate",
     "prisma:migrate:dev": "prisma migrate dev",
     "prisma:migrate:deploy": "prisma migrate deploy",
