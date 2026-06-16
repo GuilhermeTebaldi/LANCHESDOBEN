@@ -21,19 +21,19 @@ import {
 } from './sale-refund.utils.js';
 import { SessionService } from './session.service.js';
 
-interface RecipeItemInput {
+export interface RecipeItemInput {
   ingredientId: string;
   quantity: number;
 }
 
-interface SaleCreateItemInput {
+export interface SaleCreateItemInput {
   productId: string;
   quantity: number;
   priceOverride?: number;
   recipeOverride?: RecipeItemInput[];
 }
 
-interface SaleCreateInput {
+export interface SaleCreateInput {
   externalId?: string;
   sessionId?: string;
   items: SaleCreateItemInput[];

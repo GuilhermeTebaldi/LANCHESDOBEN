@@ -34,6 +34,11 @@ export const checkoutV2Controller = {
       return;
     }
 
+    if (result.code === 'FAST_CHECKOUT_V2_CONFIRMED') {
+      res.status(result.reused ? 200 : 201).json(result);
+      return;
+    }
+
     throw new HttpError(500, 'Resposta inesperada do checkout v2.');
   },
 };

@@ -56,6 +56,14 @@ const baseEnvSchema = z.object({
       const normalized = value.trim().toLowerCase();
       return ['1', 'true', 'on', 'yes'].includes(normalized);
     }),
+  FAST_CHECKOUT_V2_CREATE_SALE_ENABLED: z
+    .string()
+    .optional()
+    .transform((value) => {
+      if (!value) return false;
+      const normalized = value.trim().toLowerCase();
+      return ['1', 'true', 'on', 'yes'].includes(normalized);
+    }),
   ERROR_MONITOR_PASSWORD: z.string().min(4).default('admin1234'),
 });
 
