@@ -5,6 +5,7 @@ import {
   CashRegisterExpenseDetail,
   DailySalesHistoryEntry,
   Ingredient,
+  Product,
   Sale,
   SaleOrigin,
   StockEntry,
@@ -24,6 +25,7 @@ import {
 interface SalesSummaryProps {
   sales: Sale[];
   archivedSales?: Sale[];
+  products: Product[];
   allIngredients: Ingredient[];
   stockEntries: StockEntry[];
   ignoreStockCosts?: boolean;
@@ -226,6 +228,23 @@ const countOrders = (sales: Sale[]): number => {
     keys.add(buildOrderGroupKey(sale, index));
   });
   return keys.size;
+};
+
+const getSaleItemQuantity = (sale: Sale, productById?: Map<string, Product>): number => {
+  const quantity = Number(sale.quantity);
+  if (Number.isFinite(quantity) && quantity > 0) return Math.max(1, Math.round(quantity));
+
+  const product = productById?.get(sale.productId);
+  const basePrice = Number(sale.basePrice);
+  const unitPrice = Number(product?.price);
+  if (Number.isFinite(basePrice) && Number.isFinite(unitPrice) && unitPrice > 0) {
+    const inferredQuantity = Math.round(basePrice / unitPrice);
+    if (inferredQuantity > 0 && Math.abs(basePrice - inferredQuantity * unitPrice) <= 0.05) {
+      return inferredQuantity;
+    }
+  }
+
+  return 1;
 };
 
 const formatCurrency = (value: number): string => `R$ ${value.toFixed(2)}`;
@@ -593,6 +612,7 @@ const summarizePaymentMethods = (
 const SalesSummary: React.FC<SalesSummaryProps> = ({
   sales,
   archivedSales = [],
+  products,
   allIngredients,
   stockEntries,
   ignoreStockCosts = false,
@@ -668,24 +688,29 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
     return normalized ? formatBusinessDayLabel(normalized) : null;
   }, [activeBusinessDate]);
   const hasActiveBusinessDay = Boolean(normalizeBusinessDayKey(activeBusinessDate));
+  const productById = useMemo(
+    () => new Map(products.map((product): [string, Product] => [product.id, product])),
+    [products]
+  );
 
   const productSalesMap = useMemo(
     () =>
       sales.reduce((acc: Record<string, number>, sale: Sale) => {
-        acc[sale.productName] = (acc[sale.productName] || 0) + 1;
+        acc[sale.productName] =
+          (acc[sale.productName] || 0) + getSaleItemQuantity(sale, productById);
         return acc;
       }, {} as Record<string, number>),
-    [sales]
+    [productById, sales]
   );
 
   const chartData = useMemo(
     () =>
       Object.entries(productSalesMap)
-        .map(([name, value]): { name: string; vendas: number } => ({
+        .map(([name, value]): { name: string; quantidade: number } => ({
           name,
-          vendas: value as number,
+          quantidade: value as number,
         }))
-        .sort((a, b) => b.vendas - a.vendas),
+        .sort((a, b) => b.quantidade - a.quantidade),
     [productSalesMap]
   );
 
@@ -1075,7 +1100,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
           if (!acc[key]) {
             acc[key] = { qty: 0, revenue: 0, cost: 0 };
           }
-          acc[key].qty += 1;
+          acc[key].qty += getSaleItemQuantity(sale, productById);
           acc[key].revenue += Number(sale.total) || 0;
           acc[key].cost += resolveSaleCost(sale);
           return acc;
@@ -1339,6 +1364,27 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
       white-space: pre;
       letter-spacing: 0;
     }
+    .actions {
+      display: flex;
+      gap: 8px;
+      margin: 14px 0;
+      padding: 0 8px;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    .actions button {
+      border: 0;
+      border-radius: 10px;
+      background: #111827;
+      color: #fff;
+      font-size: 13px;
+      font-weight: 800;
+      padding: 10px 14px;
+      cursor: pointer;
+    }
+    .actions button.secondary {
+      background: #e5e7eb;
+      color: #111827;
+    }
     @page {
       size: ${pageWidthMm}mm ${pageHeightMm ? `${pageHeightMm}mm` : 'auto'};
       margin: 0;
@@ -1350,6 +1396,9 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
       }
     }
     @media print {
+      .no-print {
+        display: none !important;
+      }
       html, body {
         width: ${paperWidthMm}mm;
         max-width: ${paperWidthMm}mm;
@@ -1361,20 +1410,44 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
   <div class="report">
     <pre>${escapeHtml(reportLines.join('\n'))}</pre>
   </div>
+  <div class="actions no-print">
+    <button type="button" onclick="window.focus(); window.print();">Imprimir</button>
+    <button type="button" class="secondary" onclick="window.close();">Fechar</button>
+  </div>
+  <script>
+    (function () {
+      var timers = [];
+      function clearTimers() {
+        while (timers.length) window.clearTimeout(timers.pop());
+      }
+      function printNow() {
+        try {
+          window.focus();
+          window.print();
+        } catch (error) {}
+      }
+      window.onafterprint = function () {
+        clearTimers();
+        try { window.close(); } catch (error) {}
+      };
+      window.requestAnimationFrame(function () {
+        timers.push(window.setTimeout(printNow, 0));
+      });
+      [80, 350, 900].forEach(function (delay) {
+        timers.push(window.setTimeout(printNow, delay));
+      });
+    })();
+  </script>
 </body>
 </html>`;
 
       printWindow.document.open();
       printWindow.document.write(html);
       printWindow.document.close();
-      window.setTimeout(() => {
-        if (printWindow.closed) return;
-        printWindow.focus();
-        printWindow.print();
-      }, 120);
       return true;
     },
     [
+      productById,
       resolveReportProfit,
       resolveReportPurchases,
       resolveSaleCost,
@@ -2047,7 +2120,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
 
           <div className="qb-sales-main grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
             <div className="qb-sales-chart-card bg-white p-6 rounded-3xl border-2 border-slate-100 shadow-sm">
-              <h3 className="text-lg font-black text-slate-800 mb-6 uppercase tracking-tight">Vendas por Produto</h3>
+              <h3 className="text-lg font-black text-slate-800 mb-6 uppercase tracking-tight">Quantidade por Produto</h3>
               <div className="h-[300px] w-full">
                 <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={chartData} layout="vertical" margin={{ left: 20 }}>
@@ -2069,7 +2142,7 @@ const SalesSummary: React.FC<SalesSummaryProps> = ({
                         boxShadow: '0 4px 12px rgba(0,0,0,0.1)',
                       }}
                     />
-                    <Bar dataKey="vendas" radius={[0, 4, 4, 0]}>
+                    <Bar dataKey="quantidade" radius={[0, 4, 4, 0]}>
                       {chartData.map((_, index) => (
                         <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                       ))}

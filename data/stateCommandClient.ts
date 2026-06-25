@@ -65,6 +65,7 @@ export type StateCommand =
   | (BaseCommand & {
       type: 'SALE_REGISTER';
       productId: string;
+      quantity?: number;
       recipeOverride?: RecipeItem[];
       priceOverride?: number;
       clientSaleId?: string;

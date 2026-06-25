@@ -139,6 +139,7 @@ export interface Sale {
   id: string;
   productId: string;
   productName: string;
+  quantity?: number;
   timestamp: Date;
   total: number;
   totalCost: number; // Soma dos custos dos ingredientes no momento da venda

@@ -133,6 +133,7 @@ export interface FrontSale {
   id: string;
   productId: string;
   productName: string;
+  quantity?: number;
   timestamp: Date | string;
   total: number;
   totalCost: number;

@@ -1963,10 +1963,14 @@ const normalizeQueuedSale = (value: unknown): OfflineQueuedSale | null => {
   const priceOverrideRaw = Number(commandRecord.priceOverride);
   const priceOverride =
     Number.isFinite(priceOverrideRaw) && priceOverrideRaw >= 0 ? priceOverrideRaw : undefined;
+  const quantityRaw = Number(commandRecord.quantity);
+  const quantity =
+    Number.isFinite(quantityRaw) && quantityRaw > 0 ? Math.max(1, Math.round(quantityRaw)) : undefined;
 
   const command = ensureSaleCommandIdentifiers({
     type: 'SALE_REGISTER',
     productId,
+    quantity,
     recipeOverride,
     priceOverride,
     commandId: typeof commandRecord.commandId === 'string' ? commandRecord.commandId : undefined,
@@ -12140,7 +12144,16 @@ const App: React.FC = () => {
     const receiptPayload: ReceiptPrintPayload | null = receiptPayloadInput
       ? saveReceiptPrintPayload(receiptPayloadInput)
       : null;
-    let preparedPrintWindow: Window | null = null;
+    const normalizedPrintModeSettings = normalizeReceiptPrintModeSettings(receiptPrintModeSettings);
+    const shouldUseLocalPrintAgent =
+      normalizedPrintModeSettings.mode === 'WINDOWS_AGENT' && Boolean(receiptPayload);
+    let preparedPrintWindow: Window | null =
+      receiptPayload && (!shouldUseLocalPrintAgent || normalizedPrintModeSettings.fallbackToBrowser)
+        ? prepareReceiptPrintWindow()
+        : null;
+    if (receiptPayload && preparedPrintWindow) {
+      setReceiptPrintPayloadOnWindow(preparedPrintWindow, receiptPayload);
+    }
 
     const pendingItemsCount = countVisiblePendingDraftAdds(pendingDraftAddsRef.current[draftId] || []);
     const paymentClickAtMs = Date.now();
@@ -12220,15 +12233,6 @@ const App: React.FC = () => {
       });
 
       const receiptPrintId = receiptPayload?.id || draftId;
-      const normalizedPrintModeSettings = normalizeReceiptPrintModeSettings(receiptPrintModeSettings);
-      const shouldUseLocalPrintAgent =
-        normalizedPrintModeSettings.mode === 'WINDOWS_AGENT' && Boolean(receiptPayload);
-      if (!shouldUseLocalPrintAgent) {
-        preparedPrintWindow = prepareReceiptPrintWindow();
-        if (receiptPayload && preparedPrintWindow) {
-          setReceiptPrintPayloadOnWindow(preparedPrintWindow, receiptPayload);
-        }
-      }
       armPrintReturnFocusGuard();
       window.setTimeout(() => {
         const openBrowserReceiptPrint = () => {
@@ -14068,6 +14072,7 @@ const App: React.FC = () => {
           <SalesSummary 
             sales={sales} 
             archivedSales={globalSales}
+            products={products}
             allIngredients={ingredients} 
             stockEntries={stockEntries}
             ignoreStockCosts={ignoreStockCosts}

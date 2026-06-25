@@ -70,6 +70,7 @@ const salePaymentSplitItemSchema = z.object({
 const saleRegisterCommandSchema = baseCommandSchema.extend({
   type: z.literal('SALE_REGISTER'),
   productId: idSchema,
+  quantity: z.coerce.number().int().positive().optional(),
   recipeOverride: z.array(recipeItemSchema).min(1).optional(),
   priceOverride: z.coerce.number().finite().min(0).optional(),
   clientSaleId: idSchema.optional(),

@@ -131,6 +131,7 @@ export const toFrontSale = (
     productName: isMultiItem
       ? `Pedido (${totalUnits} itens)`
       : firstItem?.productNameSnapshot || 'Venda sem item',
+    quantity: totalUnits,
     timestamp: sale.createdAt,
     total: displayTotal,
     totalCost: totalCostNet,

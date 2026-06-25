@@ -50,6 +50,7 @@ interface ReceiptViewModel {
 const DEFAULT_RESTAURANT_NAME = 'LANCHESDOBEN';
 const RECEIPT_LOAD_RETRY_DELAY_MS = 180;
 const RECEIPT_LOAD_MAX_WAIT_MS = 15000;
+const PRINT_ATTEMPT_DELAYS_MS = [80, 350, 900];
 
 const moneyFormatter = new Intl.NumberFormat('pt-BR', {
   style: 'currency',
@@ -438,6 +439,7 @@ const PrintReceipt: React.FC<PrintReceiptProps> = ({ receiptId }) => {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const hasTriggeredPrintRef = useRef(false);
   const printTimerRef = useRef<number | null>(null);
+  const printAttemptTimersRef = useRef<number[]>([]);
   const paperWidthMm = useMemo(() => getReceiptPaperWidthMm(), []);
   const autoPrintEnabled = useMemo(() => shouldAutoPrintReceipt(), []);
 
@@ -524,16 +526,32 @@ const PrintReceipt: React.FC<PrintReceiptProps> = ({ receiptId }) => {
       window.clearTimeout(printTimerRef.current);
       printTimerRef.current = null;
     }
+    printAttemptTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+    printAttemptTimersRef.current = [];
 
-    printTimerRef.current = window.setTimeout(() => {
-      printTimerRef.current = null;
+    const printNow = () => {
       try {
         window.focus();
         window.print();
       } catch {
         hasTriggeredPrintRef.current = false;
       }
-    }, 180);
+    };
+
+    window.requestAnimationFrame(() => {
+      printTimerRef.current = window.setTimeout(() => {
+        printTimerRef.current = null;
+        printNow();
+      }, 0);
+    });
+
+    PRINT_ATTEMPT_DELAYS_MS.forEach((delay) => {
+      const timer = window.setTimeout(() => {
+        printAttemptTimersRef.current = printAttemptTimersRef.current.filter((entry) => entry !== timer);
+        printNow();
+      }, delay);
+      printAttemptTimersRef.current.push(timer);
+    });
 
     return true;
   }, [autoPrintEnabled, receipt]);
@@ -558,6 +576,8 @@ const PrintReceipt: React.FC<PrintReceiptProps> = ({ receiptId }) => {
         window.clearTimeout(printTimerRef.current);
         printTimerRef.current = null;
       }
+      printAttemptTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+      printAttemptTimersRef.current = [];
     };
   }, [autoPrintEnabled, receipt, triggerAutoPrint]);
 
@@ -565,6 +585,12 @@ const PrintReceipt: React.FC<PrintReceiptProps> = ({ receiptId }) => {
     if (typeof window === 'undefined') return;
     const previousAfterPrint = window.onafterprint;
     window.onafterprint = (event: Event) => {
+      if (printTimerRef.current !== null) {
+        window.clearTimeout(printTimerRef.current);
+        printTimerRef.current = null;
+      }
+      printAttemptTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+      printAttemptTimersRef.current = [];
       removeReceiptPrintPayload(receiptId);
       try {
         window.close();

@@ -1252,6 +1252,7 @@ const applySaleDraftConfirmPaid = (
     basePrice: number;
     priceAdjustment: number;
     baseCost?: number;
+    quantity: number;
   };
 
   const plannedSales: PlannedDraftSale[] = [];
@@ -1314,6 +1315,7 @@ const applySaleDraftConfirmPaid = (
       basePrice,
       priceAdjustment: roundMoney(total - basePrice),
       baseCost,
+      quantity,
     });
   });
   const planningMs = Date.now() - planningStartedAt;
@@ -1389,6 +1391,7 @@ const applySaleDraftConfirmPaid = (
       id: plan.saleId,
       productId: plan.productId,
       productName: plan.productName,
+      quantity: plan.quantity,
       timestamp,
       total: plan.total,
       totalCost: plan.totalCost,
@@ -1461,13 +1464,15 @@ const applySaleRegister = (state: FrontAppState, command: Extract<StateCommandIn
   }
 
   const recipeToUse = normalizeRecipeItems(command.recipeOverride || product.recipe);
+  const quantity = Math.max(1, Math.round(Number(command.quantity) || 1));
+  const saleRecipe = scaleRecipe(recipeToUse, quantity);
   const infiniteStockMode = isInfiniteStockEnabled(state);
   const ignoreStockCostsMode = shouldIgnoreStockCosts(state);
   let totalCost = 0;
   let totals: Record<string, number> = {};
 
   if (!infiniteStockMode) {
-    const calculatedRecipeCost = calculateRecipeCost(state.ingredients, recipeToUse);
+    const calculatedRecipeCost = calculateRecipeCost(state.ingredients, saleRecipe);
     if (Object.keys(calculatedRecipeCost.totals).length === 0) {
       throw new HttpError(422, 'Receita inválida. Verifique os ingredientes.');
     }
@@ -1496,11 +1501,12 @@ const applySaleRegister = (state: FrontAppState, command: Extract<StateCommandIn
 
   const timestamp = toTimestampIso();
   const saleId = command.clientSaleId || createId('s');
-  const finalPrice = command.priceOverride !== undefined ? command.priceOverride : product.price;
+  const unitFinalPrice = command.priceOverride !== undefined ? command.priceOverride : product.price;
+  const finalPrice = roundMoney(unitFinalPrice * quantity);
   const baseCostInfo =
     ignoreStockCostsMode || infiniteStockMode
       ? null
-      : calculateRecipeCost(state.ingredients, product.recipe);
+      : calculateRecipeCost(state.ingredients, scaleRecipe(product.recipe, quantity));
   const baseCost =
     ignoreStockCostsMode || infiniteStockMode
       ? 0
@@ -1518,13 +1524,14 @@ const applySaleRegister = (state: FrontAppState, command: Extract<StateCommandIn
     id: saleId,
     productId: product.id,
     productName: product.name,
+    quantity,
     timestamp,
     total: finalPrice,
     totalCost: ignoreStockCostsMode || infiniteStockMode ? 0 : totalCost,
-    recipe: recipeToUse,
+    recipe: saleRecipe,
     stockDebited,
-    basePrice: product.price,
-    priceAdjustment: finalPrice - product.price,
+    basePrice: roundMoney(product.price * quantity),
+    priceAdjustment: roundMoney(finalPrice - product.price * quantity),
     baseCost,
     status: 'PAID',
     saleOrigin: 'LOCAL',

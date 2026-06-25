@@ -11,6 +11,8 @@ interface PrintSalesReportProps {
   payloadId: string;
 }
 
+const PRINT_ATTEMPT_DELAYS_MS = [80, 350, 900];
+
 type ParsedReportLine =
   | { kind: 'blank' }
   | { kind: 'divider' }
@@ -49,6 +51,8 @@ const PrintSalesReport: React.FC<PrintSalesReportProps> = ({ payloadId }) => {
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const hasTriggeredPrintRef = useRef(false);
   const hasRemovedPayloadRef = useRef(false);
+  const printTimerRef = useRef<number | null>(null);
+  const printAttemptTimersRef = useRef<number[]>([]);
 
   useEffect(() => {
     const loaded = consumeSalesReportPrintPayload(payloadId);
@@ -67,12 +71,38 @@ const PrintSalesReport: React.FC<PrintSalesReportProps> = ({ payloadId }) => {
     if (!payload) return;
     if (hasTriggeredPrintRef.current) return;
     hasTriggeredPrintRef.current = true;
-    const timer = window.setTimeout(() => {
-      window.focus();
-      window.print();
-    }, 180);
+
+    const printNow = () => {
+      try {
+        window.focus();
+        window.print();
+      } catch {
+        hasTriggeredPrintRef.current = false;
+      }
+    };
+
+    window.requestAnimationFrame(() => {
+      printTimerRef.current = window.setTimeout(() => {
+        printTimerRef.current = null;
+        printNow();
+      }, 0);
+    });
+
+    PRINT_ATTEMPT_DELAYS_MS.forEach((delay) => {
+      const timer = window.setTimeout(() => {
+        printAttemptTimersRef.current = printAttemptTimersRef.current.filter((entry) => entry !== timer);
+        printNow();
+      }, delay);
+      printAttemptTimersRef.current.push(timer);
+    });
+
     return () => {
-      window.clearTimeout(timer);
+      if (printTimerRef.current !== null) {
+        window.clearTimeout(printTimerRef.current);
+        printTimerRef.current = null;
+      }
+      printAttemptTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+      printAttemptTimersRef.current = [];
     };
   }, [payload]);
 
@@ -80,6 +110,12 @@ const PrintSalesReport: React.FC<PrintSalesReportProps> = ({ payloadId }) => {
     if (typeof window === 'undefined') return;
     const previousAfterPrint = window.onafterprint;
     window.onafterprint = (event: Event) => {
+      if (printTimerRef.current !== null) {
+        window.clearTimeout(printTimerRef.current);
+        printTimerRef.current = null;
+      }
+      printAttemptTimersRef.current.forEach((timer) => window.clearTimeout(timer));
+      printAttemptTimersRef.current = [];
       if (!hasRemovedPayloadRef.current) {
         removeSalesReportPrintPayload(payloadId);
         hasRemovedPayloadRef.current = true;
@@ -158,6 +194,26 @@ const PrintSalesReport: React.FC<PrintSalesReportProps> = ({ payloadId }) => {
         .report-blank {
           height: 5px;
         }
+        .report-actions {
+          display: flex;
+          gap: 8px;
+          margin: 14px 0 18px;
+          font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }
+        .report-actions button {
+          border: 0;
+          border-radius: 10px;
+          background: #111827;
+          color: #fff;
+          font-size: 13px;
+          font-weight: 800;
+          padding: 10px 14px;
+          cursor: pointer;
+        }
+        .report-actions button.secondary {
+          background: #e5e7eb;
+          color: #111827;
+        }
         @media print {
           html, body {
             -webkit-print-color-adjust: exact;
@@ -179,6 +235,9 @@ const PrintSalesReport: React.FC<PrintSalesReportProps> = ({ payloadId }) => {
           }
           .report-paper .report-strong {
             font-weight: 900 !important;
+          }
+          .no-print {
+            display: none !important;
           }
         }
       `}</style>
@@ -222,6 +281,26 @@ const PrintSalesReport: React.FC<PrintSalesReportProps> = ({ payloadId }) => {
             <p className="report-center">{errorMessage || 'Falha desconhecida.'}</p>
           </>
         )}
+      </div>
+      <div className="report-actions no-print">
+        <button
+          type="button"
+          onClick={() => {
+            window.focus();
+            window.print();
+          }}
+        >
+          Imprimir
+        </button>
+        <button
+          type="button"
+          className="secondary"
+          onClick={() => {
+            window.close();
+          }}
+        >
+          Fechar
+        </button>
       </div>
     </div>
   );
