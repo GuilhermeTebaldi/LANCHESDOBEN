@@ -552,6 +552,66 @@ const RECEIPT_PRINT_PRESETS: ReceiptPrintPreset[] = [
 ];
 const DEFAULT_RECEIPT_PRINT_PRESET_ID = 'PADRAO';
 
+const PaymentOverdueNotice = () => (
+  <section className="rounded-[28px] border-2 border-red-200 bg-white p-4 shadow-xl shadow-red-100/60 sm:p-5">
+    <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+      <div className="flex gap-3">
+        <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-red-600 text-white shadow-lg shadow-red-200">
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            width="24"
+            height="24"
+            viewBox="0 0 24 24"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="3"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            aria-hidden="true"
+          >
+            <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
+            <path d="M12 9v4" />
+            <path d="M12 17h.01" />
+          </svg>
+        </div>
+        <div>
+          <p className="text-[10px] font-black uppercase tracking-[0.2em] text-red-600">
+            Pagamento em atraso
+          </p>
+          <h2 className="mt-1 text-xl font-black uppercase tracking-tight text-slate-950 sm:text-2xl">
+            Regularizacao financeira obrigatoria
+          </h2>
+          <p className="mt-2 max-w-3xl text-sm font-bold leading-relaxed text-slate-700">
+            Consta em aberto o pagamento referente ao mes de <strong>agosto de 2026</strong>.
+            Considerando o inicio do mes de <strong>setembro de 2026</strong>, o pagamento
+            correspondente a este periodo tambem devera ser regularizado. Caso as pendencias
+            nao sejam solucionadas, o sistema sera interrompido em <strong>02/09/2026 as 16:24</strong>.
+          </p>
+        </div>
+      </div>
+
+      <div className="grid gap-2 sm:grid-cols-2 lg:min-w-[360px]">
+        <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3">
+          <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">
+            Agosto/2026
+          </p>
+          <p className="mt-1 text-sm font-black uppercase tracking-wide text-red-700">
+            Atrasado
+          </p>
+        </div>
+        <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3">
+          <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">
+            Setembro/2026
+          </p>
+          <p className="mt-1 text-sm font-black uppercase tracking-wide text-amber-700">
+            Pendente de pagamento
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+);
+
 const getReceiptPrintPresetById = (presetId: string): ReceiptPrintPreset =>
   RECEIPT_PRINT_PRESETS.find((preset) => preset.id === presetId) ||
   RECEIPT_PRINT_PRESETS.find((preset) => preset.id === DEFAULT_RECEIPT_PRINT_PRESET_ID) ||
@@ -13863,6 +13923,8 @@ const App: React.FC = () => {
       <main className="qb-main flex-1 pb-20">
         {view === ViewMode.POS && (
           <div className="qb-pos max-w-7xl mx-auto p-4 space-y-6 animate-in fade-in duration-500">
+            <PaymentOverdueNotice />
+
             <div className="qb-pos-toolbar flex flex-col md:flex-row gap-4 items-center justify-between bg-white p-4 rounded-[32px] shadow-sm border border-slate-100">
               <div className="qb-pos-categories flex bg-slate-100 p-1.5 rounded-2xl gap-1 w-full md:w-auto overflow-x-auto scrollbar-hide">
                 {categories.map(cat => (
