@@ -579,13 +579,12 @@ const PaymentOverdueNotice = () => (
             Pagamento em atraso
           </p>
           <h2 className="mt-1 text-xl font-black uppercase tracking-tight text-slate-950 sm:text-2xl">
-            Regularizacao financeira obrigatoria
+            Sistema desligado por pendencia financeira
           </h2>
           <p className="mt-2 max-w-3xl text-sm font-bold leading-relaxed text-slate-700">
-            Consta em aberto o pagamento referente ao mes de <strong>agosto de 2026</strong>.
-            Considerando o inicio do mes de <strong>setembro de 2026</strong>, o pagamento
-            correspondente a este periodo tambem devera ser regularizado. Caso as pendencias
-            nao sejam solucionadas, o sistema sera interrompido em <strong>02/09/2026 as 16:24</strong>.
+            Consta em aberto o pagamento referente aos meses de <strong>julho de 2026</strong> e
+            <strong> agosto de 2026</strong>. Em razao da ausencia de regularizacao financeira,
+            o sistema foi desligado.
           </p>
         </div>
       </div>
@@ -593,18 +592,18 @@ const PaymentOverdueNotice = () => (
       <div className="grid gap-2 sm:grid-cols-2 lg:min-w-[360px]">
         <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3">
           <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">
+            Julho/2026
+          </p>
+          <p className="mt-1 text-sm font-black uppercase tracking-wide text-red-700">
+            Nao pago
+          </p>
+        </div>
+        <div className="rounded-2xl border border-red-200 bg-red-50 px-4 py-3">
+          <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">
             Agosto/2026
           </p>
           <p className="mt-1 text-sm font-black uppercase tracking-wide text-red-700">
-            Atrasado
-          </p>
-        </div>
-        <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3">
-          <p className="text-[10px] font-black uppercase tracking-widest text-slate-500">
-            Setembro/2026
-          </p>
-          <p className="mt-1 text-sm font-black uppercase tracking-wide text-amber-700">
-            Pendente de pagamento
+            Nao pago
           </p>
         </div>
       </div>
